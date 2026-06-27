@@ -1,0 +1,47 @@
+# Build output
+build/
+*.o
+*.a
+*.so
+*.exe
+*.out
+
+# Runtime data directory
+data/
+*.log
+*.index
+*.time
+*.tags
+*.semantic
+*.compaction
+metadata.db
+
+# Local Claude Code config (per-developer; instantiate from integrations/claude-code/examples/mcp.json)
+.mcp.json
+
+# Spec-kit workflow artifacts — kept local, never published
+/specs/
+/.specify/
+/.claude/skills/
+/docs/aegisdb_project_spec.md
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+.vscode/
+.idea/
+
+# Test artifacts
+tests/**/*.bin
+core
+
+# Python (integrations/claude-code)
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+*.egg-info/
+.pytest_cache/

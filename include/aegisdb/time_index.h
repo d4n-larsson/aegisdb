@@ -1,0 +1,36 @@
+/* Temporal index for range queries (T027).
+ *
+ * Keyed by (created, id) for stable chronological ordering. Implemented as a
+ * sorted, dynamically grown array supporting O(log n) range lookup and
+ * append-friendly inserts (the common case: monotonically increasing time).
+ * This satisfies the temporal range-query contract; a full on-disk B+ tree is
+ * a future scaling optimization (see plan.md / research R-006). */
+#ifndef AEGISDB_TIME_INDEX_H
+#define AEGISDB_TIME_INDEX_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+typedef struct {
+    uint64_t created;
+    uint64_t id;
+} TimeEntry;
+
+typedef struct {
+    TimeEntry *e;
+    size_t n;
+    size_t cap;
+} TimeIndex;
+
+TimeIndex *time_index_create(void);
+void time_index_free(TimeIndex *t);
+
+int time_index_add(TimeIndex *t, uint64_t created, uint64_t id);
+void time_index_remove(TimeIndex *t, uint64_t created, uint64_t id);
+
+/* Return up to `max` ids whose created time is in [start,end], in chronological
+ * order. Allocates *out_ids (free with free()). Returns 0/-1. */
+int time_index_range(const TimeIndex *t, uint64_t start, uint64_t end,
+                     size_t max, uint64_t **out_ids, size_t *out_n);
+
+#endif /* AEGISDB_TIME_INDEX_H */

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aegis-mcp"
+version = "0.1.0"
+description = "Integrate AegisDB as persistent memory for Claude Code (MCP server + hooks)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # The MCP server entry point needs the official SDK. All core logic and the
+    # hooks run on the standard library alone, so this is only required to serve
+    # tools to Claude Code, not to test or run the hooks.
+    "mcp>=1.0",
+]
+
+[project.optional-dependencies]
+# Embedding providers are opt-in; the integration runs in `none` mode without them.
+voyage = ["voyageai>=0.2"]
+local = ["sentence-transformers>=2.2"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+aegis-mcp = "aegis_mcp.server:main"
+
+[tool.setuptools]
+packages = ["aegis_mcp"]
+
+[tool.pytest.ini_options]
+# Tests are written as stdlib unittest.TestCase, so they run under both
+# `python3 -m unittest discover` and `pytest`. The `integration` marker gates
+# tests that launch a real aegisdb process.
+markers = [
+    "integration: end-to-end tests requiring a running aegisdb binary",
+]
+testpaths = ["tests"]
