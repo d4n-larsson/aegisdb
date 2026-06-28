@@ -27,21 +27,58 @@ static int scan_cb(uint64_t offset, const uint8_t *payload, size_t len,
 }
 
 long recovery_run(AegisDB *db) {
-    ScanCtx sc = {db, 0};
-    uint64_t valid_end = 0;
-    LOG_DEBUG("recovery: scanning log %s (%llu bytes)", db->path_log,
+    /* Try the checkpoint: it maps id -> log location for everything up to its
+     * covered offset, so we can trust [0, covered) and scan only the tail. A
+     * missing, corrupt, or stale (covers more than the log holds) checkpoint
+     * falls back to a full scan from offset 0. */
+    uint64_t covered = 0, snap_next_id = 0;
+    int have_checkpoint = 0;
+    if (hash_index_load(db->hash, db->path_index, &covered, &snap_next_id) == 0) {
+        if (covered <= (uint64_t)db->log.size) {
+            have_checkpoint = 1;
+            LOG_DEBUG("recovery: loaded checkpoint (%zu entries, covers %llu of "
+                      "%llu bytes)",
+                      db->hash->count, (unsigned long long)covered,
+                      (unsigned long long)db->log.size);
+        } else {
+            LOG_WARN("recovery: checkpoint covers %llu bytes but log holds only "
+                     "%llu; ignoring it and rebuilding from the log",
+                     (unsigned long long)covered,
+                     (unsigned long long)db->log.size);
+            hash_index_free(db->hash);
+            db->hash = hash_index_create();
+            if (!db->hash) return -1;
+        }
+    }
+
+    /* Seed max_id from the checkpoint so an empty tail still yields the right
+     * next_id. */
+    ScanCtx sc = {db, have_checkpoint && snap_next_id ? snap_next_id - 1 : 0};
+    uint64_t scan_from = have_checkpoint ? covered : 0;
+    LogScanResult res = {0};
+    LOG_DEBUG("recovery: scanning log %s from %llu (%llu bytes total)",
+              db->path_log, (unsigned long long)scan_from,
               (unsigned long long)db->log.size);
-    if (log_scan(&db->log, scan_cb, &sc, &valid_end) != 0) {
+    if (log_scan(&db->log, scan_from, scan_cb, &sc, &res) != 0) {
         LOG_ERROR("recovery: log scan failed on %s", db->path_log);
         return -1;
     }
 
+    /* Corruption in the middle of the log: the bad frames were skipped and the
+     * surrounding records recovered. Surface it loudly — this is data loss. */
+    if (res.corrupt_frames > 0)
+        LOG_ERROR("recovery: skipped %zu corrupt frame(s); %s",
+                  res.corrupt_frames,
+                  res.recovered_after_hole
+                      ? "recovered records past the damage (log left intact)"
+                      : "damage was at the tail");
+
     /* Drop a torn tail left by a mid-write crash. */
-    if (valid_end < (uint64_t)db->log.size) {
+    if (res.truncate_to < (uint64_t)db->log.size) {
         LOG_WARN("truncating torn tail: %llu -> %llu bytes",
                  (unsigned long long)db->log.size,
-                 (unsigned long long)valid_end);
-        log_truncate(&db->log, valid_end);
+                 (unsigned long long)res.truncate_to);
+        log_truncate(&db->log, res.truncate_to);
     }
 
     db->next_id = sc.max_id + 1;

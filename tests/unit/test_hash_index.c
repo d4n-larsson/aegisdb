@@ -1,4 +1,6 @@
 /* Unit tests for the id -> log-location hash index, including snapshots. */
+#include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -67,15 +69,47 @@ static void test_save_load_roundtrip(void) {
     HashIndex *h = hash_index_create();
     hash_index_put(h, 10, 1000, 5, 1, 0);
     hash_index_put(h, 20, 2000, 6, 2, 1); /* tombstoned entry */
-    TEST_ASSERT_EQUAL_INT(0, hash_index_save(h, path));
+    TEST_ASSERT_EQUAL_INT(0, hash_index_save(h, path, 4096, 21));
     hash_index_free(h);
 
     HashIndex *h2 = hash_index_create();
-    TEST_ASSERT_EQUAL_INT(0, hash_index_load(h2, path));
+    uint64_t covered = 0, next_id = 0;
+    TEST_ASSERT_EQUAL_INT(0, hash_index_load(h2, path, &covered, &next_id));
+    TEST_ASSERT_EQUAL_UINT64(4096, covered);
+    TEST_ASSERT_EQUAL_UINT64(21, next_id);
     const HashEntry *e = hash_index_get(h2, 10);
     TEST_ASSERT_NOT_NULL(e);
     TEST_ASSERT_EQUAL_UINT64(1000, e->offset);
     TEST_ASSERT_EQUAL_UINT32(5, e->length);
+    TEST_ASSERT_NULL(hash_index_get(h2, 20)); /* tombstone stays deleted */
+    hash_index_free(h2);
+    remove(path);
+}
+
+/* A corrupted checkpoint must be rejected (recovery then falls back to a full
+ * log scan) rather than loading garbage offsets. */
+static void test_load_rejects_corrupt(void) {
+    char path[256];
+    tmp_path(path, sizeof(path), "hashidx_bad");
+
+    HashIndex *h = hash_index_create();
+    hash_index_put(h, 1, 16, 4, 0, 0);
+    hash_index_put(h, 2, 36, 4, 0, 0);
+    TEST_ASSERT_EQUAL_INT(0, hash_index_save(h, path, 64, 3));
+    hash_index_free(h);
+
+    /* Flip a byte in the entry region so the body CRC no longer matches. */
+    int fd = open(path, O_RDWR);
+    TEST_ASSERT_TRUE(fd >= 0);
+    uint8_t b = 0;
+    TEST_ASSERT_EQUAL_INT(1, pread(fd, &b, 1, 40)); /* inside first entry */
+    b ^= 0xFF;
+    TEST_ASSERT_EQUAL_INT(1, pwrite(fd, &b, 1, 40));
+    close(fd);
+
+    HashIndex *h2 = hash_index_create();
+    uint64_t covered = 0, next_id = 0;
+    TEST_ASSERT_EQUAL_INT(-1, hash_index_load(h2, path, &covered, &next_id));
     hash_index_free(h2);
     remove(path);
 }
@@ -86,5 +120,6 @@ int main(void) {
     RUN_TEST(test_update_overwrites);
     RUN_TEST(test_many_entries);
     RUN_TEST(test_save_load_roundtrip);
+    RUN_TEST(test_load_rejects_corrupt);
     return UNITY_END();
 }

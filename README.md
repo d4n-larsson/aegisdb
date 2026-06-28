@@ -8,7 +8,7 @@ vector search) behind a JSON-over-TCP wire protocol.
 
 ## Features
 
-- **Durable episodic memory** — append-only log with CRC32 framing and crash recovery
+- **Durable episodic memory** — append-only log with magic + CRC32 framing, corruption-resilient recovery, and legacy-log migration
 - **Semantic facts** — updateable records (latest version wins)
 - **Working memory** — volatile per-session ring buffer with TTL and promotion
 - **Retrieval** — lookup by ID, time-range search, tag search (`all`/`any`),
@@ -17,7 +17,7 @@ vector search) behind a JSON-over-TCP wire protocol.
 - **Relationships** — directed edges between records, graph traversal, and
   agent-namespace isolation
 - **Authentication** — optional bearer-token auth (constant-time check; `ping` exempt)
-- **Concurrency** — worker thread pool, batched `fsync`
+- **Concurrency** — worker thread pool; selectable `fsync` durability (`sync` / `batch` / `interval`)
 
 ## Requirements
 
@@ -106,7 +106,10 @@ The `WARN` line appears only when the server is started without
 | `--workers <n>` | `4` | Worker thread count |
 | `--max-payload <bytes>` | `1048576` | Max `data` size (1 MiB) |
 | `--embedding-dim <n>` | `384` | Expected embedding vector length |
-| `--fsync-batch <n>` | `1000` | Records between `fsync` calls |
+| `--durability <mode>` | `interval` | `sync` (fsync per write), `batch` (per `--fsync-batch` records), or `interval` (per `--fsync-interval-ms`) |
+| `--fsync-batch <n>` | `1000` | Records between `fsync` calls in `batch` mode |
+| `--fsync-interval-ms <n>` | `1000` | Flush cadence in `interval` mode (floored at the ~1s maintenance tick) |
+| `--checkpoint-sec <n>` | `60` | Index checkpoint cadence so recovery replays only the tail; `0` disables |
 | `--working-capacity <n>` | `256` | Working-memory ring buffer size |
 | `--log-level <level>` | `info` | `error`, `warn`, `info`, or `debug` (also `$AEGISDB_LOG_LEVEL`) |
 | `--auth-token <token>` | — | Accept this bearer token (repeatable) |
@@ -186,8 +189,12 @@ data/                   # Runtime data (gitignored)
 ## Crash Recovery
 
 AegisDB persists `episodic` and `semantic` records to an append-only
-`memory.log` with per-record CRC32 checksums. On startup it scans the log,
-validates checksums, and rebuilds the in-memory indexes. To verify:
+`memory.log` with per-frame header and payload CRC32 checksums. On startup it
+loads the index checkpoint (`memory.index`) and replays only the log tail written
+since — falling back to a full scan if the checkpoint is missing or corrupt —
+then rebuilds the in-memory indexes. A torn tail from a mid-write crash is
+trimmed; interior corruption is skipped frame by frame so the surrounding records
+still load. To verify: 
 
 1. Insert several records.
 2. `kill -9 <pid>` the server.

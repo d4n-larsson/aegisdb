@@ -34,4 +34,8 @@ int working_store_take(WorkingStore *ws, const char *session_id, uint64_t id,
 /* Remove all expired entries across sessions. Returns count removed. */
 size_t working_store_sweep(WorkingStore *ws, uint64_t now);
 
+/* Number of occupied slots across all sessions. May include expired entries
+ * not yet swept; it is an operational gauge, not an exact live count. */
+size_t working_store_count(const WorkingStore *ws);
+
 #endif /* AEGISDB_WORKING_BUFFER_H */

@@ -26,22 +26,66 @@ config). Public headers live in `include/aegisdb/`.
 ### The log is the source of truth
 
 All `episodic` and `semantic` records are appended to `memory.log` in the data
-directory. Each record is **CRC32 + length framed**: a header carries the payload
-length and a CRC32 over the payload, followed by the encoded record. Writes are
+directory. Each record is framed with a 16-byte header — a **magic sync marker**,
+the payload length, a **CRC32 over the payload**, and a **CRC32 over the header
+itself** — followed by the encoded record. Checksumming the header separately
+means a corrupt length is detected as a header fault distinct from a payload
+fault, and the magic lets recovery resynchronize to the next frame after damage.
+The magic also versions the format: a legacy log written by an earlier build
+(8-byte `[crc][len]` header, no magic) is detected on open and migrated in place
+to the current format (logged as `INFO … migrated N legacy frame(s)`). Writes are
 append-only — an `update` or `delete` appends a new frame rather than mutating
 prior bytes.
 
-`fsync` is batched: the log flushes every `--fsync-batch` records (default 1000),
-trading a bounded window of durability for throughput.
+Durability is governed by `--durability`:
+
+- **`sync`** — `fsync` before acknowledging every write. No acknowledged write
+  is ever lost, at the cost of one `fsync` per write.
+- **`batch`** — `fsync` once per `--fsync-batch` records (default 1000). Bounds
+  loss by *count*, but an idle server may leave the last partial batch unflushed
+  indefinitely.
+- **`interval`** (default) — the maintenance thread `fsync`s at most every
+  `--fsync-interval-ms` (default 1000) whenever writes are pending. Bounds loss
+  by *time* regardless of write rate; resolution is floored at the ~1s
+  maintenance tick.
+
+Note that `fsync` protects against power loss and OS crashes, not a plain
+process kill — the OS page cache preserves un-`fsync`'d writes across a process
+restart.
 
 ### Crash recovery
 
-On startup the server scans `memory.log` from the beginning, validating each
-frame's CRC32 and rebuilding the in-memory indexes. If the process died
-mid-append, the final frame may be torn; recovery detects this and truncates the
-log back to the last valid offset (logged as `WARN … truncating torn tail: …`),
-then reports `INFO … recovery complete: N records loaded`. Because every index is
-derived from the log, the log alone is sufficient to reconstruct full state.
+On startup the server first tries to load the **index checkpoint**
+(`memory.index`): a periodically-written map of `id → log location` that records
+the log offset it reflects (`covered`) and the id allocator. When the checkpoint
+is present and consistent (`covered ≤` the current log size), recovery trusts the
+covered prefix and scans only the log **tail** written since — so a crash replays
+only recent writes instead of the whole log. A missing, stale, or corrupt
+checkpoint (CRC-checked) falls back to a full scan from offset 0.
+
+The checkpoint is refreshed by the maintenance thread every `--checkpoint-sec`
+(default 60; `0` disables) and on clean shutdown, and is invalidated by
+compaction (which rewrites every log offset). It only carries the hash index;
+the time/tag/embedding indexes are still rebuilt by reading the live records
+(their payloads and vectors are needed anyway), so recovery is `O(live records +
+tail)` rather than `O(entire log)`.
+
+Either way, recovery validates each scanned frame's header and payload CRCs and
+rebuilds the in-memory indexes. Two failure modes are distinguished:
+
+- **Torn tail** — the process died mid-append, so the final frame is incomplete.
+  Recovery truncates the log back to the last valid offset (logged as
+  `WARN … truncating torn tail: …`). This is benign and expected.
+- **Mid-stream corruption** — a frame in the interior is damaged (e.g. silent
+  disk bit-rot). Rather than discarding the entire tail, recovery resynchronizes
+  to the next intact frame via the magic marker and recovers the records that
+  follow, logging `ERROR … skipped N corrupt frame(s)`. The damaged region is
+  left in place (it is skipped again on every boot until the next compaction
+  rewrites the log without it).
+
+Recovery then reports `INFO … recovery complete: N records loaded`. Because every
+index is derived from the log, the log alone is sufficient to reconstruct full
+state.
 
 ### Compaction
 
@@ -49,12 +93,20 @@ Updated and deleted records leave superseded frames behind. Compaction
 (`src/storage/compaction.c`) rewrites the log to retain only live records,
 reclaiming space from tombstones and stale versions.
 
+Compaction is **mostly concurrent**: it snapshots the live set under a brief read
+lock, then copies those frames into a fresh log *without holding any lock* (the
+copied region is immutable because the log is append-only, so reads and writes
+proceed during the copy). Only the final step — draining frames written while the
+copy ran, swapping the log in, and rebuilding the hash index — holds the write
+lock, and that critical section is bounded by the writes that raced compaction
+rather than by the total size of the database.
+
 ### Data directory layout
 
 ```
 <data-dir>/
-├── memory.log     # append-only, CRC32+length framed record log (source of truth)
-├── memory.index   # hash-index snapshot (id → log location)
+├── memory.log     # append-only, magic + CRC framed record log (source of truth)
+├── memory.index   # index checkpoint: id → log location + covered offset + next_id
 └── metadata.db    # persisted counters (e.g. next id)
 ```
 
@@ -128,7 +180,8 @@ deployments never set it. See the tier table in
 - A single **`pthread_rwlock_t`** (`index_lock`) guards the in-memory indexes and
   log reads: reads take the shared lock, writes take it exclusively. This is a
   simple, correct model rather than a lock-free or sharded design.
-- `fsync` is batched as described above.
+- `fsync` follows the configured `--durability` mode as described above; in
+  `interval` mode the maintenance thread drives the periodic flush.
 
 ## Authentication
 

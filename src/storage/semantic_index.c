@@ -26,6 +26,8 @@ SemanticIndex *semantic_index_create(size_t dim) {
     return s;
 }
 
+size_t semantic_index_count(const SemanticIndex *s) { return s ? s->n : 0; }
+
 void semantic_index_free(SemanticIndex *s) {
     if (!s) return;
     for (size_t i = 0; i < s->n; i++) free(s->e[i].vec);

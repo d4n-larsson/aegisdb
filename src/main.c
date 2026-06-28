@@ -41,6 +41,24 @@ int main(int argc, char **argv) {
         LOG_INFO("authentication enabled (%zu token%s configured)",
                  cfg.auth_token_count, cfg.auth_token_count == 1 ? "" : "s");
 
+    LOG_INFO("durability: %s", aegis_durability_name(cfg.durability));
+    if (cfg.durability == AEGIS_DURABILITY_BATCH && cfg.fsync_batch_size > 1)
+        LOG_WARN("durability=batch: up to %zu acknowledged write(s) may be lost "
+                 "on crash, and an idle server may leave them unflushed "
+                 "indefinitely; use --durability sync or interval to bound this",
+                 cfg.fsync_batch_size);
+    else if (cfg.durability == AEGIS_DURABILITY_INTERVAL)
+        LOG_INFO("durability=interval: log flushed every ~%llu ms; "
+                 "acknowledged writes within that window may be lost on crash",
+                 (unsigned long long)cfg.fsync_interval_ms);
+
+    if (cfg.checkpoint_sec)
+        LOG_INFO("index checkpoint every %us (recovery replays only the tail "
+                 "written since the last checkpoint)",
+                 cfg.checkpoint_sec);
+    else
+        LOG_WARN("index checkpoints disabled; recovery will full-scan the log");
+
     AegisDB db;
     if (db_open(&db, &cfg) != 0) {
         LOG_ERROR("failed to open database");
@@ -54,14 +72,20 @@ int main(int argc, char **argv) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    /* Maintenance: sweep expired working memory every 30s; compaction is
-     * opt-in via signal/age in future — disabled on the timer by default. */
+    /* Maintenance: sweep expired working memory every 30s, checkpoint the index
+     * on its cadence, and (in INTERVAL durability) flush the log on its cadence;
+     * compaction is opt-in via signal/age in future — disabled on the timer by
+     * default. */
     Compactor *maint = compaction_start(&db, 30, 0);
     if (maint)
         LOG_DEBUG("maintenance thread started (working-memory sweep every 30s)");
-    else
+    else {
         LOG_WARN("could not start maintenance thread; "
                  "expired working memory will not be swept");
+        if (cfg.durability == AEGIS_DURABILITY_INTERVAL)
+            LOG_WARN("durability=interval needs the maintenance thread; the log "
+                     "will only be flushed on shutdown");
+    }
 
     int rv = tcp_server_run(&db);
 

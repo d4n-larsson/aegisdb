@@ -22,6 +22,7 @@ typedef struct {
     SemanticIndex *sem;  /* embedding ANN (Phase 3) */
     WorkingStore *working; /* volatile sessions (Phase 4) */
 
+    uint64_t started_ms;     /* server start time (epoch ms) for uptime stats */
     uint64_t next_id;        /* monotonic id allocator for persisted records */
     pthread_mutex_t id_lock; /* guards next_id */
     pthread_rwlock_t index_lock; /* guards in-memory indexes + log reads (T051) */
@@ -45,5 +46,10 @@ uint64_t db_next_id(AegisDB *db);
 
 /* Persist server metadata checkpoint (next_id, schema version). */
 int db_save_metadata(AegisDB *db);
+
+/* Persist a hash-index checkpoint (id -> log location, covered log size, and
+ * next_id) so recovery can skip the covered prefix and replay only the tail.
+ * Thread-safe. Returns 0/-1. */
+int db_checkpoint(AegisDB *db);
 
 #endif /* AEGISDB_DB_H */

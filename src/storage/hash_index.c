@@ -1,11 +1,45 @@
 /* Open-addressing hash index: id -> log location (T012, snapshot T024). */
 #include "aegisdb/hash_index.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+#include "aegisdb/crc32.h"
+
+#define IDX_VERSION 2u
+#define IDX_HDR 36   /* "AIDX"(4) ver(4) count(8) covered(8) next_id(8) crc(4) */
+#define IDX_ENTRY 22 /* id(8) offset(8) length(4) type(1) deleted(1) */
+
+static int write_all(int fd, const uint8_t *buf, size_t n) {
+    size_t put = 0;
+    while (put < n) {
+        ssize_t w = write(fd, buf + put, n - put);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        put += (size_t)w;
+    }
+    return 0;
+}
+
+static int read_all(int fd, uint8_t *buf, size_t n) {
+    size_t got = 0;
+    while (got < n) {
+        ssize_t r = read(fd, buf + got, n - got);
+        if (r == 0) return 1; /* short file */
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        got += (size_t)r;
+    }
+    return 0;
+}
 
 #define INITIAL_CAP 1024
 #define MAX_LOAD 0.7
@@ -89,63 +123,119 @@ const HashEntry *hash_index_get(const HashIndex *h, uint64_t id) {
 
 size_t hash_index_count(const HashIndex *h) { return h->count; }
 
-/* Snapshot format: ["AIDX", u32 version=1, u64 count, then count entries of
- * (u64 id,u64 offset,u32 length,u8 type,u8 deleted)] all little-endian. */
-int hash_index_save(const HashIndex *h, const char *path) {
-    char tmp[1200];
-    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    FILE *f = fopen(tmp, "wb");
-    if (!f) return -1;
-    uint8_t hdr[16] = {'A', 'I', 'D', 'X'};
-    uint32_t ver = 1;
-    memcpy(hdr + 4, &ver, 4);
-    uint64_t cnt = h->count;
-    memcpy(hdr + 8, &cnt, 8);
-    if (fwrite(hdr, 1, 16, f) != 16) goto err;
+/* Checkpoint v2: a 36-byte header followed by `count` 22-byte entries.
+ * Header (little-endian): "AIDX", u32 version=2, u64 count, u64 covered_log_size,
+ * u64 next_id, u32 crc32(entries). */
+uint8_t *hash_index_serialize(const HashIndex *h, uint64_t covered_log_size,
+                              uint64_t next_id, size_t *out_len) {
+    size_t len = IDX_HDR + h->count * IDX_ENTRY;
+    uint8_t *buf = malloc(len ? len : 1);
+    if (!buf) return NULL;
+
+    uint8_t *p = buf + IDX_HDR;
+    uint64_t written = 0;
     for (size_t i = 0; i < h->cap; i++) {
         if (!h->buckets[i].used) continue;
-        HashEntry *e = &h->buckets[i];
-        uint8_t rec[22];
-        memcpy(rec, &e->id, 8);
-        memcpy(rec + 8, &e->offset, 8);
-        memcpy(rec + 16, &e->length, 4);
-        rec[20] = e->type;
-        rec[21] = e->deleted;
-        if (fwrite(rec, 1, 22, f) != 22) goto err;
+        const HashEntry *e = &h->buckets[i];
+        memcpy(p, &e->id, 8);
+        memcpy(p + 8, &e->offset, 8);
+        memcpy(p + 16, &e->length, 4);
+        p[20] = e->type;
+        p[21] = e->deleted;
+        p += IDX_ENTRY;
+        written++;
     }
-    if (fflush(f) != 0) goto err;
-    fclose(f);
-    if (rename(tmp, path) != 0) return -1;
-    return 0;
-err:
-    fclose(f);
-    unlink(tmp);
-    return -1;
+
+    uint32_t ver = IDX_VERSION;
+    uint32_t crc = crc32_compute(buf + IDX_HDR, (size_t)written * IDX_ENTRY);
+    memcpy(buf, "AIDX", 4);
+    memcpy(buf + 4, &ver, 4);
+    memcpy(buf + 8, &written, 8);
+    memcpy(buf + 16, &covered_log_size, 8);
+    memcpy(buf + 24, &next_id, 8);
+    memcpy(buf + 32, &crc, 4);
+    *out_len = IDX_HDR + (size_t)written * IDX_ENTRY;
+    return buf;
 }
 
-int hash_index_load(HashIndex *h, const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return -1;
-    uint8_t hdr[16];
-    if (fread(hdr, 1, 16, f) != 16 || memcmp(hdr, "AIDX", 4) != 0) {
-        fclose(f);
+int hash_index_save(const HashIndex *h, const char *path,
+                    uint64_t covered_log_size, uint64_t next_id) {
+    size_t len = 0;
+    uint8_t *buf = hash_index_serialize(h, covered_log_size, next_id, &len);
+    if (!buf) return -1;
+
+    char tmp[1200];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        free(buf);
         return -1;
     }
-    uint64_t cnt;
+    int ok = write_all(fd, buf, len) == 0 && fsync(fd) == 0;
+    close(fd);
+    free(buf);
+    if (!ok) {
+        unlink(tmp);
+        return -1;
+    }
+    if (rename(tmp, path) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+int hash_index_load(HashIndex *h, const char *path,
+                    uint64_t *out_covered_log_size, uint64_t *out_next_id) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+
+    uint8_t hdr[IDX_HDR];
+    uint32_t ver;
+    if (read_all(fd, hdr, IDX_HDR) != 0 || memcmp(hdr, "AIDX", 4) != 0) {
+        close(fd);
+        return -1;
+    }
+    memcpy(&ver, hdr + 4, 4);
+    if (ver != IDX_VERSION) { /* older/unknown checkpoint: force a full scan */
+        close(fd);
+        return -1;
+    }
+    uint64_t cnt, covered, next_id;
+    uint32_t want_crc;
     memcpy(&cnt, hdr + 8, 8);
+    memcpy(&covered, hdr + 16, 8);
+    memcpy(&next_id, hdr + 24, 8);
+    memcpy(&want_crc, hdr + 32, 4);
+    if (cnt > (uint64_t)((SIZE_MAX - 1) / IDX_ENTRY)) { /* overflow guard */
+        close(fd);
+        return -1;
+    }
+
+    size_t body = (size_t)cnt * IDX_ENTRY;
+    uint8_t *buf = malloc(body ? body : 1);
+    if (!buf) {
+        close(fd);
+        return -1;
+    }
+    if (read_all(fd, buf, body) != 0 || crc32_compute(buf, body) != want_crc) {
+        free(buf);
+        close(fd);
+        return -1;
+    }
+    close(fd);
+
     for (uint64_t i = 0; i < cnt; i++) {
-        uint8_t rec[22];
-        if (fread(rec, 1, 22, f) != 22) {
-            fclose(f);
-            return -1;
-        }
+        const uint8_t *r = buf + i * IDX_ENTRY;
         uint64_t id, offset;
         uint32_t length;
-        memcpy(&id, rec, 8);
-        memcpy(&offset, rec + 8, 8);
-        memcpy(&length, rec + 16, 4);
-        hash_index_put(h, id, offset, length, rec[20], rec[21]);
+        memcpy(&id, r, 8);
+        memcpy(&offset, r + 8, 8);
+        memcpy(&length, r + 16, 4);
+        hash_index_put(h, id, offset, length, r[20], r[21]);
     }
-    fclose(f);
+    free(buf);
+    if (out_covered_log_size) *out_covered_log_size = covered;
+    if (out_next_id) *out_next_id = next_id;
     return 0;
 }

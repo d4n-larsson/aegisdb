@@ -34,9 +34,20 @@ const HashEntry *hash_index_get(const HashIndex *h, uint64_t id);
 
 size_t hash_index_count(const HashIndex *h);
 
-/* Persist a snapshot to `path` (T024) and load it back. The log remains the
- * authoritative source; the snapshot is an optimization. Returns 0/-1. */
-int hash_index_save(const HashIndex *h, const char *path);
-int hash_index_load(HashIndex *h, const char *path);
+/* Persist a checkpoint to `path` and load it back. The checkpoint records the
+ * log size it reflects (`covered_log_size`) and the id allocator (`next_id`) so
+ * recovery can trust [0, covered) and replay only the log tail. The log remains
+ * the authoritative source; a missing/corrupt checkpoint just forces a full
+ * scan. Returns 0/-1. */
+int hash_index_save(const HashIndex *h, const char *path,
+                    uint64_t covered_log_size, uint64_t next_id);
+int hash_index_load(HashIndex *h, const char *path,
+                    uint64_t *out_covered_log_size, uint64_t *out_next_id);
+
+/* Serialize the index into a freshly malloc'd checkpoint image (caller frees).
+ * Lets a caller build the image under a lock and write it without one. Returns
+ * NULL on allocation failure; sets *out_len on success. */
+uint8_t *hash_index_serialize(const HashIndex *h, uint64_t covered_log_size,
+                              uint64_t next_id, size_t *out_len);
 
 #endif /* AEGISDB_HASH_INDEX_H */

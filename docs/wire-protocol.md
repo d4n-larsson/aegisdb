@@ -363,6 +363,50 @@ Health check. Always exempt from authentication.
 
 ---
 
+### `stats`
+
+Operational snapshot for monitoring and capacity planning. Requires
+authentication when enabled (unlike `ping`). Available at every phase.
+
+**Request**:
+
+```json
+{ "operation": "stats" }
+```
+
+**Response**:
+
+```json
+{
+  "ok": true,
+  "version": "0.1.0",
+  "phase": 4,
+  "uptime_ms": 38214,
+  "durability": "interval",
+  "fsync_interval_ms": 1000,
+  "records": 1042,
+  "tombstones": 17,
+  "log_bytes": 2310544,
+  "log_flush_pending": false,
+  "indexes": { "time": 1042, "tags": 88, "semantic": 1042, "working": 3 },
+  "next_id": 1060
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `uptime_ms` | Milliseconds since the database finished recovery at startup |
+| `durability` | Active durability mode (`sync`, `batch`, or `interval`) |
+| `fsync_batch` / `fsync_interval_ms` | The tuning value for the active mode (only the relevant one is present; `sync` has neither) |
+| `records` | Live (non-deleted) persisted records |
+| `tombstones` | Deleted-but-not-yet-compacted records still in the log |
+| `log_bytes` | Current size of `memory.log` on disk |
+| `log_flush_pending` | `true` if writes have not yet been `fsync`'d — the current durability lag |
+| `indexes` | Per-index entry counts (`semantic` is the brute-force vector count; watch it for scale) |
+| `next_id` | The id the next persisted insert will receive |
+
+---
+
 ## Phase gating (advanced)
 
 By default the server enables every operation (`--phase 4`). The `--phase <1-4>`
