@@ -80,6 +80,7 @@ static void usage(const char *prog) {
             "  --working-capacity <n>   ring buffer size (default 256)\n"
             "  --auth-token <token>     accept this bearer token (repeatable)\n"
             "  --auth-token-file <path> accept tokens listed one per line\n"
+            "  --health-check           probe a local server (--port) and exit\n"
             "  --help                   show this help\n"
             "\n"
             "  With no --auth-token/--auth-token-file the server runs WITHOUT\n"
@@ -102,6 +103,8 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
         if (strcmp(a, "--help") == 0 || strcmp(a, "-h") == 0) {
             usage(prog);
             return 1;
+        } else if (strcmp(a, "--health-check") == 0) {
+            cfg->run_health_check = 1;
         } else if (strcmp(a, "--data-dir") == 0) {
             NEXT("--data-dir");
             strncpy(cfg->data_dir, val, sizeof(cfg->data_dir) - 1);

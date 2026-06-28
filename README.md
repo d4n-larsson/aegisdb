@@ -47,6 +47,31 @@ make clean
 
 The server binary is produced at `build/aegisdb`.
 
+### With Docker
+
+A multi-stage `Dockerfile` (Debian-slim) builds the server and ships a minimal
+runtime image. Data persists in a named volume mounted at `/data`.
+
+```bash
+# Build and run with Docker Compose (recommended)
+docker compose up --build        # serves on localhost:9470
+
+# Or build and run the image directly
+docker build -t aegisdb .
+docker run -p 9470:9470 -v aegis-data:/data aegisdb
+```
+
+The image ships a `HEALTHCHECK` that uses the binary's built-in `--health-check`
+probe (no extra tooling in the image), so `docker ps` and Compose
+`depends_on: condition: service_healthy` reflect real server liveness.
+
+The container runs as an unprivileged user and listens on `0.0.0.0:9470`.
+Override the default flags by appending them to the run command, e.g.
+`docker run aegisdb --embedding-dim 1024`, or by editing the `command:` block in
+`docker-compose.yml`. To enable authentication, mount a token file into `/data`
+and pass `--auth-token-file` (see [Authentication](#authentication)); the wire
+protocol is plaintext, so keep the port on a trusted network.
+
 ## Run
 
 ```bash
@@ -79,6 +104,7 @@ The `WARNING` line appears only when the server is started without
 | `--working-capacity <n>` | `256` | Working-memory ring buffer size |
 | `--auth-token <token>` | — | Accept this bearer token (repeatable) |
 | `--auth-token-file <path>` | — | Accept tokens listed one per line |
+| `--health-check` | | Probe a local server on `--port`, print nothing, exit 0 if healthy / 1 otherwise |
 | `--help` | | Show usage |
 
 ### Authentication
