@@ -26,8 +26,16 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Resolve version from tag (strip leading v)
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
       - name: Build sdist + wheel
         working-directory: integrations/claude-code
+        # PRETEND_VERSION pins the build to the tag, so the artifact version
+        # always matches the release (e.g. v0.3.1 -> 0.3.1).
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ steps.ver.outputs.version }}
         run: |
           python -m pip install --upgrade build
           python -m build
