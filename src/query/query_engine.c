@@ -418,7 +418,7 @@ aegis_status_t qe_promote(AegisDB *db, const char *session_id,
         return AEGIS_ERR_INVALID_REQUEST;
 
     MemoryRecord w;
-    if (working_store_take(db->working, session_id, working_id, db_now_ms(),
+    if (working_store_take(db->working, session_id, working_id, db_now_ms(), ns,
                            &w) != 0)
         return AEGIS_ERR_NOT_FOUND;
 
