@@ -51,6 +51,12 @@
     a:hover { color: var(--paper); }
     ::selection { background: var(--brass); color: var(--ink); }
     :focus-visible { outline: 2px solid var(--brass); outline-offset: 3px; border-radius: 2px; }
+    .skip-link {
+      position: absolute; left: -9999px; top: 0; z-index: 100;
+      background: var(--brass); color: var(--ink); padding: 10px 16px;
+      font-family: var(--mono); font-size: 0.85rem; border-radius: 0 0 3px 0;
+    }
+    .skip-link:focus { left: 0; color: var(--ink); }
     .mono { font-family: var(--mono); }
 
     /* ---- log sheet: page is one line-numbered file ---- */
@@ -243,14 +249,15 @@
   </style>
 </head>
 <body>
+  <a class="skip-link" href="#what">Skip to content</a>
   <div class="sheet">
 
     <!-- HEADER -->
     <header class="top rec">
       <div class="off mono">▍log</div>
       <div class="col">
-        <span class="brand"><span class="blk">▍</span>AEGISDB</span>
-        <nav>
+        <a class="brand" href="#top"><span class="blk">▍</span>AEGISDB</a>
+        <nav aria-label="Primary">
           <a href="#what" class="nav-hide">memory</a>
           <a href="#wire" class="nav-hide">protocol</a>
           <a href="#claude" class="nav-hide">claude&nbsp;code</a>
@@ -270,9 +277,10 @@
           <div>
             <h1>Memory that<br>outlives the<br><span class="em">context window.</span></h1>
             <p class="lead">
-              Every session, an agent forgets. AegisDB is a small, fast database
-              in C that gives agents a memory they keep — written to an append-only
-              log, recalled by meaning, time, or tag, over one line of JSON.
+              Agents start every session with amnesia. AegisDB gives them durable
+              memory — what happened, what they know, and what they're working on —
+              recalled by meaning, time, or tag, so you stop rebuilding context
+              from scratch every session.
             </p>
             <div class="cta">
               <a class="btn primary" href="#start">▍ get started</a>
@@ -297,11 +305,33 @@
       </div>
     </section>
 
+    <!-- WHY NOT -->
+    <section class="rec" id="why">
+      <div class="off mono">0x00D0</div>
+      <div class="col">
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0002</b>&nbsp;·&nbsp;type=semantic</p>
+        <div class="twoup">
+          <div>
+            <h2 class="title">Why not Redis, SQLite, or a vector store?</h2>
+            <p class="lede">You almost certainly run a database already. None of them was built to remember the way an agent needs to.</p>
+            <p class="lede">A vector store recalls by similarity but has no notion of an event, a fact that gets corrected, or context that should expire. A cache forgets on its own timer. A relational table stores rows but can't rank by meaning. Agent memory is all of these at once — so AegisDB makes each its own kind, with the lifecycle it actually needs.</p>
+          </div>
+          <div>
+            <p class="cap">what each one remembers</p>
+<pre><span class="key">redis</span>      <span class="ar">→</span> fast, but evicts on its own TTL
+<span class="key">sqlite</span>     <span class="ar">→</span> durable rows, no recall by meaning
+<span class="key">pgvector</span>   <span class="ar">→</span> similarity only — no events, TTL, or graph
+<span class="op">aegisdb</span>    <span class="ar">→</span> events, facts, working + a graph, each lifecycled</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- WHAT IT IS -->
     <section class="rec" id="what">
       <div class="off mono">0x01A0</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0002</b>&nbsp;·&nbsp;type=semantic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0003</b>&nbsp;·&nbsp;type=semantic</p>
         <h2 class="title">A memory model shaped like memory.</h2>
         <p class="lede">Three kinds of memory, each with the lifecycle it actually needs — not one generic store with a TTL bolted on.</p>
         <div class="legend">
@@ -331,7 +361,7 @@
             <p>Link memories with directed edges and walk them breadth-first to <b>pull in what's related</b> to what you just recalled.</p>
           </div>
           <div class="feat" data-k="0x03D0">
-            <h3><span class="bar"></span>Corruption can't cascade</h3>
+            <h3><span class="bar"></span>One bad record doesn't poison the log</h3>
             <p>Every frame is <b>magic + CRC</b> framed. A torn tail from a crash is trimmed; interior bit-rot is skipped frame by frame and the rest still loads — one bad record never costs you the log.</p>
           </div>
           <div class="feat" data-k="0x0440">
@@ -358,8 +388,8 @@
     <section class="rec" id="wire">
       <div class="off mono">0x0640</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0003</b>&nbsp;·&nbsp;type=semantic</p>
-        <h2 class="title">One line in, one line out.</h2>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0004</b>&nbsp;·&nbsp;type=semantic</p>
+        <h2 class="title">One JSON line in. One JSON line back.</h2>
         <p class="lede">The wire protocol is newline-delimited JSON over TCP. No SDK, no driver — any language that can open a socket can speak it.</p>
         <p class="cap">store a memory, then recall it</p>
 <pre><span class="c"># write an episodic memory</span>
@@ -378,7 +408,7 @@
     <section class="rec" id="claude">
       <div class="off mono">0x07A0</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0004</b>&nbsp;·&nbsp;type=semantic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0005</b>&nbsp;·&nbsp;type=semantic</p>
         <div class="twoup">
           <div>
             <h2 class="title">Long-term memory for Claude&nbsp;Code.</h2>
@@ -414,16 +444,16 @@
     <section class="rec" id="tokens">
       <div class="off mono">0x0880</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0005</b>&nbsp;·&nbsp;type=semantic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0006</b>&nbsp;·&nbsp;type=semantic</p>
         <div class="twoup">
           <div>
-            <h2 class="title">Spend tokens on the work, not the context.</h2>
-            <p class="lede">Long context is the tax. AegisDB keeps durable knowledge out of the window and feeds back only what's relevant, per prompt — so you pay for signal, not for re-establishing context.</p>
+            <h2 class="title">Stop paying to re-teach the model.</h2>
+            <p class="lede">Every session normally re-pastes your stack, conventions, and past decisions into the prompt. AegisDB keeps that knowledge out of the window and feeds back only what's relevant, per prompt — so you pay for the work, not for re-establishing context.</p>
           </div>
           <div>
             <ul>
               <li><b>Recall, don't re-explain</b> — your stack, conventions, and past decisions are already known, so you stop re-pasting them each session.</li>
-              <li><b>A relevant slice, not a dump</b> — recall ranks by similarity &times; importance and injects only the top few; the model never sees the rest.</li>
+              <li><b>A relevant slice, not a dump</b> — each prompt pulls only the top-ranked memories — ranked by similarity &times; importance — instead of replaying entire transcripts; the model never sees the rest.</li>
               <li><b>Short sessions, full knowledge</b> — start fresh instead of dragging a giant transcript whose every turn re-bills the whole context.</li>
               <li><b>Distilled &amp; shared</b> — capture stores salient outcomes, not raw logs, and a team reuses context established once.</li>
             </ul>
@@ -436,7 +466,7 @@
     <section class="rec" id="start">
       <div class="off mono">0x0940</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0006</b>&nbsp;·&nbsp;type=episodic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0007</b>&nbsp;·&nbsp;type=episodic</p>
         <h2 class="title">Run it, talk to it.</h2>
         <p class="lede">Pull the image or build from source — either way you're holding a connection in seconds.</p>
         <div class="start-log">
@@ -478,7 +508,7 @@ docker exec aegisdb aegisdb client search --tags user</code>
     <section class="rec" id="team">
       <div class="off mono">0x0B20</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0007</b>&nbsp;·&nbsp;type=meta</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0008</b>&nbsp;·&nbsp;type=meta</p>
         <h2 class="title">Set up shared memory for a team.</h2>
         <p class="lede">One server, one tenant token per project, and Claude&nbsp;Code wired in with <span class="mono">uvx</span> — no clone anywhere. Uses the published image and PyPI package.</p>
         <div class="start-log">
