@@ -255,6 +255,7 @@
           <a href="#wire" class="nav-hide">protocol</a>
           <a href="#claude" class="nav-hide">claude&nbsp;code</a>
           <a href="#start">get&nbsp;started</a>
+          <a href="#team" class="nav-hide">team</a>
           <a href="https://github.com/d4n-larsson/aegisdb" class="gh">github&nbsp;↗</a>
         </nav>
       </div>
@@ -445,6 +446,83 @@ docker exec aegisdb aegisdb client search --tags user</code>
             <div>
               <p class="what">Read the reference</p>
               <p class="ann">The <a href="https://github.com/d4n-larsson/aegisdb/blob/main/docs/wire-protocol.md">wire-protocol reference</a> and <a href="https://github.com/d4n-larsson/aegisdb/blob/main/docs/quickstart.md">quickstart</a> cover every operation.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TEAM SETUP -->
+    <section class="rec" id="team">
+      <div class="off mono">0x0B20</div>
+      <div class="col">
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0006</b>&nbsp;·&nbsp;type=meta</p>
+        <h2 class="title">Set up shared memory for a team.</h2>
+        <p class="lede">One server, one tenant token per project, and Claude&nbsp;Code wired in with <span class="mono">uvx</span> — no clone anywhere. Uses the published image and PyPI package.</p>
+        <div class="start-log">
+          <div class="row2">
+            <span class="seq">01</span>
+            <div>
+              <p class="what">Mint a tenant token</p>
+              <code>docker run --rm ghcr.io/d4n-larsson/aegisdb \
+  gen-token --namespace my-project --scope rw</code>
+              <p class="ann">Prints a hashed token-file line and the one-time token. Append the line to <span class="mono">tokens.txt</span>; keep the token for step&nbsp;3.</p>
+            </div>
+          </div>
+          <div class="row2">
+            <span class="seq">02</span>
+            <div>
+              <p class="what">Run the server — authenticated, durable</p>
+              <code>docker run -d --name aegisdb -p 9470:9470 \
+  -v aegis-data:/data -v "$PWD/tokens.txt:/tokens.txt:ro" \
+  ghcr.io/d4n-larsson/aegisdb:latest \
+  --data-dir /data --embedding-dim 1024 --auth-token-file /tokens.txt</code>
+              <p class="ann">Tokens travel in plaintext — keep the port on a private network or behind a TLS-terminating proxy.</p>
+            </div>
+          </div>
+          <div class="row2">
+            <span class="seq">03</span>
+            <div>
+              <p class="what">Point Claude Code at it — <span class="mono">.mcp.json</span></p>
+              <code>{
+  "mcpServers": {
+    "memory": {
+      "command": "uvx",
+      "args": ["aegisdb-mcp"],
+      "env": {
+        "AEGIS_HOST": "memory.internal",
+        "AEGIS_PORT": "9470",
+        "AEGIS_AUTH_TOKEN": "&lt;token from step 1&gt;",
+        "AEGIS_EMBEDDING_DIMENSIONS": "1024"
+      }
+    }
+  }
+}</code>
+              <p class="ann">The token's namespace is authoritative — no <span class="mono">AEGIS_NAMESPACE</span> needed. <span class="mono">uvx</span> fetches the package on demand (install <a href="https://docs.astral.sh/uv/">uv</a> once).</p>
+            </div>
+          </div>
+          <div class="row2">
+            <span class="seq">04</span>
+            <div>
+              <p class="what">Enable auto recall &amp; capture — <span class="mono">.claude/settings.json</span></p>
+              <code>{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "uvx --from aegisdb-mcp aegisdb-recall-hook" } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "uvx --from aegisdb-mcp aegisdb-capture-hook" } ] }
+    ]
+  }
+}</code>
+              <p class="ann">Relevant memories are recalled into context each prompt; salient outcomes are captured at session end.</p>
+            </div>
+          </div>
+          <div class="row2">
+            <span class="seq">05</span>
+            <div>
+              <p class="what">Onboard a teammate</p>
+              <p class="ann">They repeat step&nbsp;1 for their own token (their own <span class="mono">--namespace</span> for isolation, or a shared one to pool memory) and steps&nbsp;3–4. No clone, no build.</p>
             </div>
           </div>
         </div>
