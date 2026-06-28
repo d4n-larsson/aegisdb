@@ -371,6 +371,58 @@ def test_hashed_tokens(binary, port):
               "wrong token against hashed entry -> UNAUTHORIZED")
 
 
+def _cli(binary, *args, token=None):
+    env = dict(os.environ)
+    env.pop("AEGIS_TOKEN", None)
+    if token:
+        env["AEGIS_TOKEN"] = token
+    return subprocess.run([binary, "client", *args], capture_output=True,
+                          text=True, env=env)
+
+
+def test_cli(binary, port):
+    print("[client CLI + gen-token]")
+    with Server(binary, port, phase=4) as srv:
+        p = str(port)
+        r = _cli(binary, "--port", p, "ping")
+        check(r.returncode == 0 and json.loads(r.stdout).get("ok") is True,
+              "client ping -> ok, exit 0")
+
+        r = _cli(binary, "--port", p, "put", "--type", "semantic",
+                 "--tags", "user,pref", "likes dark mode")
+        check(r.returncode == 0, "client put -> exit 0")
+        rid = json.loads(r.stdout)["record"]["id"]
+
+        r = _cli(binary, "--port", p, "get", str(rid))
+        check(r.returncode == 0
+              and json.loads(r.stdout)["record"]["data"] == "likes dark mode",
+              "client get returns the record")
+
+        r = _cli(binary, "--port", p, "get", "999999")
+        check(r.returncode == 1, "client get missing -> exit 1")
+
+        r = _cli(binary, "--port", p, "search", "--tags", "user")
+        check(r.returncode == 0 and json.loads(r.stdout)["total"] >= 1,
+              "client search finds the record")
+
+    # gen-token -> token-file line + plaintext token that authenticates
+    g = subprocess.run([binary, "gen-token", "--namespace", "acme", "--scope",
+                        "rw"], capture_output=True, text=True)
+    line = next((l for l in g.stdout.splitlines() if l.startswith("sha256$")), None)
+    tok = next((l[len("token: "):] for l in g.stdout.splitlines()
+                if l.startswith("token: ")), None)
+    check(line is not None and tok, "gen-token prints a file line and a token")
+
+    with Server(binary, port + 1, phase=4, token_lines=[line]):
+        p = str(port + 1)
+        r = _cli(binary, "--port", p, "put", "--tags", "t", "hello", token=tok)
+        check(r.returncode == 0
+              and json.loads(r.stdout)["record"]["agent_id"] == "acme",
+              "gen-token token authenticates and pins its namespace")
+        r = _cli(binary, "--port", p, "put", "nope")  # no token
+        check(r.returncode == 1, "client without a token -> exit 1")
+
+
 def test_phase_gating(binary, port):
     print("[phase 1: gating]")
     with Server(binary, port, phase=1) as srv:
@@ -404,6 +456,7 @@ def main():
     test_stats(binary, 19474)
     test_multitenancy(binary, 19475)
     test_hashed_tokens(binary, 19476)
+    test_cli(binary, 19477)
 
     print()
     if FAILURES:

@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "aegisdb/client.h"
 #include "aegisdb/compaction.h"
 #include "aegisdb/config.h"
 #include "aegisdb/db.h"
@@ -18,6 +19,12 @@ static void on_signal(int sig) {
 }
 
 int main(int argc, char **argv) {
+    /* Subcommands run a client / token tool instead of the server. */
+    if (argc >= 2 && strcmp(argv[1], "client") == 0)
+        return client_main(argc - 1, argv + 1);
+    if (argc >= 2 && strcmp(argv[1], "gen-token") == 0)
+        return gen_token_main(argc - 1, argv + 1);
+
     Config cfg;
     config_defaults(&cfg);
     int pr = config_parse_args(&cfg, argc, argv);
