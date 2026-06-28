@@ -114,12 +114,40 @@ static void test_load_rejects_corrupt(void) {
     remove(path);
 }
 
+/* A bit-flip in the HEADER (e.g. covered_log_size) must also be rejected, not
+ * just entry corruption — the CRC now covers the header. */
+static void test_load_rejects_corrupt_header(void) {
+    char path[256];
+    tmp_path(path, sizeof(path), "hashidx_badhdr");
+
+    HashIndex *h = hash_index_create();
+    hash_index_put(h, 1, 16, 4, 0, 0);
+    TEST_ASSERT_EQUAL_INT(0, hash_index_save(h, path, 4096, 7));
+    hash_index_free(h);
+
+    /* covered_log_size lives at header offset 16; flip a byte. */
+    int fd = open(path, O_RDWR);
+    TEST_ASSERT_TRUE(fd >= 0);
+    uint8_t b = 0;
+    TEST_ASSERT_EQUAL_INT(1, pread(fd, &b, 1, 16));
+    b ^= 0xFF;
+    TEST_ASSERT_EQUAL_INT(1, pwrite(fd, &b, 1, 16));
+    close(fd);
+
+    HashIndex *h2 = hash_index_create();
+    uint64_t covered = 0, next_id = 0;
+    TEST_ASSERT_EQUAL_INT(-1, hash_index_load(h2, path, &covered, &next_id));
+    hash_index_free(h2);
+    remove(path);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_put_get);
     RUN_TEST(test_update_overwrites);
     RUN_TEST(test_many_entries);
     RUN_TEST(test_save_load_roundtrip);
+    RUN_TEST(test_load_rejects_corrupt_header);
     RUN_TEST(test_load_rejects_corrupt);
     return UNITY_END();
 }

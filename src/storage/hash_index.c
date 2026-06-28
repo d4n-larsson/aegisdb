@@ -10,7 +10,7 @@
 
 #include "aegisdb/crc32.h"
 
-#define IDX_VERSION 2u
+#define IDX_VERSION 3u
 #define IDX_HDR 36   /* "AIDX"(4) ver(4) count(8) covered(8) next_id(8) crc(4) */
 #define IDX_ENTRY 22 /* id(8) offset(8) length(4) type(1) deleted(1) */
 
@@ -123,9 +123,11 @@ const HashEntry *hash_index_get(const HashIndex *h, uint64_t id) {
 
 size_t hash_index_count(const HashIndex *h) { return h->count; }
 
-/* Checkpoint v2: a 36-byte header followed by `count` 22-byte entries.
- * Header (little-endian): "AIDX", u32 version=2, u64 count, u64 covered_log_size,
- * u64 next_id, u32 crc32(entries). */
+/* Checkpoint v3: a 36-byte header followed by `count` 22-byte entries.
+ * Header (little-endian): "AIDX", u32 version=3, u64 count, u64 covered_log_size,
+ * u64 next_id, u32 crc. The CRC covers the header fields [0,32) AND the entries
+ * (skipping the CRC field itself), so header corruption — a bad covered offset,
+ * next_id, or count — is detected, not just entry corruption. */
 uint8_t *hash_index_serialize(const HashIndex *h, uint64_t covered_log_size,
                               uint64_t next_id, size_t *out_len) {
     size_t len = IDX_HDR + h->count * IDX_ENTRY;
@@ -147,12 +149,15 @@ uint8_t *hash_index_serialize(const HashIndex *h, uint64_t covered_log_size,
     }
 
     uint32_t ver = IDX_VERSION;
-    uint32_t crc = crc32_compute(buf + IDX_HDR, (size_t)written * IDX_ENTRY);
     memcpy(buf, "AIDX", 4);
     memcpy(buf + 4, &ver, 4);
     memcpy(buf + 8, &written, 8);
     memcpy(buf + 16, &covered_log_size, 8);
     memcpy(buf + 24, &next_id, 8);
+    /* CRC over header fields [0,32) then the entries (chaining is exact for
+     * this CRC), leaving the 4-byte CRC field at [32,36) out. */
+    uint32_t crc = crc32_compute(buf, 32);
+    crc = crc32_update(crc, buf + IDX_HDR, (size_t)written * IDX_ENTRY);
     memcpy(buf + 32, &crc, 4);
     *out_len = IDX_HDR + (size_t)written * IDX_ENTRY;
     return buf;
@@ -218,7 +223,15 @@ int hash_index_load(HashIndex *h, const char *path,
         close(fd);
         return -1;
     }
-    if (read_all(fd, buf, body) != 0 || crc32_compute(buf, body) != want_crc) {
+    if (read_all(fd, buf, body) != 0) {
+        free(buf);
+        close(fd);
+        return -1;
+    }
+    /* CRC over the header fields [0,32) then the entries — matching serialize. */
+    uint32_t crc = crc32_compute(hdr, 32);
+    crc = crc32_update(crc, buf, body);
+    if (crc != want_crc) {
         free(buf);
         close(fd);
         return -1;
