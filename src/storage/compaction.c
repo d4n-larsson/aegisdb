@@ -101,23 +101,31 @@ int compaction_run_once(AegisDB *db) {
     for (uint64_t tail = snap_end; tail < (uint64_t)db->log.size && !failed;) {
         uint8_t *buf = NULL;
         size_t len = 0;
-        if (log_read(&db->log, tail, &buf, &len) != 0) break;
-        MemoryRecord r;
-        int decoded = record_decode(buf, len, &r);
-        if (decoded == 0) {
-            uint64_t off = 0;
-            if (log_append(&newlog, buf, len, &off) != 0) {
-                record_free(&r);
-                free(buf);
-                failed = 1;
-                break;
-            }
-            if (locs_push(&locs, &nloc, &locs_cap,
-                          (NewLoc){r.id, off, (uint32_t)len, (uint8_t)r.type,
-                                   (uint8_t)(r.deleted ? 1 : 0)}))
-                failed = 1;
-            record_free(&r);
+        /* Any anomaly in the tail means we cannot faithfully reproduce it;
+         * abort (keep the original log) rather than break-and-commit, which
+         * would silently drop every live record after this point. */
+        if (log_read(&db->log, tail, &buf, &len) != 0) {
+            failed = 1;
+            break;
         }
+        MemoryRecord r;
+        if (record_decode(buf, len, &r) != 0) {
+            free(buf);
+            failed = 1;
+            break;
+        }
+        uint64_t off = 0;
+        if (log_append(&newlog, buf, len, &off) != 0) {
+            record_free(&r);
+            free(buf);
+            failed = 1;
+            break;
+        }
+        if (locs_push(&locs, &nloc, &locs_cap,
+                      (NewLoc){r.id, off, (uint32_t)len, (uint8_t)r.type,
+                               (uint8_t)(r.deleted ? 1 : 0)}))
+            failed = 1;
+        record_free(&r);
         free(buf);
         tail += LOG_FRAME_HEADER + (uint64_t)len;
     }
