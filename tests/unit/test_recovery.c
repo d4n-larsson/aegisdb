@@ -149,10 +149,42 @@ static void test_recovery_falls_back_on_corrupt_checkpoint(void) {
     db_close(&db2);
 }
 
+/* next_id must not regress (and reuse an id) when a tail-truncating crash
+ * leaves the log shorter than the checkpoint's covered offset. The metadata
+ * high-water next_id floors it. */
+static void test_recovery_next_id_does_not_regress(void) {
+    AegisDB db1;
+    open_db(&db1);
+    insert_ep(&db1, "one");                       /* id 1 */
+    uint64_t after_two = 0;
+    insert_ep(&db1, "two");                        /* id 2 */
+    after_two = (uint64_t)db1.log.size;            /* boundary before id 3 */
+    insert_ep(&db1, "three");                      /* id 3 */
+    db_close(&db1);  /* checkpoint covers all 3 (covered > after_two); meta next_id=4 */
+
+    /* Simulate a crash that truncated the log below the checkpoint's covered
+     * offset: drop id 3's frame. The checkpoint is now stale -> rejected ->
+     * full scan finds only ids 1,2. */
+    char log[320];
+    snprintf(log, sizeof(log), "%s/memory.log", g_dir);
+    TEST_ASSERT_EQUAL_INT(0, truncate(log, (off_t)after_two));
+
+    AegisDB db2;
+    open_db(&db2);
+    /* id 3 is gone... */
+    MemoryRecord r;
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_get(&db2, 3, NULL, &r));
+    /* ...but a new insert must NOT reuse id 3 — next_id floored by metadata. */
+    uint64_t fresh = insert_ep(&db2, "four");
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT64(4, fresh);
+    db_close(&db2);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_recovery_replays_tail_after_checkpoint);
     RUN_TEST(test_recovery_rebuilds_secondary_from_tail);
     RUN_TEST(test_recovery_falls_back_on_corrupt_checkpoint);
+    RUN_TEST(test_recovery_next_id_does_not_regress);
     return UNITY_END();
 }

@@ -78,6 +78,20 @@ int db_checkpoint(AegisDB *db) {
     return rv;
 }
 
+/* Read the persisted next_id from metadata.db, or 0 if absent/unreadable. It is
+ * a high-water mark used as a floor at recovery so next_id can't regress. */
+static uint64_t load_metadata_next_id(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    uint8_t buf[32];
+    uint64_t nid = 0;
+    if (fread(buf, 1, sizeof(buf), f) == sizeof(buf) &&
+        memcmp(buf, "AMETA", 5) == 0)
+        memcpy(&nid, buf + 9, 8);
+    fclose(f);
+    return nid;
+}
+
 int db_open(AegisDB *db, const Config *cfg) {
     memset(db, 0, sizeof(*db));
     db->config = *cfg;
@@ -125,6 +139,19 @@ int db_open(AegisDB *db, const Config *cfg) {
         goto fail_indexes;
     }
     LOG_INFO("recovery complete: %ld records loaded", loaded);
+
+    /* metadata.db carries a high-water next_id from the last clean checkpoint.
+     * Use it as a floor: a tail-truncating crash (or a stale/rejected index
+     * checkpoint) can leave the log-derived next_id below an already-issued id,
+     * which would let a future insert reuse it (#18). */
+    uint64_t meta_next = load_metadata_next_id(db->path_meta);
+    if (meta_next > db->next_id) {
+        LOG_WARN("next_id from log scan (%llu) is below metadata high-water "
+                 "(%llu); using the latter to avoid id reuse",
+                 (unsigned long long)db->next_id, (unsigned long long)meta_next);
+        db->next_id = meta_next;
+    }
+
     db->started_ms = db_now_ms();
     db->running = 1;
     return 0;
