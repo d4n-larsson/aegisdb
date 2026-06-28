@@ -49,17 +49,30 @@ The server binary is produced at `build/aegisdb`.
 
 ### With Docker
 
-A multi-stage `Dockerfile` (Debian-slim) builds the server and ships a minimal
-runtime image. Data persists in a named volume mounted at `/data`.
+Prebuilt multi-arch images (`linux/amd64`, `linux/arm64`) are published to GitHub
+Container Registry on every push to `main` and every release tag — no clone or
+toolchain needed:
 
 ```bash
-# Build and run with Docker Compose (recommended)
+docker run -p 9470:9470 -v aegis-data:/data ghcr.io/d4n-larsson/aegisdb:latest
+# or pin a release: ghcr.io/d4n-larsson/aegisdb:0.1.0
+```
+
+To build it yourself instead, a multi-stage `Dockerfile` (Debian-slim) compiles
+the server and ships a minimal runtime image. Data persists in a named volume at
+`/data`.
+
+```bash
+# Build and run with Docker Compose
 docker compose up --build        # serves on localhost:9470
 
 # Or build and run the image directly
 docker build -t aegisdb .
 docker run -p 9470:9470 -v aegis-data:/data aegisdb
 ```
+
+> To skip building, point `docker-compose.yml` at the published image: replace
+> `build: .` with `image: ghcr.io/d4n-larsson/aegisdb:latest`.
 
 The image ships a `HEALTHCHECK` that uses the binary's built-in `--health-check`
 probe (no extra tooling in the image), so `docker ps` and Compose
