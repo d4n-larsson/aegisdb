@@ -386,6 +386,7 @@
               <li><b>Automatic recall</b> on each prompt, inside a strict time budget.</li>
               <li><b>Automatic capture</b> at session end, filtered by salience.</li>
               <li><b>Per-project namespaces</b> — isolated by default, shared by choice.</li>
+              <li><b>No clone</b> — <span class="mono">uvx</span> fetches the published package on demand.</li>
               <li><b>Fails open</b> — if the backend is down, your session keeps working.</li>
             </ul>
           </div>
@@ -394,8 +395,8 @@
 <pre>{
   <span class="key">"mcpServers"</span>: {
     <span class="key">"memory"</span>: {
-      <span class="key">"command"</span>: <span class="s">"python3"</span>,
-      <span class="key">"args"</span>: [<span class="s">"-m"</span>, <span class="s">"aegis_mcp.server"</span>],
+      <span class="key">"command"</span>: <span class="s">"uvx"</span>,
+      <span class="key">"args"</span>: [<span class="s">"aegis-mcp"</span>],
       <span class="key">"env"</span>: {
         <span class="key">"AEGIS_NAMESPACE"</span>: <span class="s">"my-project"</span>,
         <span class="key">"AEGIS_EMBEDDING_DIMENSIONS"</span>: <span class="s">"1024"</span>
@@ -413,29 +414,30 @@
       <div class="off mono">0x0940</div>
       <div class="col">
         <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0005</b>&nbsp;·&nbsp;type=episodic</p>
-        <h2 class="title">Clone, build, talk to it.</h2>
-        <p class="lede">No external dependencies to install. Four lines and you're holding a connection.</p>
+        <h2 class="title">Run it, talk to it.</h2>
+        <p class="lede">Pull the image or build from source — either way you're holding a connection in seconds.</p>
         <div class="start-log">
           <div class="row2">
             <span class="seq">01</span>
             <div>
-              <p class="what">Clone &amp; build</p>
-              <code>git clone https://github.com/d4n-larsson/aegisdb &amp;&amp; cd aegisdb &amp;&amp; make</code>
+              <p class="what">Run it — prebuilt multi-arch image, no toolchain</p>
+              <code>docker run -d --name aegisdb -p 9470:9470 -v aegis-data:/data ghcr.io/d4n-larsson/aegisdb:latest</code>
             </div>
           </div>
           <div class="row2">
             <span class="seq">02</span>
             <div>
-              <p class="what">Run the server</p>
-              <code>./build/aegisdb --data-dir ./data --port 9470 --embedding-dim 1024</code>
+              <p class="what">…or build from source</p>
+              <code>git clone https://github.com/d4n-larsson/aegisdb &amp;&amp; cd aegisdb &amp;&amp; make
+./build/aegisdb --data-dir ./data --port 9470</code>
             </div>
           </div>
           <div class="row2">
             <span class="seq">03</span>
             <div>
               <p class="what">Talk to it — the binary is also the client</p>
-              <code>aegisdb client put --tags user "prefers dark mode"
-aegisdb client search --tags user</code>
+              <code>docker exec aegisdb aegisdb client put --tags user "prefers dark mode"
+docker exec aegisdb aegisdb client search --tags user</code>
             </div>
           </div>
           <div class="row2">
