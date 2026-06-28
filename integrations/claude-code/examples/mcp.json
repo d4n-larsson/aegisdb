@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "memory": {
-      "command": "python3",
-      "args": ["-m", "aegis_mcp.server"],
+      "command": "uvx",
+      "args": ["aegis-mcp"],
       "env": {
         "AEGIS_HOST": "127.0.0.1",
         "AEGIS_PORT": "9470",
