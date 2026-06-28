@@ -330,6 +330,21 @@ def test_multitenancy(binary, port):
         r = srv.req({"operation": "get", "id": acme_id, "token": "admintok"})
         check(r.get("ok") is True, "admin token reads any namespace")
 
+        # working memory is namespace-scoped too: another tenant cannot promote
+        # a working record even with the right session_id (#17).
+        r = srv.req({"operation": "insert", "type": "working",
+                     "session_id": "s-acme", "data": "wm-secret", "token": "acme_rw"})
+        check(r.get("ok") is True, "acme inserts a working record")
+        wid = r["record"]["id"]
+        r = srv.req({"operation": "promote", "session_id": "s-acme",
+                     "working_id": wid, "to_type": "semantic", "token": "beta_rw"})
+        check(r.get("ok") is False and r["error"]["code"] == "NOT_FOUND",
+              "cross-tenant promote -> NOT_FOUND")
+        r = srv.req({"operation": "promote", "session_id": "s-acme",
+                     "working_id": wid, "to_type": "semantic", "token": "acme_rw"})
+        check(r.get("ok") is True and r["record"].get("agent_id") == "acme",
+              "owner promotes its own working record")
+
         # stats is admin-only
         check(srv.req({"operation": "stats", "token": "admintok"}).get("ok") is True,
               "admin token may call stats")

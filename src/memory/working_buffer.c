@@ -145,11 +145,15 @@ MemoryRecord *working_store_get(WorkingStore *ws, const char *session_id,
 }
 
 int working_store_take(WorkingStore *ws, const char *session_id, uint64_t id,
-                       uint64_t now, MemoryRecord *out) {
+                       uint64_t now, const char *ns, MemoryRecord *out) {
     Session *s = get_session(ws, session_id, 0);
     if (!s) return -1;
     Slot *sl = find_slot(s, id, now);
     if (!sl) return -1;
+    /* Tenant ownership: a namespaced caller may only take its own record, so a
+     * known/guessed session_id can't promote another tenant's working memory. */
+    if (ns && (!sl->rec->agent_id || strcmp(sl->rec->agent_id, ns) != 0))
+        return -1;
     *out = *sl->rec; /* move ownership */
     free(sl->rec);
     sl->rec = NULL;

@@ -27,9 +27,11 @@ MemoryRecord *working_store_get(WorkingStore *ws, const char *session_id,
                                 uint64_t id, uint64_t now);
 
 /* Remove a live entry, moving its contents into *out (caller record_free's).
- * Returns 0 on success, -1 if missing/expired. Used by promote. */
+ * When `ns` is non-NULL, the entry is only taken if its agent_id matches it
+ * (tenant ownership), so a namespaced caller can't take another tenant's record.
+ * Returns 0 on success, -1 if missing/expired/not-owned. Used by promote. */
 int working_store_take(WorkingStore *ws, const char *session_id, uint64_t id,
-                       uint64_t now, MemoryRecord *out);
+                       uint64_t now, const char *ns, MemoryRecord *out);
 
 /* Remove all expired entries across sessions. Returns count removed. */
 size_t working_store_sweep(WorkingStore *ws, uint64_t now);
