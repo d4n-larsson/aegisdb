@@ -18,6 +18,7 @@
 #define AEGISDB_LOG_H
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
@@ -29,7 +30,8 @@ typedef struct {
     char path[1100];
     off_t size;             /* current valid end offset (bytes) */
     pthread_mutex_t wlock;  /* serializes appends */
-    size_t since_fsync;
+    /* atomic: mutated under wlock, but log_flush_pending reads it lock-free. */
+    _Atomic size_t since_fsync;
     size_t fsync_batch;     /* fsync after this many appends (0 = every append) */
 } LogFile;
 

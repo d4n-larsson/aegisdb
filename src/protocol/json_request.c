@@ -29,13 +29,14 @@ int jr_f64(const cJSON *o, const char *key, double *out) {
 }
 
 int jr_str_array(const cJSON *o, const char *key, const char ***out,
-                 size_t *out_n) {
+                 size_t *out_n, size_t max) {
     *out = NULL;
     *out_n = 0;
     const cJSON *arr = cJSON_GetObjectItemCaseSensitive(o, key);
     if (!cJSON_IsArray(arr)) return 0;
     int n = cJSON_GetArraySize(arr);
     if (n <= 0) return 0;
+    if (max && (size_t)n > max) return -1; /* reject oversized before allocating */
     const char **vals = malloc((size_t)n * sizeof(char *));
     if (!vals) return -1;
     size_t cnt = 0;
@@ -48,13 +49,15 @@ int jr_str_array(const cJSON *o, const char *key, const char ***out,
     return 0;
 }
 
-int jr_float_array(const cJSON *o, const char *key, float **out, size_t *out_n) {
+int jr_float_array(const cJSON *o, const char *key, float **out, size_t *out_n,
+                   size_t max) {
     *out = NULL;
     *out_n = 0;
     const cJSON *arr = cJSON_GetObjectItemCaseSensitive(o, key);
     if (!cJSON_IsArray(arr)) return 0;
     int n = cJSON_GetArraySize(arr);
     if (n <= 0) return 0;
+    if (max && (size_t)n > max) return -1; /* reject oversized before allocating */
     float *vals = malloc((size_t)n * sizeof(float));
     if (!vals) return -1;
     size_t cnt = 0;

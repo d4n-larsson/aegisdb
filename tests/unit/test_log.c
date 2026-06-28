@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "aegisdb/crc32.h"
@@ -199,6 +200,25 @@ static void test_legacy_v1_migration(void) {
     log_close(&lf);
 }
 
+/* A non-empty pre-v2 log with no recoverable v1 frames (corrupt head) must NOT
+ * be replaced by an empty migrated file — open fails and the original is kept. */
+static void test_legacy_migration_preserves_corrupt_head(void) {
+    /* v1-looking header claiming a huge payload that isn't there -> 0 frames.
+     * First 4 bytes (0x11111111) are not the v2 magic, so migration is attempted. */
+    uint8_t junk[12] = {0x11, 0x11, 0x11, 0x11, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0};
+    int fd = open(g_path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    TEST_ASSERT_TRUE(fd >= 0);
+    TEST_ASSERT_EQUAL_INT(12, pwrite(fd, junk, sizeof(junk), 0));
+    close(fd);
+
+    LogFile lf;
+    TEST_ASSERT_EQUAL_INT(-1, log_open(&lf, g_path, 0)); /* refuses to migrate */
+
+    struct stat st;
+    TEST_ASSERT_EQUAL_INT(0, stat(g_path, &st));
+    TEST_ASSERT_EQUAL_INT(12, (int)st.st_size); /* original bytes preserved */
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_append_read_roundtrip);
@@ -207,5 +227,6 @@ int main(void) {
     RUN_TEST(test_torn_tail_detected);
     RUN_TEST(test_midlog_corruption_recovers_tail);
     RUN_TEST(test_legacy_v1_migration);
+    RUN_TEST(test_legacy_migration_preserves_corrupt_head);
     return UNITY_END();
 }

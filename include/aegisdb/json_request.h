@@ -27,11 +27,14 @@ int jr_f64(const cJSON *o, const char *key, double *out);
 
 /* Extract a string array (e.g. tags). Allocates *out (array of char*, each
  * borrowed from the cJSON tree — do not free the strings, only the array).
- * Returns 0/-1; *out_n set. */
+ * `max` bounds the array length: if `max` is non-zero and the array is longer,
+ * returns -1 without allocating. Returns 0/-1; *out_n set. */
 int jr_str_array(const cJSON *o, const char *key, const char ***out,
-                 size_t *out_n);
+                 size_t *out_n, size_t max);
 
-/* Extract a float array (e.g. embedding). Allocates *out (free with free()). */
-int jr_float_array(const cJSON *o, const char *key, float **out, size_t *out_n);
+/* Extract a float array (e.g. embedding). Allocates *out (free with free()).
+ * `max` bounds the length as in jr_str_array. */
+int jr_float_array(const cJSON *o, const char *key, float **out, size_t *out_n,
+                   size_t max);
 
 #endif /* AEGISDB_JSON_REQUEST_H */
