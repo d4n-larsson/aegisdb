@@ -40,22 +40,24 @@ Pick an embedding dimension and use it everywhere (see the dimension note below)
 
 ### 2. Make the integration available
 
-Only the **MCP tools server** needs installing (it requires the `mcp` SDK). The
+Only the **MCP tools server** needs the package (it requires the `mcp` SDK). The
 **hooks need no install** — they run on the standard library — so if you only want
 automatic recall/capture, skip to step 3.
 
-Use a virtual environment. On Debian/Ubuntu a plain `pip install` fails with
-`error: externally-managed-environment` (PEP 668), and a venv is the clean fix:
+The package is published on PyPI as **`aegis-mcp`**, so the zero-clone path is to
+let [`uv`](https://docs.astral.sh/uv/) fetch and run it on demand — nothing to
+install or keep updated. Just have `uv` available and register `uvx aegis-mcp`
+(step 4); `uvx` resolves the package the first time Claude Code launches it.
+
+For local development from a checkout, install it editable into a venv instead
+(on Debian/Ubuntu a plain `pip install` fails with PEP 668's
+`externally-managed-environment`, so a venv is the clean fix):
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e integrations/claude-code              # MCP server + `mcp` SDK
 .venv/bin/pip install -e "integrations/claude-code[voyage]"    # optional: semantic embeddings
 ```
-
-Note the venv's Python path (e.g. `$(pwd)/.venv/bin/python`) — step 4 points the
-MCP server at it. Alternatively, `pipx install -e integrations/claude-code`
-installs the `aegis-mcp` command in its own managed environment.
 
 ### 3. Choose an embedding mode
 
@@ -67,14 +69,14 @@ installs the `aegis-mcp` command in its own managed environment.
 
 ### 4. Register the MCP server
 
-Point the server at the venv's Python from step 2 (use an **absolute path** —
-Claude Code controls the launch directory). Either use the CLI:
+The simplest registration runs the published package with `uvx` — no clone, no
+venv, no absolute paths. Either use the CLI:
 
 ```bash
 claude mcp add memory --scope project \
   -e AEGIS_NAMESPACE=my-project \
   -e AEGIS_EMBEDDING_DIMENSIONS=1024 \
-  -- /abs/path/to/repo/.venv/bin/python -m aegis_mcp.server
+  -- uvx aegis-mcp
 ```
 
 …or commit a project-scope `.mcp.json` (see [`examples/mcp.json`](examples/mcp.json)):
@@ -83,33 +85,40 @@ claude mcp add memory --scope project \
 {
   "mcpServers": {
     "memory": {
-      "command": "/abs/path/to/repo/.venv/bin/python",
-      "args": ["-m", "aegis_mcp.server"],
+      "command": "uvx",
+      "args": ["aegis-mcp"],
       "env": { "AEGIS_NAMESPACE": "my-project", "AEGIS_EMBEDDING_DIMENSIONS": "1024" }
     }
   }
 }
 ```
 
-(The package also installs an `aegis-mcp` console script, so
-`"command": "/abs/path/to/repo/.venv/bin/aegis-mcp"` with no `args` works too.)
+Pin a version with `uvx aegis-mcp@0.1.0`. If you installed editable into a venv
+instead (step 2), point `command` at that venv's `aegis-mcp` console script (or
+`.venv/bin/python` with `"args": ["-m", "aegis_mcp.server"]`) using an
+**absolute path**, since Claude Code controls the launch directory.
 
 ### 5. Enable automatic recall & capture
 
-Add the hooks to `.claude/settings.json` (see [`examples/settings.json`](examples/settings.json)):
+Add the hooks to `.claude/settings.json` (see [`examples/settings.json`](examples/settings.json)).
+The published package exposes them as console scripts, so `uvx` runs them with no
+clone — the same zero-install path as the MCP server:
 
 ```jsonc
 {
   "hooks": {
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "python3 integrations/claude-code/hooks/recall_hook.py" } ] }
+      { "hooks": [ { "type": "command", "command": "uvx --from aegis-mcp aegis-recall-hook" } ] }
     ],
     "SessionEnd": [
-      { "hooks": [ { "type": "command", "command": "python3 integrations/claude-code/hooks/capture_hook.py" } ] }
+      { "hooks": [ { "type": "command", "command": "uvx --from aegis-mcp aegis-capture-hook" } ] }
     ]
   }
 }
 ```
+
+From a checkout, run the scripts by path instead:
+`python3 integrations/claude-code/hooks/recall_hook.py` (and `capture_hook.py`).
 
 ### 6. Confirm it works
 
@@ -138,8 +147,14 @@ running on the configured host/port; the agent stays usable either way.
 
 ## Install
 
-Only the MCP server requires installation (for the `mcp` SDK). Install it into a
-virtual environment — on Debian/Ubuntu a global `pip install` is blocked by PEP 668
+Only the MCP server needs the package (for the `mcp` SDK). The simplest option
+is **not to install it at all**: it is published on PyPI as `aegis-mcp`, so
+registering `uvx aegis-mcp` lets [`uv`](https://docs.astral.sh/uv/) fetch and run
+it on demand (see "Register the MCP server"). `pipx run aegis-mcp` works the same
+way.
+
+For development from a checkout, install it editable into a virtual environment —
+on Debian/Ubuntu a global `pip install` is blocked by PEP 668
 (`error: externally-managed-environment`):
 
 ```bash
@@ -148,10 +163,6 @@ python3 -m venv .venv
 .venv/bin/pip install -e "integrations/claude-code[voyage]"   # optional: Voyage embeddings
 .venv/bin/pip install -e "integrations/claude-code[local]"    # optional: local embeddings
 ```
-
-Then register the server using the venv's Python (see "Register the MCP server").
-`pipx install -e integrations/claude-code` is an alternative that manages the venv
-for you and exposes the `aegis-mcp` command.
 
 The hooks and all core logic run on the standard library alone — **no install is
 required** to use the hooks or to run the tests.
@@ -197,8 +208,8 @@ Project-scope `.mcp.json` (see [`examples/mcp.json`](examples/mcp.json)):
 {
   "mcpServers": {
     "memory": {
-      "command": "python3",
-      "args": ["-m", "aegis_mcp.server"],
+      "command": "uvx",
+      "args": ["aegis-mcp"],
       "env": { "AEGIS_NAMESPACE": "my-project", "AEGIS_EMBEDDING_DIMENSIONS": "1024" }
     }
   }
@@ -207,16 +218,18 @@ Project-scope `.mcp.json` (see [`examples/mcp.json`](examples/mcp.json)):
 
 ## Enable automatic recall & capture
 
-Add to `.claude/settings.json` (see [`examples/settings.json`](examples/settings.json)):
+Add to `.claude/settings.json` (see [`examples/settings.json`](examples/settings.json)).
+`uvx` runs the packaged hooks with no clone (use the `python3 …/hooks/*.py` paths
+from a checkout):
 
 ```jsonc
 {
   "hooks": {
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "python3 integrations/claude-code/hooks/recall_hook.py" } ] }
+      { "hooks": [ { "type": "command", "command": "uvx --from aegis-mcp aegis-recall-hook" } ] }
     ],
     "SessionEnd": [
-      { "hooks": [ { "type": "command", "command": "python3 integrations/claude-code/hooks/capture_hook.py" } ] }
+      { "hooks": [ { "type": "command", "command": "uvx --from aegis-mcp aegis-capture-hook" } ] }
     ]
   }
 }
@@ -260,8 +273,8 @@ write and filters every read to the token's tenant:
 {
   "mcpServers": {
     "memory": {
-      "command": "python3",
-      "args": ["-m", "aegis_mcp.server"],
+      "command": "uvx",
+      "args": ["aegis-mcp"],
       "env": {
         "AEGIS_HOST": "memory.internal",
         "AEGIS_PORT": "9470",

@@ -23,6 +23,8 @@ dev = ["pytest>=7"]
 
 [project.scripts]
 aegis-mcp = "aegis_mcp.server:main"
+aegis-recall-hook = "aegis_mcp.hooks:recall"
+aegis-capture-hook = "aegis_mcp.hooks:capture"
 
 [tool.setuptools]
 packages = ["aegis_mcp"]
