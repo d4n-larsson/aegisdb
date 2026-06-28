@@ -73,8 +73,16 @@ int semantic_index_add(SemanticIndex *s, uint64_t id, const float *vec,
 }
 
 void semantic_index_remove(SemanticIndex *s, uint64_t id) {
-    SemEntry *e = find(s, id);
-    if (e) e->used = 0;
+    for (size_t i = 0; i < s->n; i++) {
+        if (s->e[i].used && s->e[i].id == id) {
+            free(s->e[i].vec);
+            /* swap-remove: keep the array dense so it never grows with the
+             * number of deletions and search stays O(live entries). */
+            if (i != s->n - 1) s->e[i] = s->e[s->n - 1];
+            s->n--;
+            return;
+        }
+    }
 }
 
 typedef struct {

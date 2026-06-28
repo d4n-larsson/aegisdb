@@ -121,6 +121,41 @@ static void test_semantic_topk_ordering(void) {
     semantic_index_free(s);
 }
 
+/* Removing an entry must shrink the index and exclude it from results, and
+ * remove/re-add churn must not grow the index (no leaked/dead slots). */
+static void test_semantic_remove_reclaims(void) {
+    const size_t dim = 2;
+    SemanticIndex *s = semantic_index_create(dim);
+    float v1[] = {1.0f, 0.0f};
+    float v2[] = {0.0f, 1.0f};
+    semantic_index_add(s, 1, v1, dim);
+    semantic_index_add(s, 2, v2, dim);
+    TEST_ASSERT_EQUAL_size_t(2, semantic_index_count(s));
+
+    semantic_index_remove(s, 1);
+    TEST_ASSERT_EQUAL_size_t(1, semantic_index_count(s)); /* slot reclaimed */
+
+    /* id 1 must no longer appear in search results. */
+    float q[] = {1.0f, 0.0f};
+    uint64_t *ids = NULL;
+    float *scores = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0,
+        semantic_index_search(s, q, dim, 10, &ids, &scores, &n));
+    TEST_ASSERT_EQUAL_size_t(1, n);
+    TEST_ASSERT_EQUAL_UINT64(2, ids[0]);
+    free(ids);
+    free(scores);
+
+    /* remove/re-add churn stays bounded (no dead-slot accumulation). */
+    for (int i = 0; i < 100; i++) {
+        semantic_index_add(s, 1, v1, dim);
+        semantic_index_remove(s, 1);
+    }
+    TEST_ASSERT_EQUAL_size_t(1, semantic_index_count(s));
+    semantic_index_free(s);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_time_range_chronological);
@@ -128,5 +163,6 @@ int main(void) {
     RUN_TEST(test_tag_intersection_and_union);
     RUN_TEST(test_tag_remove);
     RUN_TEST(test_semantic_topk_ordering);
+    RUN_TEST(test_semantic_remove_reclaims);
     return UNITY_END();
 }
