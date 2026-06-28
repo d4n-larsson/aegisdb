@@ -15,6 +15,7 @@ AEGIS_ERROR_MAP = {
     "IMMUTABLE": "immutable",
     "NOT_READY": "unavailable",
     "UNAUTHORIZED": "unauthorized",
+    "FORBIDDEN": "forbidden",
     "INTERNAL": "unavailable",
 }
 

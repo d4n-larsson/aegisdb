@@ -47,5 +47,54 @@ class TestIsolationE2E(unittest.TestCase):
             self.assertEqual(b.search(tags=["x"], top_k=10)["total"], 1)
 
 
+@unittest.skipUnless(binary_available(), "aegisdb binary not built")
+class TestEnforcedIsolationE2E(unittest.TestCase):
+    """Server-enforced multi-tenancy: each token is bound to a namespace + scope,
+    so isolation holds even against an authenticated client that asks for another
+    namespace — unlike advisory (no-auth) isolation."""
+
+    TOKENS = ["acme-key acme rw", "beta-key beta rw", "acme-view acme ro"]
+
+    def _tools(self, srv, token, namespace):
+        cfg = make_config(srv, namespace=namespace, auth_token=token)
+        return MemoryTools(cfg, AegisClient(cfg.aegis_host, cfg.aegis_port,
+                                            auth_token=cfg.auth_token),
+                           FakeProvider(srv.dim))
+
+    def test_token_namespace_is_authoritative(self):
+        with AegisServer(token_lines=self.TOKENS) as srv:
+            # acme's client deliberately claims a *different* namespace; the
+            # server must pin the record to the token's namespace ("acme").
+            acme = self._tools(srv, "acme-key", namespace="not-acme")
+            beta = self._tools(srv, "beta-key", namespace="beta")
+
+            mem_id = acme.save("acme only", tags=["s"])["id"]
+
+            # A second authenticated tenant cannot read it (NOT_FOUND, no leak).
+            self.assertEqual(beta.get(mem_id)["error"], "not_found")
+            self.assertEqual(beta.search(tags=["s"], top_k=10)["total"], 0)
+
+            # The owner sees it despite the client-side namespace mismatch,
+            # proving the token's namespace — not AEGIS_NAMESPACE — governs.
+            self.assertTrue(acme.get(mem_id)["ok"])
+            self.assertEqual(acme.search(tags=["s"], top_k=10)["total"], 1)
+
+    def test_read_only_token_cannot_write(self):
+        with AegisServer(token_lines=self.TOKENS) as srv:
+            ro = self._tools(srv, "acme-view", namespace="acme")
+            res = ro.save("should be rejected", tags=["s"])
+            self.assertFalse(res["ok"])
+            self.assertEqual(res["error"], "forbidden")
+
+    def test_missing_token_is_unauthorized(self):
+        with AegisServer(token_lines=self.TOKENS) as srv:
+            cfg = make_config(srv, namespace="acme")  # no auth_token
+            tools = MemoryTools(cfg, AegisClient(cfg.aegis_host, cfg.aegis_port),
+                                FakeProvider(srv.dim))
+            res = tools.save("no token", tags=["s"])
+            self.assertFalse(res["ok"])
+            self.assertEqual(res["error"], "unauthorized")
+
+
 if __name__ == "__main__":
     unittest.main()
