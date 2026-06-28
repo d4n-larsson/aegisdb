@@ -47,7 +47,8 @@ def run_recall(prompt: str, config, provider: EmbeddingProvider,
         # cannot stall the turn.
         client = AegisClient(config.aegis_host, config.aegis_port,
                              connect_timeout_ms=min(config.connect_timeout_ms, budget_ms),
-                             read_timeout_ms=budget_ms)
+                             read_timeout_ms=budget_ms,
+                             auth_token=config.auth_token)
 
     if not prompt or not prompt.strip():
         return RecallResult(degraded=False, elapsed_ms=0)

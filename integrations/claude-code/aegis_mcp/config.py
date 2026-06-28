@@ -24,7 +24,7 @@ class Config:
     namespace: str = ""  # resolved separately; never blank after load_config()
 
     embedding_mode: str = "none"  # "voyage" | "local" | "none"
-    embedding_model: str = "voyage-4"
+    embedding_model: str = "voyage-3-large"
     embedding_dimensions: int = 1024
 
     recall_enabled: bool = True

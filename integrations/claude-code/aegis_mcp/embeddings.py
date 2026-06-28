@@ -99,7 +99,7 @@ class VoyageProvider(EmbeddingProvider):
     ``VOYAGE_API_KEY``. Output dimension is pinned to the configured value via
     Voyage's Matryoshka ``output_dimension`` so it always matches the server."""
 
-    def __init__(self, model: str = "voyage-4", dim: int = 1024):
+    def __init__(self, model: str = "voyage-3-large", dim: int = 1024):
         self._model = model
         self._dim = dim
         self._client = None
@@ -138,9 +138,8 @@ class LocalProvider(EmbeddingProvider):
     """Local sentence-transformer provider (T039). Requires the optional
     ``sentence-transformers`` extra; fully offline."""
 
-    def __init__(self, model: str = "all-MiniLM-L6-v2", dim: int = 384):
+    def __init__(self, model: str = "all-MiniLM-L6-v2"):
         self._model_name = model
-        self._dim = dim
         self._model = None
 
     def _ensure(self):
@@ -157,7 +156,9 @@ class LocalProvider(EmbeddingProvider):
         return True
 
     def dimension(self) -> int:
-        return self._dim
+        # Report the model's true output size so a config/server mismatch is
+        # caught at startup rather than silently producing wrong-sized vectors.
+        return int(self._ensure().get_sentence_embedding_dimension())
 
     def embed_document(self, text: str) -> list[float]:
         model = self._ensure()
@@ -176,7 +177,9 @@ def make_provider(config) -> EmbeddingProvider:
         p = VoyageProvider(config.embedding_model, config.embedding_dimensions)
         return p if p.available() else NoneProvider()
     if mode == "local":
-        p = LocalProvider(dim=config.embedding_dimensions)
+        # Uses the local default model (all-MiniLM-L6-v2, 384-dim); set
+        # AEGIS_EMBEDDING_DIMENSIONS=384 and the server's --embedding-dim to match.
+        p = LocalProvider()
         return p if p.available() else NoneProvider()
     return NoneProvider()
 

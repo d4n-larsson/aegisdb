@@ -151,7 +151,8 @@ def run_capture(event: dict, config, provider: EmbeddingProvider,
     if client is None:
         client = AegisClient(config.aegis_host, config.aegis_port,
                              connect_timeout_ms=config.connect_timeout_ms,
-                             read_timeout_ms=config.read_timeout_ms)
+                             read_timeout_ms=config.read_timeout_ms,
+                             auth_token=config.auth_token)
     tools = MemoryTools(config, client, provider)
     stored = 0
     for cand in survivors:
