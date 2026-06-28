@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "aegisdb/logging.h"
+
 void config_defaults(Config *cfg) {
     memset(cfg, 0, sizeof(*cfg));
     cfg->listen_port = 9470;
@@ -16,6 +18,15 @@ void config_defaults(Config *cfg) {
     cfg->fsync_batch_size = 1000;
     cfg->worker_threads = 4;
     cfg->enabled_phase = 4; /* all features enabled by default */
+    cfg->log_level = AEGIS_LOG_INFO;
+
+    /* AEGISDB_LOG_LEVEL seeds the default; --log-level overrides it. */
+    const char *env = getenv("AEGISDB_LOG_LEVEL");
+    if (env && *env) {
+        AegisLogLevel lvl;
+        if (aegis_log_level_from_string(env, &lvl) == 0)
+            cfg->log_level = lvl;
+    }
 }
 
 /* Append a copy of `tok` to the accepted-token list. Returns 0 on success. */
@@ -80,6 +91,8 @@ static void usage(const char *prog) {
             "  --working-capacity <n>   ring buffer size (default 256)\n"
             "  --auth-token <token>     accept this bearer token (repeatable)\n"
             "  --auth-token-file <path> accept tokens listed one per line\n"
+            "  --log-level <level>      error|warn|info|debug (default info,\n"
+            "                           or $AEGISDB_LOG_LEVEL)\n"
             "  --health-check           probe a local server (--port) and exit\n"
             "  --help                   show this help\n"
             "\n"
@@ -168,6 +181,16 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
                         val);
                 return -1;
             }
+        } else if (strcmp(a, "--log-level") == 0) {
+            NEXT("--log-level");
+            AegisLogLevel lvl;
+            if (aegis_log_level_from_string(val, &lvl) != 0) {
+                fprintf(stderr, "%s: invalid log-level '%s' "
+                                "(error|warn|info|debug)\n",
+                        prog, val);
+                return -1;
+            }
+            cfg->log_level = lvl;
         } else {
             fprintf(stderr, "%s: unknown argument '%s'\n", prog, a);
             usage(prog);

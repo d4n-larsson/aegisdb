@@ -36,10 +36,16 @@ Either way the server binary is produced at `build/aegisdb`.
 Expected startup log:
 
 ```text
-[aegisdb] recovery complete: N records loaded
-[aegisdb] listening on 0.0.0.0:9470
-[aegisdb] data directory: ./data
+2026-06-28 12:00:00.000 INFO  [aegisdb] AegisDB 0.1.0 starting (log level: info)
+2026-06-28 12:00:00.000 INFO  [aegisdb] recovery complete: N records loaded
+2026-06-28 12:00:00.000 INFO  [aegisdb] listening on 0.0.0.0:9470
+2026-06-28 12:00:00.000 INFO  [aegisdb] data directory: ./data
 ```
+
+Each line is `<timestamp> <LEVEL> [aegisdb] <message>` on stderr. Set the
+verbosity with `--log-level error|warn|info|debug` (or the `AEGISDB_LOG_LEVEL`
+environment variable; the flag wins). `debug` adds per-connection and
+per-request detail.
 
 Common flags (see `--help` for the full list):
 
@@ -48,6 +54,7 @@ Common flags (see `--help` for the full list):
 | `--data-dir <path>` | `./data` | Where the append-only log and indexes live |
 | `--port <n>` | `9470` | TCP listen port |
 | `--embedding-dim <n>` | `384` | Vector length; must match the embeddings your client sends |
+| `--log-level <level>` | `info` | `error`, `warn`, `info`, or `debug` (also `$AEGISDB_LOG_LEVEL`) |
 | `--auth-token <token>` | — | Require this bearer token (repeatable) |
 | `--auth-token-file <path>` | — | Load accepted tokens, one per line |
 

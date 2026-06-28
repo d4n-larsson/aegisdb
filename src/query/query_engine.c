@@ -12,6 +12,7 @@
 
 #include "aegisdb/json_request.h"
 #include "aegisdb/json_response.h"
+#include "aegisdb/logging.h"
 
 /* ----- phase gating (T055) --------------------------------------------- */
 
@@ -808,11 +809,18 @@ static int request_authorized(AegisDB *db, const cJSON *req) {
 
 cJSON *query_engine_dispatch(AegisDB *db, const cJSON *req) {
     const char *op = jr_str(req, "operation", NULL);
-    if (!op) return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    if (!op) {
+        LOG_DEBUG("dispatch: request with no \"operation\" field");
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
 
     /* "ping" is exempt so liveness and startup probes work unauthenticated. */
-    if (strcmp(op, "ping") != 0 && !request_authorized(db, req))
+    if (strcmp(op, "ping") != 0 && !request_authorized(db, req)) {
+        LOG_WARN("dispatch: unauthorized \"%s\" request rejected", op);
         return json_error_status(AEGIS_ERR_UNAUTHORIZED);
+    }
+
+    LOG_DEBUG("dispatch: operation \"%s\"", op);
 
     if (strcmp(op, "ping") == 0) return handle_ping(db);
     if (strcmp(op, "insert") == 0) return handle_insert(db, req);
@@ -824,5 +832,6 @@ cJSON *query_engine_dispatch(AegisDB *db, const cJSON *req) {
     if (strcmp(op, "relate") == 0) return handle_relate(db, req);
     if (strcmp(op, "traverse") == 0) return handle_traverse(db, req);
 
+    LOG_WARN("dispatch: unknown operation \"%s\"", op);
     return json_error("INVALID_REQUEST", "unknown operation");
 }

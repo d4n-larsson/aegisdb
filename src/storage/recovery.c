@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "aegisdb/logging.h"
 #include "aegisdb/record.h"
 
 typedef struct {
@@ -28,18 +29,24 @@ static int scan_cb(uint64_t offset, const uint8_t *payload, size_t len,
 long recovery_run(AegisDB *db) {
     ScanCtx sc = {db, 0};
     uint64_t valid_end = 0;
-    if (log_scan(&db->log, scan_cb, &sc, &valid_end) != 0) return -1;
+    LOG_DEBUG("recovery: scanning log %s (%llu bytes)", db->path_log,
+              (unsigned long long)db->log.size);
+    if (log_scan(&db->log, scan_cb, &sc, &valid_end) != 0) {
+        LOG_ERROR("recovery: log scan failed on %s", db->path_log);
+        return -1;
+    }
 
     /* Drop a torn tail left by a mid-write crash. */
     if (valid_end < (uint64_t)db->log.size) {
-        fprintf(stderr,
-                "[aegisdb] truncating torn tail: %llu -> %llu bytes\n",
-                (unsigned long long)db->log.size,
-                (unsigned long long)valid_end);
+        LOG_WARN("truncating torn tail: %llu -> %llu bytes",
+                 (unsigned long long)db->log.size,
+                 (unsigned long long)valid_end);
         log_truncate(&db->log, valid_end);
     }
 
     db->next_id = sc.max_id + 1;
+    LOG_DEBUG("recovery: hash index rebuilt, %zu entries, next id %llu",
+              db->hash->count, (unsigned long long)db->next_id);
 
     /* Pass 2: populate secondary indexes from the surviving (latest) records. */
     long live = 0;
@@ -63,5 +70,7 @@ long recovery_run(AegisDB *db) {
         }
         free(buf);
     }
+    LOG_DEBUG("recovery: secondary indexes populated from %ld live record(s)",
+              live);
     return live;
 }

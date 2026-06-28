@@ -39,8 +39,8 @@ trading a bounded window of durability for throughput.
 On startup the server scans `memory.log` from the beginning, validating each
 frame's CRC32 and rebuilding the in-memory indexes. If the process died
 mid-append, the final frame may be torn; recovery detects this and truncates the
-log back to the last valid offset (`[aegisdb] truncating torn tail: …`), then
-reports `[aegisdb] recovery complete: N records loaded`. Because every index is
+log back to the last valid offset (logged as `WARN … truncating torn tail: …`),
+then reports `INFO … recovery complete: N records loaded`. Because every index is
 derived from the log, the log alone is sufficient to reconstruct full state.
 
 ### Compaction

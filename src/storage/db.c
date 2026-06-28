@@ -12,6 +12,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include "aegisdb/logging.h"
 #include "aegisdb/recovery.h"
 
 uint64_t db_now_ms(void) {
@@ -70,9 +71,13 @@ int db_open(AegisDB *db, const Config *cfg) {
     db->next_id = 1;
 
     if (mkdir_p(cfg->data_dir) != 0) {
-        fprintf(stderr, "[aegisdb] cannot create data dir: %s\n", cfg->data_dir);
+        LOG_ERROR("cannot create data dir: %s", cfg->data_dir);
         return -1;
     }
+    LOG_DEBUG("opening database in %s (embedding-dim %zu, working-capacity %u, "
+              "fsync-batch %zu)",
+              cfg->data_dir, cfg->embedding_dimensions, cfg->working_capacity,
+              cfg->fsync_batch_size);
     snprintf(db->path_log, sizeof(db->path_log), "%s/memory.log", cfg->data_dir);
     snprintf(db->path_index, sizeof(db->path_index), "%s/memory.index",
              cfg->data_dir);
@@ -86,7 +91,7 @@ int db_open(AegisDB *db, const Config *cfg) {
     }
 
     if (log_open(&db->log, db->path_log, cfg->fsync_batch_size) != 0) {
-        fprintf(stderr, "[aegisdb] cannot open log: %s\n", db->path_log);
+        LOG_ERROR("cannot open log: %s", db->path_log);
         goto fail_locks;
     }
     db->hash = hash_index_create();
@@ -96,16 +101,16 @@ int db_open(AegisDB *db, const Config *cfg) {
     db->working =
         working_store_create(cfg->working_capacity, cfg->default_ttl_ms);
     if (!db->hash || !db->time || !db->tags || !db->sem || !db->working) {
-        fprintf(stderr, "[aegisdb] index allocation failed\n");
+        LOG_ERROR("index allocation failed");
         goto fail_indexes;
     }
 
     long loaded = recovery_run(db);
     if (loaded < 0) {
-        fprintf(stderr, "[aegisdb] recovery failed\n");
+        LOG_ERROR("recovery failed");
         goto fail_indexes;
     }
-    fprintf(stderr, "[aegisdb] recovery complete: %ld records loaded\n", loaded);
+    LOG_INFO("recovery complete: %ld records loaded", loaded);
     db->running = 1;
     return 0;
 
@@ -124,9 +129,12 @@ fail_locks:
 
 void db_close(AegisDB *db) {
     db->running = 0;
+    LOG_DEBUG("closing database: flushing log and persisting index/metadata");
     log_fsync(&db->log);
-    hash_index_save(db->hash, db->path_index);
-    db_save_metadata(db);
+    if (hash_index_save(db->hash, db->path_index) != 0)
+        LOG_WARN("failed to persist hash index to %s", db->path_index);
+    if (db_save_metadata(db) != 0)
+        LOG_WARN("failed to persist metadata to %s", db->path_meta);
     hash_index_free(db->hash);
     time_index_free(db->time);
     tag_index_free(db->tags);

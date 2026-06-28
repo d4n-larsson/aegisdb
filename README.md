@@ -81,13 +81,19 @@ protocol is plaintext, so keep the port on a trusted network.
 Expected startup output:
 
 ```text
-[aegisdb] recovery complete: N records loaded
-[aegisdb] WARNING: no auth tokens configured; ...
-[aegisdb] listening on 0.0.0.0:9470
-[aegisdb] data directory: ./data
+2026-06-28 12:00:00.000 INFO  [aegisdb] AegisDB 0.1.0 starting (log level: info)
+2026-06-28 12:00:00.000 WARN  [aegisdb] no auth tokens configured; ...
+2026-06-28 12:00:00.000 INFO  [aegisdb] recovery complete: N records loaded
+2026-06-28 12:00:00.000 INFO  [aegisdb] listening on 0.0.0.0:9470
+2026-06-28 12:00:00.000 INFO  [aegisdb] data directory: ./data
 ```
 
-The `WARNING` line appears only when the server is started without
+Logs go to stderr as `<timestamp> <LEVEL> [aegisdb] <message>`. Control the
+verbosity with `--log-level error|warn|info|debug` (default `info`) or the
+`AEGISDB_LOG_LEVEL` environment variable — the flag takes precedence. At
+`debug`, the server logs every accepted connection and dispatched operation.
+
+The `WARN` line appears only when the server is started without
 `--auth-token`/`--auth-token-file` (see [Authentication](#authentication)).
 
 ### Configuration flags
@@ -102,6 +108,7 @@ The `WARNING` line appears only when the server is started without
 | `--embedding-dim <n>` | `384` | Expected embedding vector length |
 | `--fsync-batch <n>` | `1000` | Records between `fsync` calls |
 | `--working-capacity <n>` | `256` | Working-memory ring buffer size |
+| `--log-level <level>` | `info` | `error`, `warn`, `info`, or `debug` (also `$AEGISDB_LOG_LEVEL`) |
 | `--auth-token <token>` | — | Accept this bearer token (repeatable) |
 | `--auth-token-file <path>` | — | Accept tokens listed one per line |
 | `--health-check` | | Probe a local server on `--port`, print nothing, exit 0 if healthy / 1 otherwise |
