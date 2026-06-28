@@ -83,7 +83,7 @@ Add to `.claude/settings.json`:
 
 ## Verify
 
-**1. Explicit save/recall (US1)** — in a Claude Code session:
+**1. Explicit save/recall** — in a Claude Code session:
 
 > "Remember that this project deploys with `make ship`."
 
@@ -94,14 +94,14 @@ The agent calls `memory_save`. In a **new** session:
 The agent calls `memory_search` (or the recall hook injects it) and answers from
 memory.
 
-**2. Automatic recall (US2)** — with the recall hook enabled, simply ask a
+**2. Automatic recall** — with the recall hook enabled, simply ask a
 question related to a stored memory; the relevant memory appears in context
 without any explicit recall request.
 
-**3. Isolation (US4)** — repeat in a different project directory; the first
+**3. Isolation** — repeat in a different project directory; the first
 project's memories are not returned.
 
-**4. Degradation (FR-009/SC-003)** — stop AegisDB, then use Claude Code normally:
+**4. Degradation** — stop AegisDB, then use Claude Code normally:
 sessions remain fully usable; recall silently injects nothing; explicit tool calls
 return `ok:false, error:"unavailable"`.
 

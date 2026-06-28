@@ -2,9 +2,9 @@
 
 A standalone C database server optimized for **AI agent memory**: append-heavy
 writes, fast ID lookup, temporal/tag search, semantic similarity, and volatile
-working memory. AegisDB uses a log-structured storage engine with phased indexes
-(hash → B+ tree + inverted tags → HNSW-style vector search) behind a JSON-over-TCP
-wire protocol.
+working memory. AegisDB uses a log-structured storage engine with purpose-built
+indexes (hash for ID lookup, a sorted time index, inverted tags, and exact-cosine
+vector search) behind a JSON-over-TCP wire protocol.
 
 ## Features
 
@@ -12,8 +12,11 @@ wire protocol.
 - **Semantic facts** — updateable records (latest version wins)
 - **Working memory** — volatile per-session ring buffer with TTL and promotion
 - **Retrieval** — lookup by ID, time-range search, tag search (`all`/`any`),
-  semantic (embedding) search with importance × confidence × similarity ranking
-- **Relationships** — directed edges between records and agent-namespace isolation
+  semantic (embedding) search ranked by cosine similarity weighted by
+  importance × confidence
+- **Relationships** — directed edges between records, graph traversal, and
+  agent-namespace isolation
+- **Authentication** — optional bearer-token auth (constant-time check; `ping` exempt)
 - **Concurrency** — worker thread pool, batched `fsync`
 
 ## Requirements
@@ -29,14 +32,16 @@ wire protocol.
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # runs any unit tests present
+ctest --test-dir build --output-on-failure   # runs the unit test suite
 ```
 
 ### With Make (no CMake required)
 
 ```bash
-make            # builds build/aegisdb
-make test       # builds and runs any tests/unit/*.c
+make             # builds build/aegisdb
+make test        # builds and runs the C unit tests
+make integration # wire-protocol contract tests (launches the server)
+make check       # unit + integration
 make clean
 ```
 
@@ -52,9 +57,13 @@ Expected startup output:
 
 ```text
 [aegisdb] recovery complete: N records loaded
+[aegisdb] WARNING: no auth tokens configured; ...
 [aegisdb] listening on 0.0.0.0:9470
 [aegisdb] data directory: ./data
 ```
+
+The `WARNING` line appears only when the server is started without
+`--auth-token`/`--auth-token-file` (see [Authentication](#authentication)).
 
 ### Configuration flags
 
@@ -68,7 +77,18 @@ Expected startup output:
 | `--embedding-dim <n>` | `384` | Expected embedding vector length |
 | `--fsync-batch <n>` | `1000` | Records between `fsync` calls |
 | `--working-capacity <n>` | `256` | Working-memory ring buffer size |
+| `--auth-token <token>` | — | Accept this bearer token (repeatable) |
+| `--auth-token-file <path>` | — | Accept tokens listed one per line |
 | `--help` | | Show usage |
+
+### Authentication
+
+With no `--auth-token`/`--auth-token-file`, the server runs **without
+authentication** and every request is served. When one or more tokens are
+configured, each request must carry a matching `"token"` field (except `ping`,
+which is always exempt) or the server returns `UNAUTHORIZED`. Tokens are
+compared in constant time and sent in plaintext, so run the server behind an
+encrypted channel (VPN, SSH tunnel, or TLS-terminating proxy).
 
 ## Wire Protocol
 
@@ -153,3 +173,4 @@ the step-by-step setup (start AegisDB → register the MCP server → enable the
 
 - Wire protocol: [`docs/wire-protocol.md`](docs/wire-protocol.md)
 - Quickstart: [`docs/quickstart.md`](docs/quickstart.md)
+- Architecture: [`docs/architecture.md`](docs/architecture.md)

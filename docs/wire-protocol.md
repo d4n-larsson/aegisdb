@@ -47,7 +47,7 @@ or TLS-terminating proxy).
 | `NOT_FOUND` | 404 | Memory ID does not exist |
 | `PAYLOAD_TOO_LARGE` | 413 | `data` exceeds limit |
 | `IMMUTABLE` | 409 | Update attempted on episodic record |
-| `NOT_READY` | 503 | Index/feature not yet enabled (phase gating) |
+| `NOT_READY` | 503 | Operation disabled by `--phase` gating (advanced; see below) |
 | `UNAUTHORIZED` | 401 | Missing or invalid `token` when authentication is enabled |
 | `INTERNAL` | 500 | Unexpected server error |
 
@@ -55,9 +55,11 @@ or TLS-terminating proxy).
 
 ## Operations
 
-### `insert` (Phase 1+)
+### `insert`
 
-Store a new memory record.
+Store a new memory record. To create **working** memory, set `type` to `working`
+and include a `session_id` (and optionally `ttl_ms`); the returned record's `id`
+is what you later pass to `promote` as `working_id`.
 
 **Request**:
 
@@ -80,9 +82,10 @@ Store a new memory record.
 | `tags` | string[] | No | |
 | `importance` | number | No | 0.0–1.0 |
 | `confidence` | number | No | 0.0–1.0 |
-| `embedding` | number[] | No | Phase 3+ |
-| `agent_id` | string | No | Phase 4+ |
-| `ttl_ms` | integer | No | Working memory only |
+| `embedding` | number[] | No | Length must equal the server's `--embedding-dim` (default 384) or the request is rejected with `INVALID_REQUEST` |
+| `agent_id` | string | No | Namespace the record to an agent; scopes `get`/`search`/`traverse` |
+| `session_id` | string | Working only | Required to create working memory |
+| `ttl_ms` | integer | Working only | Expiry for working memory |
 
 **Response (success)**:
 
@@ -102,9 +105,13 @@ Store a new memory record.
 }
 ```
 
+A `MemoryRecord` also carries `agent_id`, `embedding`, and `relationships` (an
+array of `{ "from_id", "to_id", "kind" }`) when those are set. `relationships`
+is populated by `relate` and returned by `get`, `search`, and `traverse`.
+
 ---
 
-### `get` (Phase 1+)
+### `get`
 
 Retrieve a memory by ID.
 
@@ -137,7 +144,7 @@ Retrieve a memory by ID.
 
 ---
 
-### `update` (Phase 2+ semantic only)
+### `update` (semantic only)
 
 Update a semantic memory record.
 
@@ -159,7 +166,7 @@ Update a semantic memory record.
 
 ---
 
-### `delete` (Phase 1+)
+### `delete`
 
 Soft-delete a memory record by id. The record is tombstoned in the log and
 dropped from the secondary indexes, so it no longer appears in `get`, `search`,
@@ -189,9 +196,10 @@ idempotent in effect — a second call reports `NOT_FOUND`).
 
 ---
 
-### `search` (Phase 2+)
+### `search`
 
-Unified search with mutually combinable filters.
+Unified search with mutually combinable filters. The time filter activates only
+when **both** `start_time` and `end_time` are present.
 
 **Request (time range)**:
 
@@ -218,13 +226,13 @@ Unified search with mutually combinable filters.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `start_time` | integer | Unix ms inclusive |
-| `end_time` | integer | Unix ms inclusive |
+| `start_time` | integer | Unix ms inclusive; pair with `end_time` |
+| `end_time` | integer | Unix ms inclusive; pair with `start_time` |
 | `tags` | string[] | Tag filter |
 | `match` | string | `all` (intersection) \| `any` (union); default `all` |
-| `embedding` | number[] | Phase 3: semantic query vector |
+| `embedding` | number[] | Semantic query vector; ranked by cosine similarity weighted by importance × confidence |
 | `type` | string | Filter by memory type |
-| `agent_id` | string | Phase 4: namespace filter |
+| `agent_id` | string | Namespace filter |
 | `top_k` | integer | Max results; default 10 |
 
 **Response (success)**:
@@ -249,9 +257,9 @@ Empty result:
 
 ---
 
-### `promote` (Phase 4+)
+### `promote`
 
-Promote working memory entry to persistent storage.
+Promote a working-memory entry to persistent storage.
 
 **Request**:
 
@@ -264,11 +272,17 @@ Promote working memory entry to persistent storage.
 }
 ```
 
-**Response**: Same as `insert`.
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `working_id` | integer | Yes | `id` of the working record to promote |
+| `session_id` | string | No | Session the working record belongs to |
+| `to_type` | string | No | `episodic` (default) or `semantic` |
+
+**Response**: Same as `insert` (the new persisted `record`).
 
 ---
 
-### `relate` (Phase 4+)
+### `relate`
 
 Add a relationship between two persisted records.
 
@@ -298,9 +312,35 @@ Add a relationship between two persisted records.
 
 ---
 
-### `ping` (Phase 1+)
+### `traverse`
 
-Health check.
+Breadth-first walk of the relationship graph from a starting record, returning
+the records reached within `depth` hops.
+
+**Request**:
+
+```json
+{
+  "operation": "traverse",
+  "id": 42,
+  "depth": 2,
+  "agent_id": "agent-001"
+}
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `id` | integer | Yes | Starting record |
+| `depth` | integer | No | Max hops to follow; default `1` |
+| `agent_id` | string | No | Restrict the walk to one namespace |
+
+**Response**: Same shape as `search` — `{ "ok": true, "records": [ … ], "total": N }`.
+
+---
+
+### `ping`
+
+Health check. Always exempt from authentication.
 
 **Request**:
 
@@ -314,35 +354,25 @@ Health check.
 {
   "ok": true,
   "version": "0.1.0",
-  "phase": 1
+  "phase": 4
 }
 ```
 
+`version` is the server version; `phase` echoes the server's `--phase` setting
+(default `4`).
+
 ---
 
-## Phase Availability Matrix
+## Phase gating (advanced)
 
-| Operation | Phase 1 | Phase 2 | Phase 3 | Phase 4 |
-|-----------|---------|---------|---------|---------|
-| `ping` | ✓ | ✓ | ✓ | ✓ |
-| `insert` (episodic) | ✓ | ✓ | ✓ | ✓ |
-| `insert` (semantic) | | ✓ | ✓ | ✓ |
-| `insert` (working) | | | | ✓ |
-| `get` | ✓ | ✓ | ✓ | ✓ |
-| `delete` | ✓ | ✓ | ✓ | ✓ |
-| `update` | | ✓ | ✓ | ✓ |
-| `search` (time/tags) | | ✓ | ✓ | ✓ |
-| `search` (embedding) | | | ✓ | ✓ |
-| `promote` | | | | ✓ |
-| `relate` | | | | ✓ |
+By default the server enables every operation (`--phase 4`). The `--phase <1-4>`
+flag exists mainly for staged development and testing: it caps the highest
+enabled feature tier, and any operation above that tier returns `NOT_READY`.
+Most deployments never set it and never see `NOT_READY`.
 
-Requests for unavailable operations return `NOT_READY`.
-
-## Contract Tests
-
-Contract tests in `tests/contract/` MUST validate:
-
-1. Every operation's required fields reject missing values with `INVALID_REQUEST`.
-2. Response schemas match examples above for success and error paths.
-3. `NOT_FOUND` returned for unknown IDs without side effects.
-4. Phase-gated operations return `NOT_READY` when disabled.
+| Tier | Adds |
+|------|------|
+| 1 | `ping`, `get`, `delete`, episodic `insert` |
+| 2 | semantic `insert`, `update`, `search` by time/tags |
+| 3 | `search` by embedding |
+| 4 | working memory + `insert`, `promote`, `relate`, `traverse`, `agent_id` namespaces |

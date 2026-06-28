@@ -61,6 +61,8 @@ installs the `aegis-mcp` command in its own managed environment.
 
 - **Semantic recall (recommended)**: `export VOYAGE_API_KEY=...` (Voyage is auto-selected).
 - **Offline**: install the `[local]` extra and set `AEGIS_EMBEDDING_MODE=local`.
+  The default local model (`all-MiniLM-L6-v2`) produces **384-dim** vectors, so set
+  `AEGIS_EMBEDDING_DIMENSIONS=384` and start the server with `--embedding-dim 384`.
 - **None**: skip this — semantic search disables and recall falls back to tags/time.
 
 ### 4. Register the MCP server
@@ -168,7 +170,7 @@ explicit overrides.
 | `AEGIS_NAMESPACE` | derived from project dir | isolation boundary (AegisDB `agent_id`) |
 | `AEGIS_AUTH_TOKEN` | _(none)_ | bearer token sent with every request; required when the server enforces auth |
 | `AEGIS_EMBEDDING_MODE` | `voyage` if key present, else `none` | `voyage` \| `local` \| `none` \| `fake` |
-| `AEGIS_EMBEDDING_MODEL` | `voyage-4` | provider model id |
+| `AEGIS_EMBEDDING_MODEL` | `voyage-3-large` | provider model id (Voyage mode) |
 | `AEGIS_EMBEDDING_DIMENSIONS` | `1024` | **must match the server's `--embedding-dim`** |
 | `AEGIS_RECALL_ENABLED` | `true` | toggle automatic recall |
 | `AEGIS_RECALL_TIME_BUDGET_MS` | `800` | hard ceiling for recall |

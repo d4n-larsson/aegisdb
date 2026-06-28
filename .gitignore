@@ -23,7 +23,6 @@ metadata.db
 /specs/
 /.specify/
 /.claude/skills/
-/docs/aegisdb_project_spec.md
 
 # Editor / OS
 .DS_Store
