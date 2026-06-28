@@ -46,6 +46,24 @@ beta-key   beta   rw
 
 `--auth-token <tok>` on the command line registers a **global admin** token.
 
+**Tokens hashed at rest.** A token field may be stored as a SHA-256 digest
+instead of plaintext, so a leaked token file does not reveal usable secrets.
+Generate the hashed form with `--hash-token` and paste it in place of the
+plaintext token:
+
+```
+$ aegisdb --hash-token s3cr3t-acme-key
+sha256$2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae
+```
+```
+sha256$2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae acme rw
+```
+
+Clients still send the **plaintext** token on the wire; the server hashes it and
+compares (in constant time) against the stored digest. Because bearer tokens are
+high-entropy secrets, an unsalted hash is sufficient — generate them randomly
+(e.g. `openssl rand -hex 32`).
+
 For a **namespaced** token, the server enforces tenant isolation:
 
 - **`insert`** / **`promote`** store the record with `agent_id` set to the

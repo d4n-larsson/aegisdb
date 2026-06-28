@@ -113,7 +113,8 @@ The `WARN` line appears only when the server is started without
 | `--working-capacity <n>` | `256` | Working-memory ring buffer size |
 | `--log-level <level>` | `info` | `error`, `warn`, `info`, or `debug` (also `$AEGISDB_LOG_LEVEL`) |
 | `--auth-token <token>` | — | Accept this global **admin** token (repeatable) |
-| `--auth-token-file <path>` | — | Accept tokens, one per line: `<token> [namespace] [ro\|rw\|admin]` |
+| `--auth-token-file <path>` | — | Accept tokens, one per line: `<token> [namespace] [ro\|rw\|admin]`; a token may be `sha256$<hex>` (hashed at rest) |
+| `--hash-token <token>` | | Print the token's `sha256$<hex>` form and exit (paste into the token file) |
 | `--health-check` | | Probe a local server on `--port`, print nothing, exit 0 if healthy / 1 otherwise |
 | `--help` | | Show usage |
 
@@ -138,6 +139,11 @@ A namespaced token can only write into its own namespace (`agent_id` is pinned
 automatically) and only read its own records — another tenant's records read
 back as `NOT_FOUND`. Read-only tokens are refused writes with `FORBIDDEN`, and
 `stats` is admin-only. This lets one server back many isolated tenants/agents.
+
+Tokens can be **stored hashed** so a leaked token file reveals nothing usable.
+Run `aegisdb --hash-token <tok>` to get its `sha256$<hex>` form and put that in
+the token file; clients still send the plaintext token, which the server hashes
+and compares in constant time. Use high-entropy tokens (`openssl rand -hex 32`).
 
 Tokens are sent in plaintext, so run the server behind an encrypted channel — a
 TLS-terminating reverse proxy (nginx/Caddy), `stunnel`, or a private network.

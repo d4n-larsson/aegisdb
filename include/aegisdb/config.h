@@ -29,11 +29,15 @@ typedef enum {
     AEGIS_SCOPE_ADMIN,
 } AegisScope;
 
-/* An accepted bearer token and the tenant/scope it is bound to. */
+/* An accepted bearer token and the tenant/scope it is bound to. The credential
+ * is stored either as plaintext (`token`) or, when configured with a
+ * `sha256$<hex>` entry, as the digest (`hash`); `hashed` selects which. */
 typedef struct {
-    char *token;     /* secret, owned */
-    char *namespace; /* tenant (agent_id); owned; NULL for ADMIN/global tokens */
-    int scope;       /* AegisScope */
+    char *token;                  /* plaintext secret, owned; NULL when hashed */
+    uint8_t hash[32];             /* sha256(token) when hashed */
+    int hashed;                   /* 1: compare against `hash`; 0: against `token` */
+    char *namespace;              /* tenant (agent_id); owned; NULL for ADMIN */
+    int scope;                    /* AegisScope */
 } AuthToken;
 
 typedef struct {
@@ -50,6 +54,7 @@ typedef struct {
     int worker_threads;         /* default 4 */
     int enabled_phase;          /* default 4: gate operations above this phase */
     int run_health_check;       /* 1 if --health-check: probe a server and exit */
+    const char *hash_token;     /* --hash-token <tok>: print sha256$<hex> & exit */
     int log_level;              /* AegisLogLevel; default AEGIS_LOG_INFO (2) */
 
     /* Accepted bearer tokens. When auth_token_count == 0 authentication is

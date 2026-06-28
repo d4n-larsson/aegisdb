@@ -13,6 +13,7 @@
 #include "aegisdb/json_request.h"
 #include "aegisdb/json_response.h"
 #include "aegisdb/logging.h"
+#include "aegisdb/sha256.h"
 
 /* ----- phase gating (T055) --------------------------------------------- */
 
@@ -879,6 +880,13 @@ static int ct_eq(const char *a, const char *b) {
     return diff == 0;
 }
 
+/* Constant-time fixed-length byte compare (no early exit). */
+static int ct_eq_bytes(const uint8_t *a, const uint8_t *b, size_t n) {
+    unsigned char diff = 0;
+    for (size_t i = 0; i < n; i++) diff |= (unsigned char)(a[i] ^ b[i]);
+    return diff == 0;
+}
+
 /* Resolved caller identity for a request. */
 typedef struct {
     const char *ns; /* bound namespace; NULL = unrestricted (admin / auth off) */
@@ -898,9 +906,22 @@ static aegis_status_t resolve_identity(AegisDB *db, const cJSON *req,
     const char *token = jr_str(req, "token", NULL);
     const AuthToken *match = NULL;
     if (token) {
-        for (size_t i = 0; i < db->config.auth_token_count; i++)
-            if (ct_eq(token, db->config.auth_tokens[i].token))
-                match = &db->config.auth_tokens[i];
+        uint8_t th[SHA256_DIGEST_LEN];
+        int have_hash = 0;
+        for (size_t i = 0; i < db->config.auth_token_count; i++) {
+            const AuthToken *t = &db->config.auth_tokens[i];
+            int eq;
+            if (t->hashed) {
+                if (!have_hash) {
+                    sha256(token, strlen(token), th);
+                    have_hash = 1;
+                }
+                eq = ct_eq_bytes(th, t->hash, SHA256_DIGEST_LEN);
+            } else {
+                eq = ct_eq(token, t->token);
+            }
+            if (eq) match = t;
+        }
     }
     if (!match) return AEGIS_ERR_UNAUTHORIZED;
     out->ns = match->namespace; /* NULL for ADMIN tokens */
