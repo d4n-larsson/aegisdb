@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AegisDB — memory that outlives the context window</title>
-  <meta name="description" content="AegisDB is a small, fast C database that gives AI agents durable memory — episodic, semantic, and working — over a one-line-of-JSON wire protocol, with vector search, a relationship graph, and an append-only log that survives a crash.">
+  <meta name="description" content="AegisDB is a small, fast C database that gives AI agents durable memory — episodic, semantic, and working — over a one-line-of-JSON wire protocol, with vector search, a relationship graph, and a crash-safe append-only log with tunable durability and fast checkpoint recovery.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%2314110E'/%3E%3Ctext x='12' y='17' font-family='monospace' font-size='13' font-weight='700' fill='%23C9A24B' text-anchor='middle'%3E%E2%96%8D%3C/text%3E%3C/svg%3E">
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -330,8 +330,8 @@
             <p>Link memories with directed edges and walk them breadth-first to <b>pull in what's related</b> to what you just recalled.</p>
           </div>
           <div class="feat" data-k="0x03D0">
-            <h3><span class="bar"></span>Survives the crash</h3>
-            <p>Per-record <b>CRC32</b> framing; indexes replay from the log on boot. Kill it mid-write and the log still reads clean.</p>
+            <h3><span class="bar"></span>Corruption can't cascade</h3>
+            <p>Every frame is <b>magic + CRC</b> framed. A torn tail from a crash is trimmed; interior bit-rot is skipped frame by frame and the rest still loads — one bad record never costs you the log.</p>
           </div>
           <div class="feat" data-k="0x0440">
             <h3><span class="bar"></span>One shared pool</h3>
@@ -341,13 +341,21 @@
             <h3><span class="bar"></span>Gated by token</h3>
             <p>Set <span class="mono">--auth-token</span> and every operation needs a matching <b>bearer token</b>, compared in constant time. <span class="mono">ping</span> stays open so health checks still pass.</p>
           </div>
+          <div class="feat" data-k="0x0520">
+            <h3><span class="bar"></span>Durability, your call</h3>
+            <p>Pick <span class="mono">sync</span>, <span class="mono">batch</span>, or <span class="mono">interval</span> fsync — bound loss by <b>time or count</b>, or pay per write for none. The default flushes on a timer, so an idle server never strands an acknowledged write.</p>
+          </div>
+          <div class="feat" data-k="0x0590">
+            <h3><span class="bar"></span>Boots from a checkpoint</h3>
+            <p>Recovery loads an index <b>checkpoint</b> and replays only the log written since — not the whole history. Compaction reclaims dead frames <b>without stopping the world</b>.</p>
+          </div>
         </div>
       </div>
     </section>
 
     <!-- WIRE PROTOCOL -->
     <section class="rec" id="wire">
-      <div class="off mono">0x0560</div>
+      <div class="off mono">0x0640</div>
       <div class="col">
         <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0003</b>&nbsp;·&nbsp;type=semantic</p>
         <h2 class="title">One line in, one line out.</h2>
@@ -360,13 +368,14 @@
 <span class="c"># recall it by tag</span>
 {<span class="key">"operation"</span>:<span class="op">"search"</span>, <span class="key">"tags"</span>:[<span class="s">"user"</span>], <span class="key">"top_k"</span>:5}
 <span class="ar">→</span> {<span class="key">"ok"</span>:true, <span class="key">"total"</span>:1, <span class="key">"records"</span>:[ … ]}</pre>
-        <p class="opsline">operations &nbsp;·&nbsp; <b>ping insert get update delete search promote relate traverse</b></p>
+        <p class="opsline">operations &nbsp;·&nbsp; <b>ping insert get update delete search promote relate traverse stats</b></p>
+        <p class="opsline"><b>stats</b> reports durability lag, live &amp; tombstone counts, log size, and per-index sizes — for monitoring and capacity planning.</p>
       </div>
     </section>
 
     <!-- CLAUDE CODE -->
     <section class="rec" id="claude">
-      <div class="off mono">0x06C0</div>
+      <div class="off mono">0x07A0</div>
       <div class="col">
         <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0004</b>&nbsp;·&nbsp;type=semantic</p>
         <div class="twoup">
@@ -401,7 +410,7 @@
 
     <!-- GET STARTED -->
     <section class="rec" id="start">
-      <div class="off mono">0x0860</div>
+      <div class="off mono">0x0940</div>
       <div class="col">
         <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0005</b>&nbsp;·&nbsp;type=episodic</p>
         <h2 class="title">Clone, build, talk to it.</h2>
