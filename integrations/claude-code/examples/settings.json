@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uvx --from aegis-mcp aegis-recall-hook"
+            "command": "uvx --from aegisdb-mcp aegisdb-recall-hook"
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uvx --from aegis-mcp aegis-capture-hook"
+            "command": "uvx --from aegisdb-mcp aegisdb-capture-hook"
           }
         ]
       }

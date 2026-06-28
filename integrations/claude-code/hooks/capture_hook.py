@@ -2,8 +2,8 @@
 """SessionEnd (opt-in Stop) hook shim (US3 / T031).
 
 Delegates to ``aegis_mcp.hooks.capture``. Kept as a path-runnable script for
-checkouts; the packaged console script ``aegis-capture-hook`` (and
-``uvx --from aegis-mcp aegis-capture-hook``) run the same code without a clone.
+checkouts; the packaged console script ``aegisdb-capture-hook`` (and
+``uvx --from aegisdb-mcp aegisdb-capture-hook``) run the same code without a clone.
 """
 import os
 import sys

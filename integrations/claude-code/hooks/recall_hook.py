@@ -2,8 +2,8 @@
 """UserPromptSubmit hook shim (US2 / T025).
 
 Delegates to ``aegis_mcp.hooks.recall``. Kept as a path-runnable script for
-checkouts; the packaged console script ``aegis-recall-hook`` (and
-``uvx --from aegis-mcp aegis-recall-hook``) run the same code without a clone.
+checkouts; the packaged console script ``aegisdb-recall-hook`` (and
+``uvx --from aegisdb-mcp aegisdb-recall-hook``) run the same code without a clone.
 """
 import os
 import sys

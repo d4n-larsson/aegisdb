@@ -1,10 +1,10 @@
-name: Publish aegis-mcp to PyPI
+name: Publish aegisdb-mcp to PyPI
 
 # Builds and publishes the Claude Code integration package (integrations/
 # claude-code) to PyPI on every `v*` tag, so teammates can run it with no clone
-# via `uvx aegis-mcp`. Uses PyPI Trusted Publishing (OIDC) — no API token.
+# via `uvx aegisdb-mcp`. Uses PyPI Trusted Publishing (OIDC) — no API token.
 #
-# One-time setup on PyPI: add a Trusted Publisher for project `aegis-mcp` with
+# One-time setup on PyPI: add a Trusted Publisher for project `aegisdb-mcp` with
 #   owner=d4n-larsson, repo=aegisdb, workflow=pypi.yml, environment=pypi.
 on:
   push:

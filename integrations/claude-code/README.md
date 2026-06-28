@@ -44,9 +44,9 @@ Only the **MCP tools server** needs the package (it requires the `mcp` SDK). The
 **hooks need no install** — they run on the standard library — so if you only want
 automatic recall/capture, skip to step 3.
 
-The package is published on PyPI as **`aegis-mcp`**, so the zero-clone path is to
+The package is published on PyPI as **`aegisdb-mcp`**, so the zero-clone path is to
 let [`uv`](https://docs.astral.sh/uv/) fetch and run it on demand — nothing to
-install or keep updated. Just have `uv` available and register `uvx aegis-mcp`
+install or keep updated. Just have `uv` available and register `uvx aegisdb-mcp`
 (step 4); `uvx` resolves the package the first time Claude Code launches it.
 
 For local development from a checkout, install it editable into a venv instead
@@ -76,7 +76,7 @@ venv, no absolute paths. Either use the CLI:
 claude mcp add memory --scope project \
   -e AEGIS_NAMESPACE=my-project \
   -e AEGIS_EMBEDDING_DIMENSIONS=1024 \
-  -- uvx aegis-mcp
+  -- uvx aegisdb-mcp
 ```
 
 …or commit a project-scope `.mcp.json` (see [`examples/mcp.json`](examples/mcp.json)):
@@ -86,15 +86,15 @@ claude mcp add memory --scope project \
   "mcpServers": {
     "memory": {
       "command": "uvx",
-      "args": ["aegis-mcp"],
+      "args": ["aegisdb-mcp"],
       "env": { "AEGIS_NAMESPACE": "my-project", "AEGIS_EMBEDDING_DIMENSIONS": "1024" }
     }
   }
 }
 ```
 
-Pin a version with `uvx aegis-mcp@0.1.0`. If you installed editable into a venv
-instead (step 2), point `command` at that venv's `aegis-mcp` console script (or
+Pin a version with `uvx aegisdb-mcp@0.1.0`. If you installed editable into a venv
+instead (step 2), point `command` at that venv's `aegisdb-mcp` console script (or
 `.venv/bin/python` with `"args": ["-m", "aegis_mcp.server"]`) using an
 **absolute path**, since Claude Code controls the launch directory.
 
@@ -108,10 +108,10 @@ clone — the same zero-install path as the MCP server:
 {
   "hooks": {
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "uvx --from aegis-mcp aegis-recall-hook" } ] }
+      { "hooks": [ { "type": "command", "command": "uvx --from aegisdb-mcp aegisdb-recall-hook" } ] }
     ],
     "SessionEnd": [
-      { "hooks": [ { "type": "command", "command": "uvx --from aegis-mcp aegis-capture-hook" } ] }
+      { "hooks": [ { "type": "command", "command": "uvx --from aegisdb-mcp aegisdb-capture-hook" } ] }
     ]
   }
 }
@@ -148,9 +148,9 @@ running on the configured host/port; the agent stays usable either way.
 ## Install
 
 Only the MCP server needs the package (for the `mcp` SDK). The simplest option
-is **not to install it at all**: it is published on PyPI as `aegis-mcp`, so
-registering `uvx aegis-mcp` lets [`uv`](https://docs.astral.sh/uv/) fetch and run
-it on demand (see "Register the MCP server"). `pipx run aegis-mcp` works the same
+is **not to install it at all**: it is published on PyPI as `aegisdb-mcp`, so
+registering `uvx aegisdb-mcp` lets [`uv`](https://docs.astral.sh/uv/) fetch and run
+it on demand (see "Register the MCP server"). `pipx run aegisdb-mcp` works the same
 way.
 
 For development from a checkout, install it editable into a virtual environment —
@@ -209,7 +209,7 @@ Project-scope `.mcp.json` (see [`examples/mcp.json`](examples/mcp.json)):
   "mcpServers": {
     "memory": {
       "command": "uvx",
-      "args": ["aegis-mcp"],
+      "args": ["aegisdb-mcp"],
       "env": { "AEGIS_NAMESPACE": "my-project", "AEGIS_EMBEDDING_DIMENSIONS": "1024" }
     }
   }
@@ -226,10 +226,10 @@ from a checkout):
 {
   "hooks": {
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "uvx --from aegis-mcp aegis-recall-hook" } ] }
+      { "hooks": [ { "type": "command", "command": "uvx --from aegisdb-mcp aegisdb-recall-hook" } ] }
     ],
     "SessionEnd": [
-      { "hooks": [ { "type": "command", "command": "uvx --from aegis-mcp aegis-capture-hook" } ] }
+      { "hooks": [ { "type": "command", "command": "uvx --from aegisdb-mcp aegisdb-capture-hook" } ] }
     ]
   }
 }
@@ -274,7 +274,7 @@ write and filters every read to the token's tenant:
   "mcpServers": {
     "memory": {
       "command": "uvx",
-      "args": ["aegis-mcp"],
+      "args": ["aegisdb-mcp"],
       "env": {
         "AEGIS_HOST": "memory.internal",
         "AEGIS_PORT": "9470",

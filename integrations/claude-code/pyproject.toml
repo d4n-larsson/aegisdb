@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aegis-mcp"
+name = "aegisdb-mcp"
 version = "0.1.0"
 description = "Integrate AegisDB as persistent memory for Claude Code (MCP server + hooks)"
 readme = "README.md"
@@ -22,9 +22,9 @@ local = ["sentence-transformers>=2.2"]
 dev = ["pytest>=7"]
 
 [project.scripts]
-aegis-mcp = "aegis_mcp.server:main"
-aegis-recall-hook = "aegis_mcp.hooks:recall"
-aegis-capture-hook = "aegis_mcp.hooks:capture"
+aegisdb-mcp = "aegis_mcp.server:main"
+aegisdb-recall-hook = "aegis_mcp.hooks:recall"
+aegisdb-capture-hook = "aegis_mcp.hooks:capture"
 
 [tool.setuptools]
 packages = ["aegis_mcp"]
