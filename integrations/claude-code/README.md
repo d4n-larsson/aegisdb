@@ -167,8 +167,8 @@ explicit overrides.
 | `AEGIS_PORT` | `9470` | AegisDB TCP port |
 | `AEGIS_CONNECT_TIMEOUT_MS` | `500` | connect timeout (degradation guard) |
 | `AEGIS_READ_TIMEOUT_MS` | `1000` | per-request read timeout |
-| `AEGIS_NAMESPACE` | derived from project dir | isolation boundary (AegisDB `agent_id`) |
-| `AEGIS_AUTH_TOKEN` | _(none)_ | bearer token sent with every request; required when the server enforces auth |
+| `AEGIS_NAMESPACE` | derived from project dir | isolation boundary (AegisDB `agent_id`); **ignored when the token is namespaced** — the token's namespace then governs |
+| `AEGIS_AUTH_TOKEN` | _(none)_ | bearer token sent with every request; required when the server enforces auth. A namespaced token also defines the tenant |
 | `AEGIS_EMBEDDING_MODE` | `voyage` if key present, else `none` | `voyage` \| `local` \| `none` \| `fake` |
 | `AEGIS_EMBEDDING_MODEL` | `voyage-3-large` | provider model id (Voyage mode) |
 | `AEGIS_EMBEDDING_DIMENSIONS` | `1024` | **must match the server's `--embedding-dim`** |
@@ -222,55 +222,66 @@ Add to `.claude/settings.json` (see [`examples/settings.json`](examples/settings
 }
 ```
 
-## Shared multi-user deployment
+## Shared team server
 
-Several people can share **one common memory pool** by pointing their clients at
-a single AegisDB server and using the **same namespace**.
+Run **one** AegisDB for the whole team and point everyone's Claude Code at it.
+Two arrangements, depending on whether projects should be isolated or share a
+pool.
 
-1. **Run one shared server**, authenticated. Issue tokens (one per user lets you
-   revoke individually) and start the server with them:
+**Steps common to both** — run one server and keep it private:
 
-   ```sh
-   # one token per line; blank lines and # comments ignored
-   printf 'alice-token\nbob-token\n' > tokens.txt
-   ./build/aegisdb --data-dir ./data --port 9470 --embedding-dim 1024 \
-       --auth-token-file tokens.txt
-   # or a single shared token: --auth-token team-secret
-   ```
+```sh
+# Prebuilt image (no toolchain needed); persists to a named volume.
+docker run -d -p 9470:9470 -v aegis-data:/data \
+    ghcr.io/d4n-larsson/aegisdb:latest \
+    --data-dir /data --embedding-dim 1024 --auth-token-file /data/tokens.txt
+```
 
-   With no `--auth-token`/`--auth-token-file` the server accepts unauthenticated
-   requests from anyone who can reach the port (it prints a warning).
+Tokens travel in plaintext, so expose the port only over a VPN/WireGuard, an SSH
+tunnel, or a TLS-terminating reverse proxy — AegisDB does not terminate TLS
+itself. Every client must set `AEGIS_EMBEDDING_DIMENSIONS` to the server's
+`--embedding-dim`.
 
-2. **Put the server behind an encrypted channel.** Tokens travel in plaintext, so
-   on an untrusted network expose the port only over a VPN/WireGuard, an SSH
-   tunnel, or a TLS-terminating reverse proxy. AegisDB does not terminate TLS
-   itself.
+### Isolated tenants (recommended)
 
-3. **Each user's `.mcp.json`** points at the shared server, uses the **same**
-   `AEGIS_NAMESPACE` (this is what makes the pool shared — it maps to AegisDB's
-   `agent_id`), and carries that user's token:
+Give each project (or person) a **namespaced token** so the server *enforces*
+isolation — one tenant can never read another's memories, even by asking. Mint a
+token per tenant (its plaintext is shown once; the file keeps only a hash):
 
-   ```jsonc
-   {
-     "mcpServers": {
-       "memory": {
-         "command": "python3",
-         "args": ["-m", "aegis_mcp.server"],
-         "env": {
-           "AEGIS_HOST": "memory.internal",   // shared server (or tunnel endpoint)
-           "AEGIS_PORT": "9470",
-           "AEGIS_NAMESPACE": "team-shared",   // SAME for everyone who shares
-           "AEGIS_AUTH_TOKEN": "alice-token",
-           "AEGIS_EMBEDDING_DIMENSIONS": "1024"
-         }
-       }
-     }
-   }
-   ```
+```sh
+aegisdb gen-token --namespace acme-api --scope rw   # paste the line into tokens.txt
+```
 
-   Users with a *different* `AEGIS_NAMESPACE` will not see the shared pool, even
-   on the same server. All clients must agree on `AEGIS_EMBEDDING_DIMENSIONS` and
-   match the server's `--embedding-dim`.
+Each project's `.mcp.json` carries its token. The token's namespace is
+authoritative, so you do **not** need `AEGIS_NAMESPACE` — the server pins every
+write and filters every read to the token's tenant:
+
+```jsonc
+{
+  "mcpServers": {
+    "memory": {
+      "command": "python3",
+      "args": ["-m", "aegis_mcp.server"],
+      "env": {
+        "AEGIS_HOST": "memory.internal",
+        "AEGIS_PORT": "9470",
+        "AEGIS_AUTH_TOKEN": "<the gen-token plaintext>",
+        "AEGIS_EMBEDDING_DIMENSIONS": "1024"
+      }
+    }
+  }
+}
+```
+
+Use `--scope ro` for a read-only token (writes are refused with `forbidden`).
+
+### Shared pool (collaborate)
+
+To have several people share **one common memory pool**, give them tokens in the
+**same namespace** (or global `admin` tokens) and set the **same**
+`AEGIS_NAMESPACE` on every client — that shared namespace is what joins the pool.
+Note that `admin` tokens are not isolated: they can read and write any namespace,
+so only hand them to trusted operators.
 
 ## Verify
 

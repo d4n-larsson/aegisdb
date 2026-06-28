@@ -34,18 +34,24 @@ def _free_port() -> int:
 class AegisServer:
     """Context manager that launches aegisdb on a free port with a temp datadir."""
 
-    def __init__(self, dim: int = TEST_DIM, phase: int = 4):
+    def __init__(self, dim: int = TEST_DIM, phase: int = 4, token_lines=None):
         self.dim = dim
         self.phase = phase
+        self.token_lines = token_lines  # lines for --auth-token-file (auth on)
         self.port = _free_port()
         self.datadir = tempfile.mkdtemp(prefix="aegis_it_")
         self.proc = None
 
     def __enter__(self):
+        args = [AEGIS_BIN, "--data-dir", self.datadir, "--port", str(self.port),
+                "--phase", str(self.phase), "--embedding-dim", str(self.dim)]
+        if self.token_lines:
+            tf = os.path.join(self.datadir, "tokens")
+            with open(tf, "w") as fh:
+                fh.write("\n".join(self.token_lines) + "\n")
+            args += ["--auth-token-file", tf]
         self.proc = subprocess.Popen(
-            [AEGIS_BIN, "--data-dir", self.datadir, "--port", str(self.port),
-             "--phase", str(self.phase), "--embedding-dim", str(self.dim)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         for _ in range(50):
             try:
@@ -70,7 +76,7 @@ class AegisServer:
 
 
 def make_config(server: AegisServer, namespace="test-ns", embedding_mode="fake",
-                **overrides):
+                auth_token=None, **overrides):
     """Build a Config pointed at a running server. embedding_mode='fake' is a
     test-only marker; tests pass a FakeProvider explicitly to MemoryTools."""
     from aegis_mcp.config import load_config
@@ -81,4 +87,6 @@ def make_config(server: AegisServer, namespace="test-ns", embedding_mode="fake",
         "AEGIS_EMBEDDING_DIMENSIONS": str(server.dim),
         "AEGIS_EMBEDDING_MODE": "none",  # real providers unavailable in tests
     }
+    if auth_token is not None:
+        env["AEGIS_AUTH_TOKEN"] = auth_token
     return load_config(env=env, overrides=overrides)
