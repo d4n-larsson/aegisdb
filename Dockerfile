@@ -41,6 +41,11 @@ WORKDIR /data
 VOLUME ["/data"]
 EXPOSE 9470
 
+# Self-probe via the built-in --health-check (no extra tooling in the image).
+# Uses the same default port as CMD; adjust both together if you change it.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD ["aegisdb", "--health-check", "--port", "9470"]
+
 # ENTRYPOINT fixes the binary; CMD holds overridable default flags.
 # Override flags at `docker run`: `docker run aegisdb --embedding-dim 1024`.
 ENTRYPOINT ["aegisdb"]

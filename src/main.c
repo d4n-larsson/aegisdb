@@ -7,6 +7,7 @@
 #include "aegisdb/compaction.h"
 #include "aegisdb/config.h"
 #include "aegisdb/db.h"
+#include "aegisdb/health.h"
 #include "aegisdb/tcp_server.h"
 
 static void on_signal(int sig) {
@@ -19,6 +20,14 @@ int main(int argc, char **argv) {
     config_defaults(&cfg);
     int pr = config_parse_args(&cfg, argc, argv);
     if (pr != 0) { config_free(&cfg); return pr < 0 ? 1 : 0; } /* -1 err, 1 help */
+
+    /* One-shot liveness probe (container HEALTHCHECK): connect to a running
+     * server on --port, ping it, and exit with the result. */
+    if (cfg.run_health_check) {
+        int hc = health_check(cfg.listen_port);
+        config_free(&cfg);
+        return hc == 0 ? 0 : 1;
+    }
 
     if (cfg.auth_token_count == 0)
         fprintf(stderr, "[aegisdb] WARNING: no auth tokens configured; the "

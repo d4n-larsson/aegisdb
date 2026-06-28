@@ -61,6 +61,10 @@ docker build -t aegisdb .
 docker run -p 9470:9470 -v aegis-data:/data aegisdb
 ```
 
+The image ships a `HEALTHCHECK` that uses the binary's built-in `--health-check`
+probe (no extra tooling in the image), so `docker ps` and Compose
+`depends_on: condition: service_healthy` reflect real server liveness.
+
 The container runs as an unprivileged user and listens on `0.0.0.0:9470`.
 Override the default flags by appending them to the run command, e.g.
 `docker run aegisdb --embedding-dim 1024`, or by editing the `command:` block in
@@ -100,6 +104,7 @@ The `WARNING` line appears only when the server is started without
 | `--working-capacity <n>` | `256` | Working-memory ring buffer size |
 | `--auth-token <token>` | — | Accept this bearer token (repeatable) |
 | `--auth-token-file <path>` | — | Accept tokens listed one per line |
+| `--health-check` | | Probe a local server on `--port`, print nothing, exit 0 if healthy / 1 otherwise |
 | `--help` | | Show usage |
 
 ### Authentication

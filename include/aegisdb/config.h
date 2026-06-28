@@ -17,6 +17,7 @@ typedef struct {
     size_t fsync_batch_size;    /* default 1000 */
     int worker_threads;         /* default 4 */
     int enabled_phase;          /* default 4: gate operations above this phase */
+    int run_health_check;       /* 1 if --health-check: probe a server and exit */
 
     /* Accepted bearer tokens. When auth_token_count == 0 authentication is
      * disabled and every request is served. Otherwise each request (except
