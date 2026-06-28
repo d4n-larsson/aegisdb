@@ -125,6 +125,14 @@ static int migrate_legacy_log(const char *path) {
         migrated++;
     }
 
+    /* A non-empty legacy log that yielded no frames is corrupt at the head;
+     * refuse rather than rename an empty file over it and destroy the data. */
+    if (migrated == 0 && size > 0) {
+        LOG_ERROR("log: legacy log %s has no recoverable v1 frames; not "
+                  "migrating (original preserved for inspection)", path);
+        failed = 1;
+    }
+
     if (failed || fsync(nfd) != 0) {
         close(nfd);
         close(oldfd);

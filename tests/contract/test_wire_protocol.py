@@ -440,6 +440,23 @@ def test_cli(binary, port):
         check(r.returncode == 1, "client without a token -> exit 1")
 
 
+def test_search_limits(binary, port):
+    print("[search input limits]")
+    with Server(binary, port, phase=4) as srv:  # default --embedding-dim 384
+        r = srv.req({"operation": "search", "embedding": [0.0] * 385, "top_k": 5})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "oversized embedding -> INVALID_REQUEST")
+
+        r = srv.req({"operation": "search",
+                     "tags": [f"t{i}" for i in range(33)]})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "too many tags -> INVALID_REQUEST")
+
+        # a huge top_k is clamped, not fatal
+        r = srv.req({"operation": "search", "tags": ["x"], "top_k": 10**18})
+        check(r.get("ok") is True, "huge top_k is clamped, not an error")
+
+
 def test_phase_gating(binary, port):
     print("[phase 1: gating]")
     with Server(binary, port, phase=1) as srv:
@@ -474,6 +491,7 @@ def main():
     test_multitenancy(binary, 19475)
     test_hashed_tokens(binary, 19476)
     test_cli(binary, 19477)
+    test_search_limits(binary, 19478)
 
     print()
     if FAILURES:

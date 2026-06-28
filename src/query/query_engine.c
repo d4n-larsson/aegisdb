@@ -15,6 +15,9 @@
 #include "aegisdb/logging.h"
 #include "aegisdb/sha256.h"
 
+#define MAX_TAGS 32     /* max tags per record (also enforced in validate_common) */
+#define MAX_TOP_K 1000  /* clamp untrusted top_k to bound work/allocations */
+
 /* ----- phase gating (T055) --------------------------------------------- */
 
 static aegis_status_t require_phase(const AegisDB *db, int needed) {
@@ -41,7 +44,7 @@ static aegis_status_t validate_common(AegisDB *db, const MemoryRecord *r) {
         return AEGIS_ERR_INVALID_REQUEST;
     if (r->confidence < 0.0f || r->confidence > 1.0f)
         return AEGIS_ERR_INVALID_REQUEST;
-    if (r->tag_count > 32) return AEGIS_ERR_INVALID_REQUEST;
+    if (r->tag_count > MAX_TAGS) return AEGIS_ERR_INVALID_REQUEST;
     for (size_t i = 0; i < r->tag_count; i++)
         if (!valid_tag(r->tags[i])) return AEGIS_ERR_INVALID_REQUEST;
     if (r->embedding_dim &&
@@ -590,7 +593,10 @@ static int build_input_record(AegisDB *db, const cJSON *req, MemoryRecord *in,
     }
     const char **tags = NULL;
     size_t tn = 0;
-    jr_str_array(req, "tags", &tags, &tn);
+    if (jr_str_array(req, "tags", &tags, &tn, MAX_TAGS) != 0) {
+        *err = AEGIS_ERR_INVALID_REQUEST;
+        return -1;
+    }
     if (tn && record_set_tags(in, tags, tn) != 0) {
         free(tags);
         *err = AEGIS_ERR_INTERNAL;
@@ -599,7 +605,11 @@ static int build_input_record(AegisDB *db, const cJSON *req, MemoryRecord *in,
     free(tags);
     float *emb = NULL;
     size_t en = 0;
-    jr_float_array(req, "embedding", &emb, &en);
+    if (jr_float_array(req, "embedding", &emb, &en,
+                       db->config.embedding_dimensions) != 0) {
+        *err = AEGIS_ERR_INVALID_REQUEST;
+        return -1;
+    }
     if (en) {
         in->embedding = emb;
         in->embedding_dim = en;
@@ -739,7 +749,8 @@ static cJSON *handle_update(AegisDB *db, const cJSON *req, const char *ns) {
     const char **tags = NULL;
     size_t tn = 0;
     if (cJSON_GetObjectItemCaseSensitive(req, "tags")) {
-        jr_str_array(req, "tags", &tags, &tn);
+        if (jr_str_array(req, "tags", &tags, &tn, MAX_TAGS) != 0)
+            return json_error_status(AEGIS_ERR_INVALID_REQUEST);
         patch.has_tags = 1;
         patch.tags = tags;
         patch.tag_count = tn;
@@ -780,16 +791,22 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req, const char *ns) {
     p.agent_id = ns ? ns : jr_str(req, "agent_id", NULL);
     const char *match = jr_str(req, "match", "all");
     p.match_all = (strcmp(match, "any") != 0);
-    if (jr_u64(req, "top_k", &v) == 0) p.top_k = (size_t)v;
+    if (jr_u64(req, "top_k", &v) == 0)
+        p.top_k = v > MAX_TOP_K ? MAX_TOP_K : (size_t)v; /* bound work/allocs */
 
     const char **tags = NULL;
     size_t tn = 0;
-    jr_str_array(req, "tags", &tags, &tn);
+    if (jr_str_array(req, "tags", &tags, &tn, MAX_TAGS) != 0)
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     p.tags = tags;
     p.tag_count = tn;
     float *emb = NULL;
     size_t en = 0;
-    jr_float_array(req, "embedding", &emb, &en);
+    if (jr_float_array(req, "embedding", &emb, &en,
+                       db->config.embedding_dimensions) != 0) {
+        free(tags);
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
     p.embedding = emb;
     p.embedding_dim = en;
 

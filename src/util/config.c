@@ -1,6 +1,8 @@
 /* Server configuration defaults and CLI parsing (T008). */
 #include "aegisdb/config.h"
 
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -171,16 +173,19 @@ static int load_token_file(Config *cfg, const char *path) {
 
 static int parse_size(const char *s, size_t *out) {
     char *end = NULL;
+    errno = 0;
     unsigned long long v = strtoull(s, &end, 10);
-    if (end == s || *end != '\0') return -1;
+    if (end == s || *end != '\0' || errno == ERANGE) return -1;
     *out = (size_t)v;
     return 0;
 }
 
 static int parse_int(const char *s, int *out) {
     char *end = NULL;
+    errno = 0;
     long v = strtol(s, &end, 10);
-    if (end == s || *end != '\0') return -1;
+    if (end == s || *end != '\0' || errno == ERANGE || v < INT_MIN || v > INT_MAX)
+        return -1;
     *out = (int)v;
     return 0;
 }
