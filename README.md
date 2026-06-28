@@ -16,7 +16,7 @@ vector search) behind a JSON-over-TCP wire protocol.
   importance × confidence
 - **Relationships** — directed edges between records, graph traversal, and
   agent-namespace isolation
-- **Authentication** — optional bearer-token auth (constant-time check; `ping` exempt)
+- **Multi-tenant auth** — optional bearer tokens (constant-time check; `ping` exempt), each bound to a namespace + scope (`ro`/`rw`/admin) so one server safely isolates many tenants
 - **Concurrency** — worker thread pool; selectable `fsync` durability (`sync` / `batch` / `interval`)
 
 ## Requirements
@@ -112,19 +112,37 @@ The `WARN` line appears only when the server is started without
 | `--checkpoint-sec <n>` | `60` | Index checkpoint cadence so recovery replays only the tail; `0` disables |
 | `--working-capacity <n>` | `256` | Working-memory ring buffer size |
 | `--log-level <level>` | `info` | `error`, `warn`, `info`, or `debug` (also `$AEGISDB_LOG_LEVEL`) |
-| `--auth-token <token>` | — | Accept this bearer token (repeatable) |
-| `--auth-token-file <path>` | — | Accept tokens listed one per line |
+| `--auth-token <token>` | — | Accept this global **admin** token (repeatable) |
+| `--auth-token-file <path>` | — | Accept tokens, one per line: `<token> [namespace] [ro\|rw\|admin]` |
 | `--health-check` | | Probe a local server on `--port`, print nothing, exit 0 if healthy / 1 otherwise |
 | `--help` | | Show usage |
 
-### Authentication
+### Authentication & multi-tenancy
 
 With no `--auth-token`/`--auth-token-file`, the server runs **without
-authentication** and every request is served. When one or more tokens are
-configured, each request must carry a matching `"token"` field (except `ping`,
-which is always exempt) or the server returns `UNAUTHORIZED`. Tokens are
-compared in constant time and sent in plaintext, so run the server behind an
-encrypted channel (VPN, SSH tunnel, or TLS-terminating proxy).
+authentication** and every request is served with unrestricted access. When
+tokens are configured, each request must carry a matching `"token"` field
+(except `ping`, which is always exempt) or the server returns `UNAUTHORIZED`.
+Tokens are compared in constant time.
+
+Each token in the token file is bound to a **namespace** and a **scope**:
+
+```
+admin-key                 # global admin: any namespace, all operations
+acme-key      acme   rw   # tenant "acme", read+write
+acme-view     acme   ro   # tenant "acme", read-only
+beta-key      beta   rw   # tenant "beta"
+```
+
+A namespaced token can only write into its own namespace (`agent_id` is pinned
+automatically) and only read its own records — another tenant's records read
+back as `NOT_FOUND`. Read-only tokens are refused writes with `FORBIDDEN`, and
+`stats` is admin-only. This lets one server back many isolated tenants/agents.
+
+Tokens are sent in plaintext, so run the server behind an encrypted channel — a
+TLS-terminating reverse proxy (nginx/Caddy), `stunnel`, or a private network.
+TLS is intentionally kept out of the binary to preserve the single,
+dependency-free build.
 
 ## Wire Protocol
 

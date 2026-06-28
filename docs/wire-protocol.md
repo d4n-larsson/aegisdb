@@ -21,15 +21,50 @@
 | `request_id` | string | No | Client correlation ID echoed in response |
 | `token` | string | When auth enabled | Bearer token. Required on every operation except `ping` when the server is started with `--auth-token`/`--auth-token-file`; ignored when authentication is disabled |
 
-### Authentication
+### Authentication & multi-tenancy
 
 Authentication is **disabled by default**: with no `--auth-token`/`--auth-token-file`
-configured, every request is served and `token` is ignored. When one or more
-tokens are configured, each request must carry a `token` matching one of them or
-the server returns `UNAUTHORIZED`. `ping` is always exempt so liveness and
-startup probes work unauthenticated. Tokens are compared in constant time and
-sent in plaintext — run the server behind an encrypted channel (VPN, SSH tunnel,
-or TLS-terminating proxy).
+configured, every request is served with unrestricted access and `token` is
+ignored. When one or more tokens are configured, each request (except `ping`)
+must carry a `token` matching one of them or the server returns `UNAUTHORIZED`.
+Tokens are compared in constant time.
+
+Each token is bound to a **namespace** (tenant) and a **scope**, configured in
+the token file (`--auth-token-file`), one token per line:
+
+```
+# <token>            -> global admin (any namespace, all operations)
+# <token> <ns>       -> bound to namespace <ns>, read+write
+# <token> <ns> ro    -> bound to namespace <ns>, read-only
+# <token> <ns> rw    -> bound to namespace <ns>, read+write (explicit)
+# <token> admin      -> global admin
+s3cr3t-admin
+acme-key   acme   rw
+acme-view  acme   ro
+beta-key   beta   rw
+```
+
+`--auth-token <tok>` on the command line registers a **global admin** token.
+
+For a **namespaced** token, the server enforces tenant isolation:
+
+- **`insert`** / **`promote`** store the record with `agent_id` set to the
+  token's namespace; any client-supplied `agent_id` is ignored.
+- **`get`** / **`search`** / **`traverse`** are restricted to the namespace; a
+  record in another namespace reads back as `NOT_FOUND` (existence does not leak).
+- **`update`** / **`delete`** / **`relate`** act only on records in the
+  namespace; otherwise `NOT_FOUND`. `relate` requires *both* endpoints in it.
+- A **read-only** (`ro`) token is rejected with `FORBIDDEN` on any write
+  (`insert`, `update`, `delete`, `promote`, `relate`).
+- **`stats`** is admin-only; a namespaced token receives `FORBIDDEN`.
+
+A **global admin** token (or auth-disabled mode) keeps the original behavior:
+unrestricted access, with `agent_id` chosen freely by the client.
+
+Tokens travel in plaintext, so run the server behind an encrypted channel — a
+TLS-terminating reverse proxy (nginx/Caddy), `stunnel`, or a VPN/private network.
+TLS is intentionally not built into the binary (it keeps AegisDB a single,
+dependency-free C binary); terminate it at the edge.
 
 ## Common Response Fields
 
@@ -49,6 +84,7 @@ or TLS-terminating proxy).
 | `IMMUTABLE` | 409 | Update attempted on episodic record |
 | `NOT_READY` | 503 | Operation disabled by `--phase` gating (advanced; see below) |
 | `UNAUTHORIZED` | 401 | Missing or invalid `token` when authentication is enabled |
+| `FORBIDDEN` | 403 | Authenticated, but the token's scope/namespace disallows the operation |
 | `INTERNAL` | 500 | Unexpected server error |
 
 ---

@@ -58,20 +58,68 @@ size_t config_effective_fsync_batch(const Config *cfg) {
     }
 }
 
-/* Append a copy of `tok` to the accepted-token list. Returns 0 on success. */
-static int append_token(Config *cfg, const char *tok) {
-    char **grown = realloc(cfg->auth_tokens,
-                           (cfg->auth_token_count + 1) * sizeof(char *));
+/* Append a token bound to `ns` (NULL = global) with `scope`. Copies the
+ * strings. Returns 0 on success. */
+static int append_token(Config *cfg, const char *tok, const char *ns,
+                        int scope) {
+    AuthToken *grown = realloc(cfg->auth_tokens,
+                              (cfg->auth_token_count + 1) * sizeof(AuthToken));
     if (!grown) return -1;
     cfg->auth_tokens = grown;
-    char *copy = strdup(tok);
-    if (!copy) return -1;
-    cfg->auth_tokens[cfg->auth_token_count++] = copy;
+    AuthToken *t = &cfg->auth_tokens[cfg->auth_token_count];
+    t->token = strdup(tok);
+    if (!t->token) return -1;
+    t->namespace = NULL;
+    if (ns) {
+        t->namespace = strdup(ns);
+        if (!t->namespace) {
+            free(t->token);
+            return -1;
+        }
+    }
+    t->scope = scope;
+    cfg->auth_token_count++;
     return 0;
 }
 
-/* Load one token per line from `path`, skipping blank lines and #-comments and
- * trimming surrounding whitespace. Returns 0 on success. */
+/* Advance past the current whitespace-delimited field, NUL-terminating it, and
+ * return a pointer to the next field (or NULL if none). */
+static char *next_field(char *s) {
+    while (*s && *s != ' ' && *s != '\t') s++;
+    if (!*s) return NULL;
+    *s++ = '\0';
+    while (*s == ' ' || *s == '\t') s++;
+    return *s ? s : NULL;
+}
+
+/* Parse one token-file line (already trimmed) into the token list. Format:
+ *   <token>                       -> global admin token (any namespace)
+ *   <token> <namespace>           -> namespaced, read+write
+ *   <token> <namespace> ro|rw     -> namespaced with explicit scope
+ *   <token> admin                 -> global admin token
+ * Returns 0 on success, -1 on a malformed scope. */
+static int parse_token_line(Config *cfg, char *s) {
+    char *tok = s;
+    char *ns = next_field(s);
+    if (!ns) return append_token(cfg, tok, NULL, AEGIS_SCOPE_ADMIN);
+
+    char *scope_s = next_field(ns);
+    if (strcmp(ns, "admin") == 0 && !scope_s)
+        return append_token(cfg, tok, NULL, AEGIS_SCOPE_ADMIN);
+
+    int scope = AEGIS_SCOPE_RW;
+    if (scope_s) {
+        if (strcmp(scope_s, "ro") == 0) scope = AEGIS_SCOPE_RO;
+        else if (strcmp(scope_s, "rw") == 0) scope = AEGIS_SCOPE_RW;
+        else if (strcmp(scope_s, "admin") == 0)
+            return append_token(cfg, tok, NULL, AEGIS_SCOPE_ADMIN);
+        else return -1; /* unknown scope */
+    }
+    return append_token(cfg, tok, ns, scope);
+}
+
+/* Load tokens from `path`, one per line, skipping blank lines and #-comments
+ * and trimming surrounding whitespace. Returns 0 on success. */
 static int load_token_file(Config *cfg, const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) return -1;
@@ -85,7 +133,7 @@ static int load_token_file(Config *cfg, const char *path) {
                            end[-1] == ' ' || end[-1] == '\t'))
             *--end = '\0';                              /* trim trailing ws */
         if (*s == '\0' || *s == '#') continue;          /* blank / comment */
-        if (append_token(cfg, s) != 0) { rv = -1; break; }
+        if (parse_token_line(cfg, s) != 0) { rv = -1; break; }
     }
     fclose(f);
     return rv;
@@ -124,8 +172,10 @@ static void usage(const char *prog) {
             "  --checkpoint-sec <n>     index checkpoint cadence, 0 disables\n"
             "                           (default 60)\n"
             "  --working-capacity <n>   ring buffer size (default 256)\n"
-            "  --auth-token <token>     accept this bearer token (repeatable)\n"
-            "  --auth-token-file <path> accept tokens listed one per line\n"
+            "  --auth-token <token>     accept this global admin token (repeatable)\n"
+            "  --auth-token-file <path> accept tokens, one per line; each line is\n"
+            "                           '<token> [namespace] [ro|rw|admin]' — a\n"
+            "                           namespace binds the token to one tenant\n"
             "  --log-level <level>      error|warn|info|debug (default info,\n"
             "                           or $AEGISDB_LOG_LEVEL)\n"
             "  --health-check           probe a local server (--port) and exit\n"
@@ -230,7 +280,7 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
             cfg->working_capacity = (uint32_t)wc;
         } else if (strcmp(a, "--auth-token") == 0) {
             NEXT("--auth-token");
-            if (append_token(cfg, val) != 0) {
+            if (append_token(cfg, val, NULL, AEGIS_SCOPE_ADMIN) != 0) {
                 fprintf(stderr, "%s: out of memory adding auth token\n", prog);
                 return -1;
             }
@@ -263,8 +313,10 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
 
 void config_free(Config *cfg) {
     if (!cfg || !cfg->auth_tokens) return;
-    for (size_t i = 0; i < cfg->auth_token_count; i++)
-        free(cfg->auth_tokens[i]);
+    for (size_t i = 0; i < cfg->auth_token_count; i++) {
+        free(cfg->auth_tokens[i].token);
+        free(cfg->auth_tokens[i].namespace);
+    }
     free(cfg->auth_tokens);
     cfg->auth_tokens = NULL;
     cfg->auth_token_count = 0;

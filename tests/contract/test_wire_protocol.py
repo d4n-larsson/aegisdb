@@ -28,11 +28,12 @@ def check(cond, msg):
 
 
 class Server:
-    def __init__(self, binary, port, phase=4, auth_token=None):
+    def __init__(self, binary, port, phase=4, auth_token=None, token_lines=None):
         self.binary = binary
         self.port = port
         self.phase = phase
         self.auth_token = auth_token
+        self.token_lines = token_lines  # lines for --auth-token-file
         self.proc = None
         self.datadir = tempfile.mkdtemp(prefix="aegis_contract_")
 
@@ -41,6 +42,11 @@ class Server:
                 str(self.port), "--phase", str(self.phase)]
         if self.auth_token:
             args += ["--auth-token", self.auth_token]
+        if self.token_lines:
+            tf = os.path.join(self.datadir, "tokens")
+            with open(tf, "w") as fh:
+                fh.write("\n".join(self.token_lines) + "\n")
+            args += ["--auth-token-file", tf]
         self.proc = subprocess.Popen(
             args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
@@ -267,6 +273,76 @@ def test_auth(binary, port):
         check(r.get("ok") is True, "stats with correct token -> ok")
 
 
+def test_multitenancy(binary, port):
+    print("[multi-tenant: namespace + scope]")
+    lines = [
+        "admintok",          # bare line -> global admin
+        "acme_rw acme rw",   # namespaced read+write
+        "acme_ro acme ro",   # namespaced read-only
+        "beta_rw beta rw",   # a different tenant
+    ]
+    with Server(binary, port, phase=4, token_lines=lines) as srv:
+        # a namespaced write is pinned to the token's namespace, even if the
+        # client asks for a different agent_id
+        r = srv.req({"operation": "insert", "type": "episodic",
+                     "data": "acme secret", "agent_id": "beta", "token": "acme_rw"})
+        check(r.get("ok") is True and r["record"].get("agent_id") == "acme",
+              "namespaced insert is pinned to its namespace")
+        acme_id = r["record"]["id"]
+
+        # the owning tenant can read its own record
+        r = srv.req({"operation": "get", "id": acme_id, "token": "acme_rw"})
+        check(r.get("ok") is True and r["record"]["data"] == "acme secret",
+              "owner reads its own record")
+
+        # another tenant cannot see it (NOT_FOUND, not UNAUTHORIZED -> no leak)
+        r = srv.req({"operation": "get", "id": acme_id, "token": "beta_rw"})
+        check(r.get("ok") is False and r["error"]["code"] == "NOT_FOUND",
+              "cross-tenant get -> NOT_FOUND")
+
+        # another tenant cannot delete it either
+        r = srv.req({"operation": "delete", "id": acme_id, "token": "beta_rw"})
+        check(r.get("ok") is False and r["error"]["code"] == "NOT_FOUND",
+              "cross-tenant delete -> NOT_FOUND")
+
+        # search is scoped to the caller's namespace
+        srv.req({"operation": "insert", "type": "episodic", "data": "beta note",
+                 "token": "beta_rw"})
+        r = srv.req({"operation": "search", "top_k": 100, "token": "beta_rw"})
+        agents = {rec.get("agent_id") for rec in r.get("records", [])}
+        check(r.get("ok") is True and agents == {"beta"},
+              "search returns only the caller's namespace")
+
+        # a read-only token cannot write
+        r = srv.req({"operation": "insert", "type": "episodic",
+                     "data": "nope", "token": "acme_ro"})
+        check(r.get("ok") is False and r["error"]["code"] == "FORBIDDEN",
+              "read-only token write -> FORBIDDEN")
+
+        # ...but can read within its namespace
+        r = srv.req({"operation": "get", "id": acme_id, "token": "acme_ro"})
+        check(r.get("ok") is True, "read-only token can read its namespace")
+
+        # an admin token sees across namespaces
+        r = srv.req({"operation": "get", "id": acme_id, "token": "admintok"})
+        check(r.get("ok") is True, "admin token reads any namespace")
+
+        # stats is admin-only
+        check(srv.req({"operation": "stats", "token": "admintok"}).get("ok") is True,
+              "admin token may call stats")
+        r = srv.req({"operation": "stats", "token": "acme_rw"})
+        check(r.get("ok") is False and r["error"]["code"] == "FORBIDDEN",
+              "namespaced token stats -> FORBIDDEN")
+
+        # missing / wrong tokens are rejected
+        r = srv.req({"operation": "get", "id": acme_id})
+        check(r.get("ok") is False and r["error"]["code"] == "UNAUTHORIZED",
+              "no token -> UNAUTHORIZED")
+        r = srv.req({"operation": "get", "id": acme_id, "token": "bogus"})
+        check(r.get("ok") is False and r["error"]["code"] == "UNAUTHORIZED",
+              "unknown token -> UNAUTHORIZED")
+
+
 def test_phase_gating(binary, port):
     print("[phase 1: gating]")
     with Server(binary, port, phase=1) as srv:
@@ -298,6 +374,7 @@ def main():
     test_auth(binary, 19473)
     test_phase_gating(binary, 19471)
     test_stats(binary, 19474)
+    test_multitenancy(binary, 19475)
 
     print()
     if FAILURES:
