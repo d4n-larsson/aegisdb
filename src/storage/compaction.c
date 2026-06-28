@@ -7,6 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "aegisdb/logging.h"
 #include "aegisdb/record.h"
 
 typedef struct {
@@ -17,6 +18,7 @@ typedef struct {
 } NewLoc;
 
 int compaction_run_once(AegisDB *db) {
+    LOG_DEBUG("compaction: starting log rewrite");
     char newpath[1300];
     snprintf(newpath, sizeof(newpath), "%s.compaction", db->path_log);
     unlink(newpath); /* discard any stale partial file */
@@ -25,6 +27,7 @@ int compaction_run_once(AegisDB *db) {
 
     LogFile newlog;
     if (log_open(&newlog, newpath, db->config.fsync_batch_size) != 0) {
+        LOG_ERROR("compaction: cannot open scratch log %s", newpath);
         pthread_rwlock_unlock(&db->index_lock);
         return -1;
     }
@@ -73,6 +76,8 @@ int compaction_run_once(AegisDB *db) {
     log_close(&db->log);
 
     if (rename(newpath, db->path_log) != 0) {
+        LOG_ERROR("compaction: rename %s -> %s failed; reopening original log",
+                  newpath, db->path_log);
         /* try to reopen the original log so the server keeps working */
         log_open(&db->log, db->path_log, db->config.fsync_batch_size);
         free(locs);
@@ -80,6 +85,7 @@ int compaction_run_once(AegisDB *db) {
         return -1;
     }
     if (log_open(&db->log, db->path_log, db->config.fsync_batch_size) != 0) {
+        LOG_ERROR("compaction: cannot reopen compacted log %s", db->path_log);
         free(locs);
         pthread_rwlock_unlock(&db->index_lock);
         return -1;
@@ -101,7 +107,7 @@ int compaction_run_once(AegisDB *db) {
     free(locs);
 
     pthread_rwlock_unlock(&db->index_lock);
-    fprintf(stderr, "[aegisdb] compaction complete: %zu live records\n", nloc);
+    LOG_INFO("compaction complete: %zu live records", nloc);
     return 0;
 }
 
@@ -120,8 +126,12 @@ static void *maint_loop(void *arg) {
         sleep(1);
         if (c->stop) break;
         elapsed++;
-        if (c->sweep_sec && (elapsed % c->sweep_sec) == 0)
-            working_store_sweep(c->db->working, db_now_ms());
+        if (c->sweep_sec && (elapsed % c->sweep_sec) == 0) {
+            size_t swept = working_store_sweep(c->db->working, db_now_ms());
+            if (swept)
+                LOG_DEBUG("sweep: evicted %zu expired working-memory record(s)",
+                          swept);
+        }
         if (c->compact_sec && (elapsed % c->compact_sec) == 0)
             compaction_run_once(c->db);
     }

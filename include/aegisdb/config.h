@@ -18,6 +18,7 @@ typedef struct {
     int worker_threads;         /* default 4 */
     int enabled_phase;          /* default 4: gate operations above this phase */
     int run_health_check;       /* 1 if --health-check: probe a server and exit */
+    int log_level;              /* AegisLogLevel; default AEGIS_LOG_INFO (2) */
 
     /* Accepted bearer tokens. When auth_token_count == 0 authentication is
      * disabled and every request is served. Otherwise each request (except
@@ -32,7 +33,7 @@ void config_defaults(Config *cfg);
 
 /* Parse argv (supports --data-dir, --port, --phase, --workers,
  * --max-payload, --embedding-dim, --fsync-batch, --working-capacity,
- * --auth-token, --auth-token-file, --help).
+ * --auth-token, --auth-token-file, --log-level, --help).
  * Returns 0 on success, -1 on error, 1 if --help was requested. */
 int config_parse_args(Config *cfg, int argc, char **argv);
 
