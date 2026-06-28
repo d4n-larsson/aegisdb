@@ -334,12 +334,12 @@
             <p>Every frame is <b>magic + CRC</b> framed. A torn tail from a crash is trimmed; interior bit-rot is skipped frame by frame and the rest still loads — one bad record never costs you the log.</p>
           </div>
           <div class="feat" data-k="0x0440">
-            <h3><span class="bar"></span>One shared pool</h3>
-            <p>Point a whole fleet of agents at <b>one server</b>. An <span class="mono">agent_id</span> namespaces each agent's memories — private by default, or recalled across when context is worth sharing.</p>
+            <h3><span class="bar"></span>One server, many tenants</h3>
+            <p>Each token is <b>bound to a namespace</b>. A tenant can only read and write its own memories — another tenant's records read back as not-found. Isolation is <b>enforced</b>, not advisory.</p>
           </div>
           <div class="feat" data-k="0x04B0">
-            <h3><span class="bar"></span>Gated by token</h3>
-            <p>Set <span class="mono">--auth-token</span> and every operation needs a matching <b>bearer token</b>, compared in constant time. <span class="mono">ping</span> stays open so health checks still pass.</p>
+            <h3><span class="bar"></span>Tokens with scope</h3>
+            <p>Bearer tokens carry a namespace and a scope — <span class="mono">ro</span>, <span class="mono">rw</span>, or <b>admin</b>. Writes outside scope are refused; <span class="mono">ping</span> stays open for health checks; admin tokens span tenants.</p>
           </div>
           <div class="feat" data-k="0x0520">
             <h3><span class="bar"></span>Durability, your call</h3>

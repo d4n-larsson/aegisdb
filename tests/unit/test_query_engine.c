@@ -195,7 +195,7 @@ static void test_working_memory_promote(void) {
     MemoryRecord promoted;
     TEST_ASSERT_EQUAL_INT(
         AEGIS_OK,
-        qe_promote(&g_db, "sess-1", wid, MEM_EPISODIC, &promoted));
+        qe_promote(&g_db, "sess-1", wid, MEM_EPISODIC, NULL, &promoted));
     TEST_ASSERT_EQUAL_INT(MEM_EPISODIC, promoted.type);
     uint64_t pid = promoted.id;
     record_free(&promoted);

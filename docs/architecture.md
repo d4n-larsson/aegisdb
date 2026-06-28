@@ -161,9 +161,11 @@ breadth-first walk of the graph from a starting record out to a given depth.
 ## Query engine
 
 `src/query/query_engine.c` is the operation router. It parses the `operation`
-field and dispatches to a handler: `ping`, `insert`, `get`, `update`, `delete`,
-`search`, `promote`, `relate`, `traverse`. Handlers read from the in-memory
-indexes (and the log for full payloads) and append to the log on writes.
+field and dispatches to a handler: `ping`, `stats`, `insert`, `get`, `update`,
+`delete`, `search`, `promote`, `relate`, `traverse`. Handlers read from the
+in-memory indexes (and the log for full payloads) and append to the log on
+writes. Before dispatch it resolves the request's token to a namespace + scope
+and enforces them (see [Authentication & multi-tenancy](#authentication--multi-tenancy)).
 
 ### Phase gating
 
@@ -183,14 +185,32 @@ deployments never set it. See the tier table in
 - `fsync` follows the configured `--durability` mode as described above; in
   `interval` mode the maintenance thread drives the periodic flush.
 
-## Authentication
+## Authentication & multi-tenancy
 
 Authentication is **off by default** — with no `--auth-token`/`--auth-token-file`
-the server serves every request and prints a startup warning. When tokens are
-configured, each request must carry a matching `"token"` field; `ping` is always
-exempt so health checks work unauthenticated. Tokens are compared in **constant
-time**. They travel in plaintext, so run the server behind an encrypted channel
-(VPN, SSH tunnel, or TLS-terminating proxy) when auth is enabled.
+the server serves every request (unrestricted) and prints a startup warning.
+When tokens are configured, each request must carry a matching `"token"` field;
+`ping` is always exempt so health checks work unauthenticated. Tokens are
+compared in **constant time**.
+
+Each token is bound to a **namespace** (tenant) and **scope** (`ro`/`rw`/admin)
+via the token file. The query engine resolves a request's token to its identity
+and then enforces it:
+
+- writes (`insert`/`promote`) are pinned to the token's namespace (`agent_id`);
+- reads (`get`/`search`/`traverse`) are filtered to it — other namespaces read
+  back as `NOT_FOUND`, so existence does not leak across tenants;
+- `update`/`delete`/`relate` act only within the namespace (`agent_id` is
+  immutable per id, so a single ownership pre-check is sufficient and stays valid
+  through the write);
+- read-only tokens are refused writes with `FORBIDDEN`; `stats` is admin-only.
+
+A global **admin** token (or auth-disabled mode) keeps the original unrestricted
+behavior. This makes one server safely shareable across tenants/agents.
+
+Tokens travel in plaintext, so run the server behind an encrypted channel (a
+TLS-terminating reverse proxy, `stunnel`, or a private network) when auth is
+enabled. TLS is deliberately kept out of the binary — see Non-goals.
 
 ## Non-goals
 

@@ -409,7 +409,7 @@ aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
 
 aegis_status_t qe_promote(AegisDB *db, const char *session_id,
                           uint64_t working_id, MemoryType to_type,
-                          MemoryRecord *out) {
+                          const char *ns, MemoryRecord *out) {
     aegis_status_t st = require_phase(db, 4);
     if (st != AEGIS_OK) return st;
     if (!session_id) return AEGIS_ERR_INVALID_REQUEST;
@@ -421,9 +421,17 @@ aegis_status_t qe_promote(AegisDB *db, const char *session_id,
                            &w) != 0)
         return AEGIS_ERR_NOT_FOUND;
 
-    /* re-insert as a persisted record */
+    /* re-insert as a persisted record, pinned to the caller's namespace */
     w.type = to_type;
     w.expires_at = 0;
+    if (ns) {
+        free(w.agent_id);
+        w.agent_id = strdup(ns);
+        if (!w.agent_id) {
+            record_free(&w);
+            return AEGIS_ERR_INTERNAL;
+        }
+    }
     st = qe_insert(db, &w, NULL, 0, out);
     record_free(&w);
     return st;
@@ -654,12 +662,32 @@ static cJSON *handle_stats(AegisDB *db) {
     return o;
 }
 
-static cJSON *handle_insert(AegisDB *db, const cJSON *req) {
+/* When `ns` is set, confirm `id` is a live record in that namespace; otherwise
+ * AEGIS_ERR_NOT_FOUND. agent_id is immutable per id, so this pre-check stays
+ * valid through a subsequent write (no existence leak across tenants). */
+static aegis_status_t ns_owns(AegisDB *db, uint64_t id, const char *ns) {
+    if (!ns) return AEGIS_OK;
+    MemoryRecord tmp;
+    aegis_status_t st = qe_get(db, id, ns, &tmp);
+    if (st == AEGIS_OK) record_free(&tmp);
+    return st;
+}
+
+static cJSON *handle_insert(AegisDB *db, const cJSON *req, const char *ns) {
     MemoryRecord in;
     aegis_status_t err;
     if (build_input_record(db, req, &in, &err) != 0) {
         record_free(&in);
         return json_error_status(err);
+    }
+    /* A namespaced token writes only into its own tenant: pin agent_id. */
+    if (ns) {
+        free(in.agent_id);
+        in.agent_id = strdup(ns);
+        if (!in.agent_id) {
+            record_free(&in);
+            return json_error_status(AEGIS_ERR_INTERNAL);
+        }
     }
     const char *session = jr_str(req, "session_id", NULL);
     uint64_t ttl = 0;
@@ -673,10 +701,10 @@ static cJSON *handle_insert(AegisDB *db, const cJSON *req) {
     return r;
 }
 
-static cJSON *handle_get(AegisDB *db, const cJSON *req) {
+static cJSON *handle_get(AegisDB *db, const cJSON *req, const char *ns) {
     uint64_t id;
     if (jr_u64(req, "id", &id) != 0) return json_error_status(AEGIS_ERR_INVALID_REQUEST);
-    const char *agent = jr_str(req, "agent_id", NULL);
+    const char *agent = ns ? ns : jr_str(req, "agent_id", NULL);
     MemoryRecord out;
     aegis_status_t st = qe_get(db, id, agent, &out);
     if (st != AEGIS_OK) return json_error_status(st);
@@ -685,9 +713,11 @@ static cJSON *handle_get(AegisDB *db, const cJSON *req) {
     return r;
 }
 
-static cJSON *handle_update(AegisDB *db, const cJSON *req) {
+static cJSON *handle_update(AegisDB *db, const cJSON *req, const char *ns) {
     uint64_t id;
     if (jr_u64(req, "id", &id) != 0) return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    aegis_status_t own = ns_owns(db, id, ns);
+    if (own != AEGIS_OK) return json_error_status(own);
     UpdatePatch patch;
     memset(&patch, 0, sizeof(patch));
     const char *data = jr_str(req, "data", NULL);
@@ -722,10 +752,12 @@ static cJSON *handle_update(AegisDB *db, const cJSON *req) {
     return r;
 }
 
-static cJSON *handle_delete(AegisDB *db, const cJSON *req) {
+static cJSON *handle_delete(AegisDB *db, const cJSON *req, const char *ns) {
     uint64_t id;
     if (jr_u64(req, "id", &id) != 0)
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    aegis_status_t own = ns_owns(db, id, ns);
+    if (own != AEGIS_OK) return json_error_status(own);
     aegis_status_t st = qe_delete(db, id);
     if (st != AEGIS_OK) return json_error_status(st);
     cJSON *o = json_ok();
@@ -734,7 +766,7 @@ static cJSON *handle_delete(AegisDB *db, const cJSON *req) {
     return o;
 }
 
-static cJSON *handle_search(AegisDB *db, const cJSON *req) {
+static cJSON *handle_search(AegisDB *db, const cJSON *req, const char *ns) {
     SearchParams p;
     memset(&p, 0, sizeof(p));
     uint64_t v;
@@ -743,7 +775,8 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req) {
         p.has_time = 1;
     const char *type = jr_str(req, "type", NULL);
     if (type && memory_type_from_string(type, &p.type) == 0) p.has_type = 1;
-    p.agent_id = jr_str(req, "agent_id", NULL);
+    /* A namespaced token sees only its tenant; admin/no-auth may filter freely. */
+    p.agent_id = ns ? ns : jr_str(req, "agent_id", NULL);
     const char *match = jr_str(req, "match", "all");
     p.match_all = (strcmp(match, "any") != 0);
     if (jr_u64(req, "top_k", &v) == 0) p.top_k = (size_t)v;
@@ -777,7 +810,7 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req) {
     return o;
 }
 
-static cJSON *handle_promote(AegisDB *db, const cJSON *req) {
+static cJSON *handle_promote(AegisDB *db, const cJSON *req, const char *ns) {
     const char *session = jr_str(req, "session_id", NULL);
     uint64_t wid;
     if (jr_u64(req, "working_id", &wid) != 0)
@@ -787,17 +820,21 @@ static cJSON *handle_promote(AegisDB *db, const cJSON *req) {
     if (memory_type_from_string(to, &tt) != 0)
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     MemoryRecord out;
-    aegis_status_t st = qe_promote(db, session, wid, tt, &out);
+    aegis_status_t st = qe_promote(db, session, wid, tt, ns, &out);
     if (st != AEGIS_OK) return json_error_status(st);
     cJSON *r = resp_record(&out);
     record_free(&out);
     return r;
 }
 
-static cJSON *handle_relate(AegisDB *db, const cJSON *req) {
+static cJSON *handle_relate(AegisDB *db, const cJSON *req, const char *ns) {
     uint64_t from, to;
     if (jr_u64(req, "from_id", &from) != 0 || jr_u64(req, "to_id", &to) != 0)
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    /* both endpoints must live in the caller's namespace */
+    aegis_status_t own = ns_owns(db, from, ns);
+    if (own == AEGIS_OK) own = ns_owns(db, to, ns);
+    if (own != AEGIS_OK) return json_error_status(own);
     const char *kind = jr_str(req, "kind", NULL);
     aegis_status_t st = qe_relate(db, from, to, kind);
     if (st != AEGIS_OK) return json_error_status(st);
@@ -809,13 +846,13 @@ static cJSON *handle_relate(AegisDB *db, const cJSON *req) {
     return o;
 }
 
-static cJSON *handle_traverse(AegisDB *db, const cJSON *req) {
+static cJSON *handle_traverse(AegisDB *db, const cJSON *req, const char *ns) {
     uint64_t id;
     if (jr_u64(req, "id", &id) != 0)
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     uint64_t depth = 1;
     jr_u64(req, "depth", &depth);
-    const char *agent = jr_str(req, "agent_id", NULL);
+    const char *agent = ns ? ns : jr_str(req, "agent_id", NULL);
     MemoryRecord *recs = NULL;
     size_t n = 0;
     aegis_status_t st = qe_traverse(db, id, (int)depth, agent, &recs, &n);
@@ -842,17 +879,39 @@ static int ct_eq(const char *a, const char *b) {
     return diff == 0;
 }
 
-/* Authenticate a request against the configured token set. Auth is disabled
- * (always authorized) when no tokens are configured. Checks every token without
- * an early break so timing does not reveal which token matched. */
-static int request_authorized(AegisDB *db, const cJSON *req) {
-    if (db->config.auth_token_count == 0) return 1;
+/* Resolved caller identity for a request. */
+typedef struct {
+    const char *ns; /* bound namespace; NULL = unrestricted (admin / auth off) */
+    int can_write;  /* 0 for read-only tokens */
+} AuthCtx;
+
+/* Authenticate a request and resolve the caller's namespace + scope. Auth is
+ * disabled (unrestricted) when no tokens are configured. Every token is checked
+ * without an early break so timing does not reveal which token matched. Returns
+ * AEGIS_OK (ctx filled) or AEGIS_ERR_UNAUTHORIZED. */
+static aegis_status_t resolve_identity(AegisDB *db, const cJSON *req,
+                                       AuthCtx *out) {
+    out->ns = NULL;
+    out->can_write = 1;
+    if (db->config.auth_token_count == 0) return AEGIS_OK; /* auth disabled */
+
     const char *token = jr_str(req, "token", NULL);
-    if (!token) return 0;
-    int authorized = 0;
-    for (size_t i = 0; i < db->config.auth_token_count; i++)
-        if (ct_eq(token, db->config.auth_tokens[i])) authorized = 1;
-    return authorized;
+    const AuthToken *match = NULL;
+    if (token) {
+        for (size_t i = 0; i < db->config.auth_token_count; i++)
+            if (ct_eq(token, db->config.auth_tokens[i].token))
+                match = &db->config.auth_tokens[i];
+    }
+    if (!match) return AEGIS_ERR_UNAUTHORIZED;
+    out->ns = match->namespace; /* NULL for ADMIN tokens */
+    out->can_write = (match->scope != AEGIS_SCOPE_RO);
+    return AEGIS_OK;
+}
+
+static int is_write_op(const char *op) {
+    return strcmp(op, "insert") == 0 || strcmp(op, "update") == 0 ||
+           strcmp(op, "delete") == 0 || strcmp(op, "promote") == 0 ||
+           strcmp(op, "relate") == 0;
 }
 
 cJSON *query_engine_dispatch(AegisDB *db, const cJSON *req) {
@@ -863,23 +922,34 @@ cJSON *query_engine_dispatch(AegisDB *db, const cJSON *req) {
     }
 
     /* "ping" is exempt so liveness and startup probes work unauthenticated. */
-    if (strcmp(op, "ping") != 0 && !request_authorized(db, req)) {
+    if (strcmp(op, "ping") == 0) return handle_ping(db);
+
+    AuthCtx ctx;
+    aegis_status_t ast = resolve_identity(db, req, &ctx);
+    if (ast != AEGIS_OK) {
         LOG_WARN("dispatch: unauthorized \"%s\" request rejected", op);
-        return json_error_status(AEGIS_ERR_UNAUTHORIZED);
+        return json_error_status(ast);
+    }
+    if (is_write_op(op) && !ctx.can_write) {
+        LOG_WARN("dispatch: read-only token attempted \"%s\"", op);
+        return json_error_status(AEGIS_ERR_FORBIDDEN);
     }
 
-    LOG_DEBUG("dispatch: operation \"%s\"", op);
+    LOG_DEBUG("dispatch: operation \"%s\" (ns=%s)", op, ctx.ns ? ctx.ns : "*");
 
-    if (strcmp(op, "ping") == 0) return handle_ping(db);
-    if (strcmp(op, "stats") == 0) return handle_stats(db);
-    if (strcmp(op, "insert") == 0) return handle_insert(db, req);
-    if (strcmp(op, "get") == 0) return handle_get(db, req);
-    if (strcmp(op, "update") == 0) return handle_update(db, req);
-    if (strcmp(op, "delete") == 0) return handle_delete(db, req);
-    if (strcmp(op, "search") == 0) return handle_search(db, req);
-    if (strcmp(op, "promote") == 0) return handle_promote(db, req);
-    if (strcmp(op, "relate") == 0) return handle_relate(db, req);
-    if (strcmp(op, "traverse") == 0) return handle_traverse(db, req);
+    if (strcmp(op, "stats") == 0) {
+        /* stats exposes server-wide counts; restrict to admin/global tokens. */
+        if (ctx.ns) return json_error_status(AEGIS_ERR_FORBIDDEN);
+        return handle_stats(db);
+    }
+    if (strcmp(op, "insert") == 0) return handle_insert(db, req, ctx.ns);
+    if (strcmp(op, "get") == 0) return handle_get(db, req, ctx.ns);
+    if (strcmp(op, "update") == 0) return handle_update(db, req, ctx.ns);
+    if (strcmp(op, "delete") == 0) return handle_delete(db, req, ctx.ns);
+    if (strcmp(op, "search") == 0) return handle_search(db, req, ctx.ns);
+    if (strcmp(op, "promote") == 0) return handle_promote(db, req, ctx.ns);
+    if (strcmp(op, "relate") == 0) return handle_relate(db, req, ctx.ns);
+    if (strcmp(op, "traverse") == 0) return handle_traverse(db, req, ctx.ns);
 
     LOG_WARN("dispatch: unknown operation \"%s\"", op);
     return json_error("INVALID_REQUEST", "unknown operation");

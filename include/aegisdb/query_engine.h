@@ -66,9 +66,11 @@ typedef struct {
 aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
                          MemoryRecord **out_records, size_t *out_n);
 
+/* Promote a working record to a persisted one. When `ns` is non-NULL the new
+ * record is pinned to that namespace (agent_id). */
 aegis_status_t qe_promote(AegisDB *db, const char *session_id,
                           uint64_t working_id, MemoryType to_type,
-                          MemoryRecord *out);
+                          const char *ns, MemoryRecord *out);
 
 aegis_status_t qe_relate(AegisDB *db, uint64_t from_id, uint64_t to_id,
                          const char *kind);

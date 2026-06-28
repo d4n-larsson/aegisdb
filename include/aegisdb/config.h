@@ -19,6 +19,23 @@ typedef enum {
     AEGIS_DURABILITY_INTERVAL,
 } AegisDurability;
 
+/* Authorization scope for a token.
+ *   RO    - read-only within its namespace.
+ *   RW    - read+write within its namespace.
+ *   ADMIN - unrestricted: any namespace, all operations (a global token). */
+typedef enum {
+    AEGIS_SCOPE_RO = 0,
+    AEGIS_SCOPE_RW,
+    AEGIS_SCOPE_ADMIN,
+} AegisScope;
+
+/* An accepted bearer token and the tenant/scope it is bound to. */
+typedef struct {
+    char *token;     /* secret, owned */
+    char *namespace; /* tenant (agent_id); owned; NULL for ADMIN/global tokens */
+    int scope;       /* AegisScope */
+} AuthToken;
+
 typedef struct {
     int listen_port;            /* default 9470 */
     char data_dir[1024];        /* default "./data" */
@@ -36,10 +53,11 @@ typedef struct {
     int log_level;              /* AegisLogLevel; default AEGIS_LOG_INFO (2) */
 
     /* Accepted bearer tokens. When auth_token_count == 0 authentication is
-     * disabled and every request is served. Otherwise each request (except
-     * "ping") must carry a "token" matching one of these. Owned by the Config;
-     * release with config_free(). */
-    char **auth_tokens;
+     * disabled and every request is served with unrestricted access. Otherwise
+     * each request (except "ping") must carry a "token" matching one of these;
+     * the matched token's namespace and scope then constrain the request. Owned
+     * by the Config; release with config_free(). */
+    AuthToken *auth_tokens;
     size_t auth_token_count;
 } Config;
 

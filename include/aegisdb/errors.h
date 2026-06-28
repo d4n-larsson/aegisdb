@@ -14,6 +14,7 @@ typedef enum {
     AEGIS_ERR_IMMUTABLE,         /* update on episodic record   -> IMMUTABLE */
     AEGIS_ERR_NOT_READY,         /* phase-gated feature off     -> NOT_READY */
     AEGIS_ERR_UNAUTHORIZED,      /* missing/invalid auth token  -> UNAUTHORIZED */
+    AEGIS_ERR_FORBIDDEN,         /* authenticated but not allowed -> FORBIDDEN */
     AEGIS_ERR_INTERNAL           /* unexpected failure          -> INTERNAL */
 } aegis_status_t;
 
