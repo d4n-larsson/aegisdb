@@ -1,10 +1,13 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=61", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "aegisdb-mcp"
-version = "0.1.0"
+# Version is derived from the git tag (v0.3.1 -> 0.3.1) by setuptools-scm, so a
+# release is just `git tag vX.Y.Z`. CI also sets SETUPTOOLS_SCM_PRETEND_VERSION
+# from the tag, which makes the build independent of clone depth / git layout.
+dynamic = ["version"]
 description = "Integrate AegisDB as persistent memory for Claude Code (MCP server + hooks)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,6 +36,10 @@ aegisdb-capture-hook = "aegis_mcp.hooks:capture"
 
 [tool.setuptools]
 packages = ["aegis_mcp"]
+
+[tool.setuptools_scm]
+# The package lives in a subdirectory; the git repo root is two levels up.
+root = "../.."
 
 [tool.pytest.ini_options]
 # Tests are written as stdlib unittest.TestCase, so they run under both
