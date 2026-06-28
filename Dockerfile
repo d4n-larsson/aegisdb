@@ -20,7 +20,10 @@ COPY src/ src/
 COPY third_party/ third_party/
 COPY tests/ tests/
 
-RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
+# Version baked into the binary; the CI passes the release tag. The build context
+# excludes .git, so without this the binary would fall back to the dev marker.
+ARG VERSION=0.0.0-dev
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DAEGISDB_VERSION="${VERSION}" \
     && cmake --build build --target aegisdb -j "$(nproc)"
 
 # ---------------------------------------------------------------------------

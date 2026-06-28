@@ -5,7 +5,11 @@
 CC      ?= cc
 CSTD    := -std=c17
 CFLAGS  ?= -O2 -g -Wall -Wextra -Wno-unused-parameter
-CPPFLAGS:= -Iinclude -Ithird_party/cjson -D_GNU_SOURCE
+# Version baked into the binary: `git describe` (tag-derived) by default,
+# overridable with `make VERSION=x.y.z`.
+GIT_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
+VERSION ?= $(or $(GIT_VERSION),0.0.0-dev)
+CPPFLAGS:= -Iinclude -Ithird_party/cjson -D_GNU_SOURCE -DAEGIS_VERSION_STRING='"$(VERSION)"'
 LDFLAGS :=
 LDLIBS  := -lpthread -lm
 
