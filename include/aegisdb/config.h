@@ -5,7 +5,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define AEGIS_VERSION_STRING "0.1.0"
+/* Baked in at build time from the git tag (-DAEGIS_VERSION_STRING=...); the
+ * build systems derive it from `git describe`, and the release image/CI pass the
+ * exact tag. Falls back to a dev marker for ad-hoc builds. */
+#ifndef AEGIS_VERSION_STRING
+#define AEGIS_VERSION_STRING "0.0.0-dev"
+#endif
 
 /* Write durability policy: how aggressively the log is fsync'd to disk.
  *   SYNC     - fsync before acknowledging every write (no acknowledged loss).

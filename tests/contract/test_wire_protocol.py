@@ -83,7 +83,8 @@ def test_full_phase(binary, port):
         # ping
         r = srv.req({"operation": "ping"})
         check(r.get("ok") is True, "ping ok")
-        check(r.get("version") == "0.1.0", "ping reports version")
+        check(isinstance(r.get("version"), str) and r.get("version"),
+              "ping reports version")
         check("phase" in r, "ping reports phase")
 
         # request_id echo
@@ -151,7 +152,8 @@ def test_stats(binary, port):
     with Server(binary, port, phase=4) as srv:
         r = srv.req({"operation": "stats"})
         check(r.get("ok") is True, "stats ok")
-        check(r.get("version") == "0.1.0", "stats reports version")
+        check(isinstance(r.get("version"), str) and r.get("version"),
+              "stats reports version")
         check(r.get("durability") in ("sync", "batch", "interval"),
               "stats reports durability mode")
         for field in ("records", "tombstones", "log_bytes", "next_id"):

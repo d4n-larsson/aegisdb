@@ -29,6 +29,21 @@ add_library(aegisdb_core STATIC ${AEGISDB_CORE_SOURCES})
 target_include_directories(aegisdb_core PUBLIC include third_party/cjson)
 target_link_libraries(aegisdb_core PUBLIC cjson Threads::Threads m)
 
+# Version baked into the binary. Override with -DAEGISDB_VERSION=x.y.z; otherwise
+# derive from `git describe` (stripping a leading v), or fall back to a dev marker.
+if(NOT DEFINED AEGISDB_VERSION)
+  execute_process(
+    COMMAND git describe --tags --always --dirty
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE _git_ver OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  if(_git_ver)
+    string(REGEX REPLACE "^v" "" AEGISDB_VERSION "${_git_ver}")
+  else()
+    set(AEGISDB_VERSION "0.0.0-dev")
+  endif()
+endif()
+target_compile_definitions(aegisdb_core PUBLIC AEGIS_VERSION_STRING="${AEGISDB_VERSION}")
+
 # ---------------------------------------------------------------------------
 # Server executable
 # ---------------------------------------------------------------------------
