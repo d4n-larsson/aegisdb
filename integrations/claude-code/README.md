@@ -100,20 +100,25 @@ instead (step 2), point `command` at that venv's `aegis-mcp` console script (or
 
 ### 5. Enable automatic recall & capture
 
-Add the hooks to `.claude/settings.json` (see [`examples/settings.json`](examples/settings.json)):
+Add the hooks to `.claude/settings.json` (see [`examples/settings.json`](examples/settings.json)).
+The published package exposes them as console scripts, so `uvx` runs them with no
+clone — the same zero-install path as the MCP server:
 
 ```jsonc
 {
   "hooks": {
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "python3 integrations/claude-code/hooks/recall_hook.py" } ] }
+      { "hooks": [ { "type": "command", "command": "uvx --from aegis-mcp aegis-recall-hook" } ] }
     ],
     "SessionEnd": [
-      { "hooks": [ { "type": "command", "command": "python3 integrations/claude-code/hooks/capture_hook.py" } ] }
+      { "hooks": [ { "type": "command", "command": "uvx --from aegis-mcp aegis-capture-hook" } ] }
     ]
   }
 }
 ```
+
+From a checkout, run the scripts by path instead:
+`python3 integrations/claude-code/hooks/recall_hook.py` (and `capture_hook.py`).
 
 ### 6. Confirm it works
 
@@ -213,16 +218,18 @@ Project-scope `.mcp.json` (see [`examples/mcp.json`](examples/mcp.json)):
 
 ## Enable automatic recall & capture
 
-Add to `.claude/settings.json` (see [`examples/settings.json`](examples/settings.json)):
+Add to `.claude/settings.json` (see [`examples/settings.json`](examples/settings.json)).
+`uvx` runs the packaged hooks with no clone (use the `python3 …/hooks/*.py` paths
+from a checkout):
 
 ```jsonc
 {
   "hooks": {
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "python3 integrations/claude-code/hooks/recall_hook.py" } ] }
+      { "hooks": [ { "type": "command", "command": "uvx --from aegis-mcp aegis-recall-hook" } ] }
     ],
     "SessionEnd": [
-      { "hooks": [ { "type": "command", "command": "python3 integrations/claude-code/hooks/capture_hook.py" } ] }
+      { "hooks": [ { "type": "command", "command": "uvx --from aegis-mcp aegis-capture-hook" } ] }
     ]
   }
 }

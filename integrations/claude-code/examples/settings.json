@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/integrations/claude-code/hooks/recall_hook.py\""
+            "command": "uvx --from aegis-mcp aegis-recall-hook"
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/integrations/claude-code/hooks/capture_hook.py\""
+            "command": "uvx --from aegis-mcp aegis-capture-hook"
           }
         ]
       }
