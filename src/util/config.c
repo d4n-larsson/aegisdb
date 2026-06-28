@@ -187,7 +187,11 @@ static int parse_int(const char *s, int *out) {
 
 static void usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s [options]\n"
+            "Usage: %s [options]            run the server\n"
+            "       %s client <op> [args]   talk to a server (try 'client')\n"
+            "       %s gen-token [opts]      mint a token-file line + token\n"
+            "\n"
+            "Server options:\n"
             "  --data-dir <path>        persistence directory (default ./data)\n"
             "  --port <n>               TCP listen port (default 9470)\n"
             "  --phase <1-4>            highest enabled feature phase (default 4)\n"
@@ -218,7 +222,7 @@ static void usage(const char *prog) {
             "  With no --auth-token/--auth-token-file the server runs WITHOUT\n"
             "  authentication. Tokens are sent in plaintext; run the server\n"
             "  behind an encrypted channel (VPN, SSH tunnel, or TLS proxy).\n",
-            prog);
+            prog, prog, prog);
 }
 
 int config_parse_args(Config *cfg, int argc, char **argv) {

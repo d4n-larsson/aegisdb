@@ -96,6 +96,32 @@ verbosity with `--log-level error|warn|info|debug` (default `info`) or the
 The `WARN` line appears only when the server is started without
 `--auth-token`/`--auth-token-file` (see [Authentication](#authentication)).
 
+## Talk to it
+
+The same binary is also a client — no `nc`, no hand-written JSON:
+
+```bash
+aegisdb client ping
+aegisdb client put --type semantic --tags user "prefers dark mode"
+aegisdb client get 1
+aegisdb client search --tags user --top-k 5
+aegisdb client stats
+```
+
+Host, port, and token default to `$AEGIS_HOST` / `$AEGIS_PORT` / `$AEGIS_TOKEN`
+(`127.0.0.1` / `9470` / none) or `--host`/`--port`/`--token`. The exit code is
+`0` on an ok response, so it scripts cleanly. Inside Docker:
+`docker exec aegisdb aegisdb client stats`.
+
+To create a tenant token, `gen-token` prints a ready token-file line (hashed)
+and the one-time plaintext token:
+
+```bash
+$ aegisdb gen-token --namespace acme --scope rw
+sha256$… acme rw          # paste into your --auth-token-file
+token: 9f3c…              # give to the client (AEGIS_TOKEN); not recoverable
+```
+
 ### Configuration flags
 
 | Flag | Default | Description |

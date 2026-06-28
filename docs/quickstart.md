@@ -62,10 +62,36 @@ With no `--auth-token`/`--auth-token-file`, the server runs **without authentica
 Tokens are sent in plaintext, so run the server behind an encrypted channel
 (VPN, SSH tunnel, or TLS proxy) when auth is enabled.
 
+## Talk to it with the built-in client
+
+The `aegisdb` binary is also a client, so you don't need `nc` or hand-written
+JSON. It prints the server's JSON reply and exits `0` on an ok response.
+
+```bash
+aegisdb client ping
+aegisdb client put --type semantic --tags user,preference "User likes coffee"
+aegisdb client get 1
+aegisdb client search --tags user --top-k 10
+aegisdb client stats
+```
+
+Connection settings come from `--host`/`--port`/`--token` or the environment
+(`$AEGIS_HOST` / `$AEGIS_PORT` / `$AEGIS_TOKEN`, defaulting to `127.0.0.1` /
+`9470` / none). Running in Docker? `docker exec aegisdb aegisdb client stats`.
+
+To onboard a tenant, mint a token (the plaintext is shown once; the server
+stores only its hash):
+
+```bash
+$ aegisdb gen-token --namespace acme --scope rw
+sha256$… acme rw     # append this line to your --auth-token-file
+token: 9f3c…         # set AEGIS_TOKEN to this on the client side
+```
+
 ## Verify with netcat
 
-The wire protocol is one JSON object per line over TCP. `nc -q 1` sends a line
-and waits one second for the reply.
+If you'd rather speak the raw protocol, it is one JSON object per line over TCP.
+`nc -q 1` sends a line and waits one second for the reply.
 
 **Ping** (always works, even with auth enabled):
 
