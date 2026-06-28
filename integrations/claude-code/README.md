@@ -1,6 +1,6 @@
 # AegisDB ↔ Claude Code Memory Integration
 
-Make [AegisDB](../../README.md) the **persistent long-term memory** of Claude
+Make [AegisDB](https://github.com/d4n-larsson/aegisdb) the **persistent long-term memory** of Claude
 Code. The agent gets memory **tools** (save/search/get/update/relate) via an MCP
 server, plus automatic **recall** and **capture** via hooks — so knowledge learned
 in one session (decisions, conventions, fixes, preferences) is available in later
@@ -104,7 +104,7 @@ claude mcp add memory --scope project \
   -- uvx aegisdb-mcp
 ```
 
-…or commit a project-scope `.mcp.json` (see [`examples/mcp.json`](examples/mcp.json)):
+…or commit a project-scope `.mcp.json` (see [`examples/mcp.json`](https://github.com/d4n-larsson/aegisdb/blob/main/integrations/claude-code/examples/mcp.json)):
 
 ```jsonc
 {
@@ -125,7 +125,7 @@ instead (step 2), point `command` at that venv's `aegisdb-mcp` console script (o
 
 ### 5. Enable automatic recall & capture
 
-Add the hooks to `.claude/settings.json` (see [`examples/settings.json`](examples/settings.json)).
+Add the hooks to `.claude/settings.json` (see [`examples/settings.json`](https://github.com/d4n-larsson/aegisdb/blob/main/integrations/claude-code/examples/settings.json)).
 The published package exposes them as console scripts, so `uvx` runs them with no
 clone — the same zero-install path as the MCP server:
 
@@ -227,7 +227,7 @@ explicit overrides.
 
 ## Register the MCP server
 
-Project-scope `.mcp.json` (see [`examples/mcp.json`](examples/mcp.json)):
+Project-scope `.mcp.json` (see [`examples/mcp.json`](https://github.com/d4n-larsson/aegisdb/blob/main/integrations/claude-code/examples/mcp.json)):
 
 ```jsonc
 {
@@ -243,7 +243,7 @@ Project-scope `.mcp.json` (see [`examples/mcp.json`](examples/mcp.json)):
 
 ## Enable automatic recall & capture
 
-Add to `.claude/settings.json` (see [`examples/settings.json`](examples/settings.json)).
+Add to `.claude/settings.json` (see [`examples/settings.json`](https://github.com/d4n-larsson/aegisdb/blob/main/integrations/claude-code/examples/settings.json)).
 `uvx` runs the packaged hooks with no clone (use the `python3 …/hooks/*.py` paths
 from a checkout):
 
@@ -323,7 +323,7 @@ so only hand them to trusted operators.
 
 ## Verify
 
-See [quickstart](docs/quickstart.md) for the
+See [quickstart](https://github.com/d4n-larsson/aegisdb/blob/main/integrations/claude-code/docs/quickstart.md) for the
 full walkthrough (explicit save/recall, automatic recall, isolation, degradation).
 
 ## Test

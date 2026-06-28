@@ -15,6 +15,11 @@ dependencies = [
     "mcp>=1.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/d4n-larsson/aegisdb"
+Repository = "https://github.com/d4n-larsson/aegisdb"
+Issues = "https://github.com/d4n-larsson/aegisdb/issues"
+
 [project.optional-dependencies]
 # Embedding providers are opt-in; the integration runs in `none` mode without them.
 voyage = ["voyageai>=0.2"]
