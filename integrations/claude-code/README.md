@@ -26,6 +26,31 @@ All logic lives in dependency-free modules under `aegis_mcp/`; only the MCP serv
 entry point needs the `mcp` SDK. Memory is always best-effort: if AegisDB is down,
 the agent stays fully usable.
 
+## Why it saves tokens
+
+Long context is the real cost driver, and this integration keeps durable
+knowledge **out** of the window — feeding back only what's relevant per prompt —
+so you spend tokens on the work, not on re-establishing context.
+
+- **Recall instead of re-explaining.** Stack, conventions, decisions, and gotchas
+  learned earlier are injected automatically, so you stop re-pasting them every
+  session and the model stops re-deriving them.
+- **A relevant slice, not a dump.** Recall ranks by similarity × importance ×
+  confidence and injects only the top matches — capped by `AEGIS_RECALL_TOP_K`
+  and filtered by `AEGIS_RECALL_MIN_SCORE`, within `AEGIS_RECALL_TIME_BUDGET_MS`.
+  The *selection* happens in AegisDB, so the model never sees (or pays to sift)
+  the rest.
+- **Short sessions, full knowledge.** Because memory is external, you can start
+  fresh sessions instead of dragging one giant transcript whose every turn
+  re-bills the whole context.
+- **Distilled, then reused.** Capture stores salient outcomes (filtered by
+  `AEGIS_CAPTURE_MIN_SALIENCE`), not raw logs — and a [shared team
+  server](#shared-team-server) lets everyone reuse context established once.
+
+Recall does add a small, bounded amount per turn (the injected memories, plus a
+query embedding if enabled) — far less than re-pasting context blocks or carrying
+a long transcript, and tunable via the knobs above.
+
 ## Integrate with Claude Code (step by step)
 
 From a zero state to working memory in six steps. Run these from your project root.
