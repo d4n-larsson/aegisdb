@@ -3,331 +3,548 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AegisDB — persistent memory for AI agents</title>
-  <meta name="description" content="AegisDB is a fast C database that gives AI agents durable long-term memory: episodic, semantic, and working memory over a simple JSON-over-TCP protocol, with vector search, a graph, crash recovery, and a Claude Code integration.">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2334d399' d='M12 1 3 5v6c0 5 3.8 9.7 9 11 5.2-1.3 9-6 9-11V5l-9-4z'/%3E%3C/svg%3E">
+  <title>AegisDB — memory that outlives the context window</title>
+  <meta name="description" content="AegisDB is a small, fast C database that gives AI agents durable memory — episodic, semantic, and working — over a one-line-of-JSON wire protocol, with vector search, a relationship graph, and an append-only log that survives a crash.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%2314110E'/%3E%3Ctext x='12' y='17' font-family='monospace' font-size='13' font-weight='700' fill='%23C9A24B' text-anchor='middle'%3E%E2%96%8D%3C/text%3E%3C/svg%3E">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo+Expanded:wght@600;700;800&family=Hanken+Grotesk:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
   <style>
     :root {
-      --bg: #0b1120;
-      --bg-soft: #111a2e;
-      --panel: #131d33;
-      --border: #243149;
-      --text: #e6edf7;
-      --muted: #9bb0cc;
-      --accent: #34d399;
-      --accent-2: #38bdf8;
-      --code-bg: #0a0f1c;
-      --radius: 14px;
-      --maxw: 1080px;
+      --ink:    #14110E;
+      --ink-2:  #1C1813;
+      --ink-3:  #221D17;
+      --line:   #342D24;
+      --paper:  #ECE6D8;
+      --dim:    #8E867A;
+      --dim-2:  #645C51;
+      --brass:  #C9A24B;
+      --brass-d:#A6802F;
+      --episodic:#B5532E;
+      --semantic:#C9A24B;
+      --working: #5E8C84;
+      --gutter: 84px;
+      --maxw: 1140px;
+      --disp: "Archivo Expanded", "Arial Black", sans-serif;
+      --body: "Hanken Grotesk", system-ui, sans-serif;
+      --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
     }
     * { box-sizing: border-box; }
     html { scroll-behavior: smooth; }
     body {
       margin: 0;
-      background: var(--bg);
-      color: var(--text);
-      font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--ink);
+      color: var(--paper);
+      font: 16px/1.6 var(--body);
       -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
     }
-    a { color: var(--accent-2); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    code, pre, .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
-    .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
-    h1, h2, h3 { line-height: 1.2; letter-spacing: -0.02em; }
+    /* faint vertical grain — like ruled ledger paper */
+    body::before {
+      content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+      background:
+        radial-gradient(120% 70% at 78% -10%, rgba(201,162,75,0.07), transparent 60%);
+    }
+    a { color: var(--brass); text-decoration: none; }
+    a:hover { color: var(--paper); }
+    ::selection { background: var(--brass); color: var(--ink); }
+    :focus-visible { outline: 2px solid var(--brass); outline-offset: 3px; border-radius: 2px; }
+    .mono { font-family: var(--mono); }
 
-    /* Header */
-    header.site {
-      position: sticky; top: 0; z-index: 10;
-      backdrop-filter: blur(10px);
-      background: rgba(11,17,32,0.78);
-      border-bottom: 1px solid var(--border);
+    /* ---- log sheet: page is one line-numbered file ---- */
+    .sheet { max-width: var(--maxw); margin: 0 auto; position: relative; z-index: 1; }
+    .rec {
+      display: grid;
+      grid-template-columns: var(--gutter) 1fr;
+      position: relative;
     }
-    .nav { display: flex; align-items: center; gap: 20px; height: 60px; }
-    .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -0.01em; }
-    .brand svg { width: 24px; height: 24px; }
-    .nav .spacer { flex: 1; }
-    .nav a { color: var(--muted); font-size: 0.95rem; }
-    .nav a:hover { color: var(--text); text-decoration: none; }
-    .nav .ghbtn {
-      color: var(--text); border: 1px solid var(--border); padding: 7px 14px;
-      border-radius: 999px; font-size: 0.9rem;
+    .off {
+      font-family: var(--mono); font-size: 0.72rem; color: var(--dim-2);
+      letter-spacing: 0.02em; padding: 28px 14px 0 16px; text-align: right;
+      white-space: nowrap; user-select: none;
     }
-    .nav .ghbtn:hover { border-color: var(--accent); }
-    @media (max-width: 680px) { .nav a.hide-sm { display: none; } }
+    .col {
+      border-left: 1px solid var(--line);
+      padding: 28px 28px 56px 32px;
+      min-width: 0;
+    }
+    .eyebrow {
+      font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.08em;
+      color: var(--dim); text-transform: uppercase; margin: 0 0 22px;
+    }
+    .eyebrow b { color: var(--brass); font-weight: 500; }
+    .eyebrow .tick { color: var(--brass); }
 
-    /* Hero */
-    .hero { position: relative; overflow: hidden; border-bottom: 1px solid var(--border); }
-    .hero::before {
-      content: ""; position: absolute; inset: -40% 0 auto 0; height: 600px;
-      background: radial-gradient(60% 60% at 50% 0%, rgba(52,211,153,0.18), transparent 70%),
-                  radial-gradient(50% 50% at 80% 10%, rgba(56,189,248,0.14), transparent 70%);
-      pointer-events: none;
+    h2.title {
+      font-family: var(--disp); font-weight: 700; font-size: clamp(1.5rem, 3.4vw, 2.25rem);
+      line-height: 1.08; letter-spacing: -0.01em; margin: 0 0 14px;
     }
-    .hero .wrap { position: relative; padding: 88px 24px 72px; text-align: center; }
-    .shield { width: 64px; height: 64px; margin-bottom: 22px; filter: drop-shadow(0 6px 20px rgba(52,211,153,0.35)); }
-    .hero h1 { font-size: clamp(2.2rem, 5.5vw, 3.6rem); margin: 0 0 18px; }
-    .hero h1 .grad {
-      background: linear-gradient(90deg, var(--accent), var(--accent-2));
-      -webkit-background-clip: text; background-clip: text; color: transparent;
+    .lede { color: var(--dim); max-width: 60ch; margin: 0 0 8px; font-size: 1.02rem; }
+
+    /* ---- header ---- */
+    .top {
+      position: sticky; top: 0; z-index: 20;
+      background: rgba(20,17,14,0.86); backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--line);
     }
-    .hero p.lead { font-size: clamp(1.05rem, 2.2vw, 1.3rem); color: var(--muted); max-width: 720px; margin: 0 auto 32px; }
-    .cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+    .top .col { padding: 0 28px 0 32px; display: flex; align-items: center; gap: 26px; height: 58px; }
+    .top .off { padding-top: 0; display: flex; align-items: center; justify-content: flex-end; height: 58px; }
+    .brand { font-family: var(--mono); font-weight: 600; letter-spacing: 0.02em; color: var(--paper); display: flex; align-items: center; gap: 9px; }
+    .brand .blk { color: var(--brass); }
+    .top nav { margin-left: auto; display: flex; align-items: center; gap: 22px; }
+    .top nav a { font-family: var(--mono); font-size: 0.82rem; color: var(--dim); letter-spacing: 0.02em; }
+    .top nav a:hover { color: var(--paper); }
+    .top nav a.gh { color: var(--paper); border: 1px solid var(--line); padding: 6px 13px; border-radius: 3px; }
+    .top nav a.gh:hover { border-color: var(--brass); }
+    @media (max-width: 720px) { .top nav a.nav-hide { display: none; } }
+
+    /* ---- hero ---- */
+    .hero .col { padding-top: 64px; padding-bottom: 72px; }
+    .hero-grid { display: grid; grid-template-columns: 1.05fr 0.95fr; gap: 48px; align-items: start; }
+    h1 {
+      font-family: var(--disp); font-weight: 800;
+      font-size: clamp(2.3rem, 5.6vw, 4rem); line-height: 1.02; letter-spacing: -0.02em;
+      margin: 18px 0 24px;
+    }
+    h1 .em { color: var(--brass); }
+    .hero p.lead { font-size: clamp(1.05rem, 1.6vw, 1.22rem); color: var(--dim); max-width: 46ch; margin: 0 0 30px; }
+    .cta { display: flex; gap: 12px; flex-wrap: wrap; }
     .btn {
-      display: inline-block; padding: 12px 22px; border-radius: 10px; font-weight: 600; font-size: 0.98rem;
-      border: 1px solid transparent;
+      font-family: var(--mono); font-size: 0.9rem; font-weight: 500; letter-spacing: 0.01em;
+      padding: 12px 20px; border-radius: 3px; border: 1px solid transparent; display: inline-flex; gap: 8px; align-items: center;
     }
-    .btn.primary { background: linear-gradient(90deg, var(--accent), #2dd4bf); color: #042018; }
-    .btn.primary:hover { text-decoration: none; filter: brightness(1.07); }
-    .btn.ghost { border-color: var(--border); color: var(--text); }
-    .btn.ghost:hover { border-color: var(--accent-2); text-decoration: none; }
-    .badges { margin-top: 30px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
-    .badge {
-      font-size: 0.8rem; color: var(--muted); border: 1px solid var(--border);
-      padding: 5px 12px; border-radius: 999px; background: var(--bg-soft);
+    .btn.primary { background: var(--brass); color: var(--ink); }
+    .btn.primary:hover { background: #d9b25c; color: var(--ink); }
+    .btn.ghost { border-color: var(--line); color: var(--paper); }
+    .btn.ghost:hover { border-color: var(--brass); color: var(--paper); }
+    .specstrip {
+      margin-top: 34px; display: flex; flex-wrap: wrap; gap: 8px 20px; padding-top: 16px;
+      border-top: 1px solid var(--line); font-family: var(--mono); font-size: 0.78rem; color: var(--dim);
     }
-    .badge b { color: var(--accent); font-weight: 600; }
+    .specstrip div { position: relative; padding-right: 20px; }
+    .specstrip div::after { content: "·"; position: absolute; right: 0; color: var(--dim-2); }
+    .specstrip div:last-child { padding-right: 0; }
+    .specstrip div:last-child::after { content: ""; }
+    .specstrip b { color: var(--paper); font-weight: 500; }
 
-    /* Sections */
-    section { padding: 72px 0; border-bottom: 1px solid var(--border); }
-    section h2 { font-size: clamp(1.6rem, 3.5vw, 2.2rem); margin: 0 0 12px; text-align: center; }
-    section .sub { color: var(--muted); text-align: center; max-width: 640px; margin: 0 auto 44px; }
-
-    /* Feature grid */
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 18px; }
-    .card {
-      background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
-      padding: 24px; transition: border-color .2s, transform .2s;
+    /* ---- live append log (hero signature) ---- */
+    .terminal {
+      background: #0E0C0A; border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
+      box-shadow: 0 24px 60px -28px rgba(0,0,0,0.8);
+      font-family: var(--mono); font-size: 0.8rem; line-height: 1.7;
     }
-    .card:hover { border-color: var(--accent); transform: translateY(-2px); }
-    .card .ic { font-size: 1.5rem; margin-bottom: 12px; }
-    .card h3 { margin: 0 0 8px; font-size: 1.12rem; }
-    .card p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+    .term-bar {
+      display: flex; align-items: center; gap: 10px; padding: 9px 14px;
+      border-bottom: 1px solid var(--line); color: var(--dim); font-size: 0.74rem; letter-spacing: 0.04em;
+    }
+    .term-bar .fname { color: var(--paper); }
+    .term-bar .live { margin-left: auto; display: flex; align-items: center; gap: 6px; color: var(--working); }
+    .term-bar .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--working); box-shadow: 0 0 0 0 rgba(94,140,132,0.6); }
+    .term-body { padding: 14px 4px 16px; min-height: 320px; }
+    .ln { display: grid; grid-template-columns: 38px 1fr; gap: 4px; padding: 1px 14px; white-space: pre-wrap; word-break: break-word; }
+    .ln .num { color: var(--dim-2); text-align: right; user-select: none; }
+    .ln.resp .num { color: transparent; }
+    .ln .txt .op { color: var(--brass); }
+    .ln .txt .str { color: #C9B48A; }
+    .ln .txt .key { color: var(--dim); }
+    .ln.resp .txt { color: var(--working); }
+    .ln .txt .ep { color: var(--episodic); }
+    .ln .txt .se { color: var(--semantic); }
+    .ln .txt .wk { color: var(--working); }
+    .caret { display: inline-block; width: 8px; height: 1.05em; background: var(--brass); vertical-align: -2px; animation: blink 1.05s steps(1) infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
 
-    /* Code */
+    /* ---- memory-type legend ---- */
+    .legend { display: flex; flex-wrap: wrap; gap: 10px 26px; font-family: var(--mono); font-size: 0.8rem; margin: 0 0 30px; }
+    .legend span { display: inline-flex; align-items: center; gap: 8px; color: var(--dim); }
+    .legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+    .legend .l-ep i { background: var(--episodic); } .legend .l-ep b { color: var(--episodic); }
+    .legend .l-se i { background: var(--semantic); } .legend .l-se b { color: var(--semantic); }
+    .legend .l-wk i { background: var(--working); }  .legend .l-wk b { color: var(--working); }
+    .legend b { font-weight: 500; }
+
+    /* ---- feature records ---- */
+    .feats { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border-top: 1px solid var(--line); border-left: 1px solid var(--line); }
+    .feat { border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 24px 24px 26px; position: relative; transition: background .18s; }
+    .feat:hover { background: var(--ink-2); }
+    .feat::before {
+      content: attr(data-k); position: absolute; top: 24px; right: 22px;
+      font-family: var(--mono); font-size: 0.72rem; color: var(--dim-2);
+    }
+    .feat h3 { font-family: var(--body); font-weight: 600; font-size: 1.06rem; margin: 0 0 8px; display: flex; align-items: center; gap: 9px; }
+    .feat h3 .bar { width: 3px; height: 1.05em; border-radius: 2px; background: var(--brass); }
+    .feat.ep h3 .bar { background: var(--episodic); }
+    .feat.se h3 .bar { background: var(--semantic); }
+    .feat.wk h3 .bar { background: var(--working); }
+    .feat p { margin: 0; color: var(--dim); font-size: 0.92rem; line-height: 1.55; max-width: 44ch; }
+    .feat p b { color: var(--paper); font-weight: 500; }
+    @media (max-width: 680px) { .feats { grid-template-columns: 1fr; } }
+
+    /* ---- code blocks ---- */
     pre {
-      background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius);
-      padding: 20px; overflow-x: auto; font-size: 0.88rem; line-height: 1.6; margin: 0;
+      background: #0E0C0A; border: 1px solid var(--line); border-radius: 6px;
+      padding: 18px 20px; overflow-x: auto; margin: 0;
+      font-family: var(--mono); font-size: 0.82rem; line-height: 1.7;
     }
-    pre .c { color: #6b7d99; }       /* comment */
-    pre .k { color: var(--accent); } /* key/op */
-    pre .s { color: #fcd34d; }       /* string */
-    .codewrap { max-width: 760px; margin: 0 auto; }
-    .codecap { color: var(--muted); font-size: 0.85rem; margin: 0 0 10px; text-align: center; }
+    pre .c  { color: var(--dim-2); }
+    pre .op { color: var(--brass); }
+    pre .s  { color: #C9B48A; }
+    pre .key{ color: var(--dim); }
+    pre .ar { color: var(--working); }
+    .cap { font-family: var(--mono); font-size: 0.76rem; color: var(--dim); letter-spacing: 0.04em; margin: 0 0 10px; text-transform: uppercase; }
+    .opsline { font-family: var(--mono); font-size: 0.82rem; color: var(--dim); margin: 16px 0 0; }
+    .opsline b { color: var(--brass); font-weight: 500; }
 
-    /* Two-column */
-    .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 36px; align-items: center; }
-    .cols ul { margin: 0; padding-left: 20px; color: var(--muted); }
-    .cols ul li { margin: 8px 0; }
-    .cols ul li b { color: var(--text); font-weight: 600; }
-    @media (max-width: 760px) { .cols { grid-template-columns: 1fr; gap: 24px; } }
+    /* ---- two-up (claude code) ---- */
+    .twoup { display: grid; grid-template-columns: 1fr 1fr; gap: 36px; align-items: start; }
+    .twoup ul { list-style: none; margin: 18px 0 0; padding: 0; }
+    .twoup li { padding: 12px 0 12px 22px; border-bottom: 1px solid var(--line); color: var(--dim); font-size: 0.95rem; position: relative; }
+    .twoup li:first-child { border-top: 1px solid var(--line); }
+    .twoup li::before { content: "▍"; position: absolute; left: 0; color: var(--brass); font-family: var(--mono); }
+    .twoup li b { color: var(--paper); font-weight: 600; }
+    @media (max-width: 800px) { .twoup { grid-template-columns: 1fr; gap: 26px; } .hero-grid { grid-template-columns: 1fr; gap: 36px; } }
 
-    /* Steps */
-    .steps { counter-reset: step; max-width: 760px; margin: 0 auto; display: grid; gap: 16px; }
-    .step { display: flex; gap: 16px; align-items: flex-start; }
-    .step .n {
-      counter-increment: step; flex: 0 0 34px; height: 34px; border-radius: 999px;
-      display: grid; place-items: center; font-weight: 700; color: #042018;
-      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    /* ---- get started: actual log entries ---- */
+    .start-log { font-family: var(--mono); font-size: 0.86rem; }
+    .start-log .row2 { display: grid; grid-template-columns: 30px 1fr; gap: 14px; padding: 16px 0; border-bottom: 1px solid var(--line); align-items: baseline; }
+    .start-log .row2:first-child { border-top: 1px solid var(--line); }
+    .start-log .seq { color: var(--brass); }
+    .start-log .what { font-family: var(--body); font-weight: 600; font-size: 0.96rem; margin: 0 0 8px; color: var(--paper); }
+    .start-log code { display: block; background: #0E0C0A; border: 1px solid var(--line); border-radius: 4px; padding: 9px 12px; color: var(--paper); font-size: 0.82rem; overflow-x: auto; white-space: pre; }
+    .start-log .ann { color: var(--dim); font-family: var(--body); font-size: 0.95rem; }
+
+    /* ---- footer ---- */
+    footer.rec .col { padding-top: 30px; padding-bottom: 44px; }
+    .foot-eof { font-family: var(--mono); font-size: 0.74rem; color: var(--dim-2); letter-spacing: 0.06em; margin: 0 0 18px; }
+    .foot-links { display: flex; flex-wrap: wrap; gap: 8px 26px; font-family: var(--mono); font-size: 0.84rem; margin-bottom: 16px; }
+    .foot-links a { color: var(--dim); }
+    .foot-links a:hover { color: var(--paper); }
+    .foot-meta { color: var(--dim-2); font-size: 0.84rem; }
+
+    /* ---- responsive gutter collapse ---- */
+    @media (max-width: 640px) {
+      :root { --gutter: 0px; }
+      .off, .top .off { display: none; }
+      .terminal { font-size: 0.72rem; }
+      .ln { grid-template-columns: 30px 1fr; }
+      .col { border-left: 0; padding-left: 20px; padding-right: 20px; }
+      .top .col { padding-left: 20px; padding-right: 20px; gap: 14px; }
+      .top nav { gap: 14px; }
+      .specstrip div { border-right: 0; padding-right: 0; }
     }
-    .step .n::before { content: counter(step); }
-    .step .body { flex: 1; }
-    .step .body p { margin: 4px 0 0; color: var(--muted); font-size: 0.95rem; }
-    .step .body code { background: var(--code-bg); border: 1px solid var(--border); padding: 1px 6px; border-radius: 6px; font-size: 0.85em; }
 
-    /* Footer */
-    footer { padding: 48px 0; text-align: center; color: var(--muted); font-size: 0.9rem; }
-    footer .links { display: flex; gap: 22px; justify-content: center; flex-wrap: wrap; margin-bottom: 16px; }
-    footer a { color: var(--muted); }
-    footer a:hover { color: var(--text); }
-
-    .note { font-size: 0.85rem; color: var(--muted); text-align: center; margin-top: 18px; }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .caret { animation: none; }
+      .dot { animation: none !important; }
+    }
   </style>
 </head>
 <body>
-  <header class="site">
-    <div class="wrap nav">
-      <span class="brand">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#34d399" d="M12 1 3 5v6c0 5 3.8 9.7 9 11 5.2-1.3 9-6 9-11V5l-9-4z"/></svg>
-        AegisDB
-      </span>
-      <span class="spacer"></span>
-      <a href="#features" class="hide-sm">Features</a>
-      <a href="#protocol" class="hide-sm">Protocol</a>
-      <a href="#claude" class="hide-sm">Claude Code</a>
-      <a href="#start">Get started</a>
-      <a href="https://github.com/d4n-larsson/aegisdb" class="ghbtn">GitHub ↗</a>
-    </div>
-  </header>
+  <div class="sheet">
 
-  <div class="hero">
-    <div class="wrap">
-      <svg class="shield" viewBox="0 0 24 24" aria-hidden="true">
-        <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stop-color="#34d399"/><stop offset="1" stop-color="#38bdf8"/>
-        </linearGradient></defs>
-        <path fill="url(#g)" d="M12 1 3 5v6c0 5 3.8 9.7 9 11 5.2-1.3 9-6 9-11V5l-9-4z"/>
-        <path fill="#0b1120" d="M10.6 14.2 8.4 12l-1.2 1.2 3.4 3.4 6-6-1.2-1.2z"/>
-      </svg>
-      <h1>Durable memory for <span class="grad">AI agents</span></h1>
-      <p class="lead">
-        AegisDB is a small, fast database written in C that gives agents persistent
-        long-term memory — episodic, semantic, and working — over a dead-simple
-        JSON-over-TCP protocol, with vector search, a relationship graph, and
-        crash recovery built in.
-      </p>
-      <div class="cta">
-        <a class="btn primary" href="#start">Get started</a>
-        <a class="btn ghost" href="https://github.com/d4n-larsson/aegisdb">View on GitHub</a>
+    <!-- HEADER -->
+    <header class="top rec">
+      <div class="off mono">▍log</div>
+      <div class="col">
+        <span class="brand"><span class="blk">▍</span>AEGISDB</span>
+        <nav>
+          <a href="#what" class="nav-hide">memory</a>
+          <a href="#wire" class="nav-hide">protocol</a>
+          <a href="#claude" class="nav-hide">claude&nbsp;code</a>
+          <a href="#start">get&nbsp;started</a>
+          <a href="https://github.com/d4n-larsson/aegisdb" class="gh">github&nbsp;↗</a>
+        </nav>
       </div>
-      <div class="badges">
-        <span class="badge">Written in <b>C</b></span>
-        <span class="badge">NDJSON over TCP</span>
-        <span class="badge">Vector + tag + time search</span>
-        <span class="badge"><b>MIT</b> licensed</span>
-      </div>
-    </div>
-  </div>
+    </header>
 
-  <section id="features">
-    <div class="wrap">
-      <h2>What it gives your agents</h2>
-      <p class="sub">A memory substrate designed around how agents actually remember — not a generic key-value store bolted on.</p>
-      <div class="grid">
-        <div class="card">
-          <div class="ic">🧠</div>
-          <h3>Three memory types</h3>
-          <p>Immutable <b>episodic</b> events, mutable <b>semantic</b> facts, and ephemeral <b>working</b> memory — each with the right lifecycle and guarantees.</p>
-        </div>
-        <div class="card">
-          <div class="ic">🔎</div>
-          <h3>Search that fits recall</h3>
-          <p>Query by semantic vector similarity, by tags, or by time range — backed by purpose-built indexes, not a linear scan.</p>
-        </div>
-        <div class="card">
-          <div class="ic">🕸️</div>
-          <h3>Relationships &amp; traversal</h3>
-          <p>Link memories into a graph and walk it with breadth-first traversal to pull in related context.</p>
-        </div>
-        <div class="card">
-          <div class="ic">💾</div>
-          <h3>Crash-safe persistence</h3>
-          <p>An append-only log with per-record CRC32 checksums; indexes rebuild from the log on startup. Kill it mid-write and nothing is lost.</p>
-        </div>
-        <div class="card">
-          <div class="ic">🔐</div>
-          <h3>Shared &amp; authenticated</h3>
-          <p>Run one server for a whole team: a shared memory pool gated by bearer-token authentication.</p>
-        </div>
-        <div class="card">
-          <div class="ic">⚡</div>
-          <h3>Tiny &amp; dependency-light</h3>
-          <p>A multi-threaded C server with a one-object-per-line protocol any language can speak in a few lines.</p>
+    <!-- HERO -->
+    <section class="hero rec" id="top">
+      <div class="off mono">0x0000</div>
+      <div class="col">
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0001</b>&nbsp;·&nbsp;type=meta</p>
+        <div class="hero-grid">
+          <div>
+            <h1>Memory that<br>outlives the<br><span class="em">context window.</span></h1>
+            <p class="lead">
+              Every session, an agent forgets. AegisDB is a small, fast database
+              in C that gives agents a memory they keep — written to an append-only
+              log, recalled by meaning, time, or tag, over one line of JSON.
+            </p>
+            <div class="cta">
+              <a class="btn primary" href="#start">▍ get started</a>
+              <a class="btn ghost" href="https://github.com/d4n-larsson/aegisdb">view source</a>
+            </div>
+            <div class="specstrip">
+              <div>written in <b>C</b></div>
+              <div>NDJSON / TCP</div>
+              <div>vector · tag · time</div>
+              <div><b>MIT</b></div>
+            </div>
+          </div>
+
+          <div class="terminal" aria-hidden="true">
+            <div class="term-bar">
+              <span class="fname">append.log</span>
+              <span class="live"><span class="dot"></span> appending</span>
+            </div>
+            <div class="term-body" id="logbody"></div>
+          </div>
         </div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <section id="protocol">
-    <div class="wrap">
-      <h2>One line in, one line out</h2>
-      <p class="sub">The wire protocol is newline-delimited JSON over TCP. No SDK required — talk to it with a socket.</p>
-      <div class="codewrap">
-        <p class="codecap">Store a memory and search it back</p>
-        <pre><span class="c"># Insert an episodic memory</span>
-{<span class="k">"operation"</span>:<span class="s">"insert"</span>, <span class="k">"type"</span>:<span class="s">"episodic"</span>, <span class="k">"tags"</span>:[<span class="s">"user"</span>], <span class="k">"data"</span>:<span class="s">"Prefers dark mode"</span>}
-<span class="c">→</span> {<span class="k">"ok"</span>:true, <span class="k">"record"</span>:{<span class="k">"id"</span>:1, <span class="k">"type"</span>:<span class="s">"episodic"</span>}}
-
-<span class="c"># Search by tag</span>
-{<span class="k">"operation"</span>:<span class="s">"search"</span>, <span class="k">"tags"</span>:[<span class="s">"user"</span>], <span class="k">"top_k"</span>:5}
-<span class="c">→</span> {<span class="k">"ok"</span>:true, <span class="k">"total"</span>:1, <span class="k">"records"</span>:[ … ]}</pre>
-        <p class="note">Operations: <span class="mono">ping · insert · get · update · delete · search · promote · relate · traverse</span></p>
-      </div>
-    </div>
-  </section>
-
-  <section id="claude">
-    <div class="wrap">
-      <div class="cols">
-        <div>
-          <h2 style="text-align:left">Long-term memory for Claude Code</h2>
-          <p style="color:var(--muted)">
-            AegisDB ships with a Claude Code integration: an MCP server exposing
-            memory tools, plus hooks that automatically <b>recall</b> relevant
-            memories into context and <b>capture</b> salient ones at session end.
-          </p>
-          <ul>
-            <li><b>Automatic recall</b> on every prompt, within a strict time budget.</li>
-            <li><b>Automatic capture</b> of what matters, filtered by salience.</li>
-            <li><b>Per-project namespaces</b> keep memories isolated — or shared, by choice.</li>
-            <li><b>Graceful degradation</b>: if the backend is down, your session never breaks.</li>
-          </ul>
+    <!-- WHAT IT IS -->
+    <section class="rec" id="what">
+      <div class="off mono">0x01A0</div>
+      <div class="col">
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0002</b>&nbsp;·&nbsp;type=semantic</p>
+        <h2 class="title">A memory model shaped like memory.</h2>
+        <p class="lede">Three kinds of memory, each with the lifecycle it actually needs — not one generic store with a TTL bolted on.</p>
+        <div class="legend">
+          <span class="l-ep"><i></i><b>episodic</b> — immutable events</span>
+          <span class="l-se"><i></i><b>semantic</b> — facts that update</span>
+          <span class="l-wk"><i></i><b>working</b> — volatile, expires</span>
         </div>
-        <div class="codewrap">
-          <p class="codecap">.mcp.json</p>
-          <pre>{
-  <span class="k">"mcpServers"</span>: {
-    <span class="k">"memory"</span>: {
-      <span class="k">"command"</span>: <span class="s">"python3"</span>,
-      <span class="k">"args"</span>: [<span class="s">"-m"</span>, <span class="s">"aegis_mcp.server"</span>],
-      <span class="k">"env"</span>: {
-        <span class="k">"AEGIS_NAMESPACE"</span>: <span class="s">"my-project"</span>,
-        <span class="k">"AEGIS_EMBEDDING_DIMENSIONS"</span>: <span class="s">"1024"</span>
+        <div class="feats">
+          <div class="feat ep" data-k="0x01A0">
+            <h3><span class="bar"></span>Episodic events</h3>
+            <p>Append-only records of what happened. Written once, never rewritten — the <b>source of truth</b> every index is rebuilt from.</p>
+          </div>
+          <div class="feat se" data-k="0x0210">
+            <h3><span class="bar"></span>Semantic facts</h3>
+            <p>Updatable knowledge where the <b>latest version wins</b>. Correct a fact and the old one steps aside, no duplicates left behind.</p>
+          </div>
+          <div class="feat wk" data-k="0x0280">
+            <h3><span class="bar"></span>Working memory</h3>
+            <p>A per-session ring buffer with a <b>TTL</b>. Keep scratch context close, then promote what proves worth keeping.</p>
+          </div>
+          <div class="feat" data-k="0x02F0">
+            <h3><span class="bar"></span>Recall, three ways</h3>
+            <p>Search by <b>vector similarity</b>, by tags (<span class="mono">all</span>/<span class="mono">any</span>), or by time range — each on a purpose-built index, not a scan.</p>
+          </div>
+          <div class="feat" data-k="0x0360">
+            <h3><span class="bar"></span>A graph of context</h3>
+            <p>Link memories with directed edges and walk them breadth-first to <b>pull in what's related</b> to what you just recalled.</p>
+          </div>
+          <div class="feat" data-k="0x03D0">
+            <h3><span class="bar"></span>Survives the crash</h3>
+            <p>Per-record <b>CRC32</b> framing; indexes replay from the log on boot. Kill it mid-write and the log still reads clean.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- WIRE PROTOCOL -->
+    <section class="rec" id="wire">
+      <div class="off mono">0x0440</div>
+      <div class="col">
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0003</b>&nbsp;·&nbsp;type=semantic</p>
+        <h2 class="title">One line in, one line out.</h2>
+        <p class="lede">The wire protocol is newline-delimited JSON over TCP. No SDK, no driver — any language that can open a socket can speak it.</p>
+        <p class="cap">store a memory, then recall it</p>
+<pre><span class="c"># write an episodic memory</span>
+{<span class="key">"operation"</span>:<span class="op">"insert"</span>, <span class="key">"type"</span>:<span class="s">"episodic"</span>, <span class="key">"tags"</span>:[<span class="s">"user"</span>], <span class="key">"data"</span>:<span class="s">"Prefers dark mode"</span>}
+<span class="ar">→</span> {<span class="key">"ok"</span>:true, <span class="key">"record"</span>:{<span class="key">"id"</span>:1, <span class="key">"type"</span>:<span class="s">"episodic"</span>}}
+
+<span class="c"># recall it by tag</span>
+{<span class="key">"operation"</span>:<span class="op">"search"</span>, <span class="key">"tags"</span>:[<span class="s">"user"</span>], <span class="key">"top_k"</span>:5}
+<span class="ar">→</span> {<span class="key">"ok"</span>:true, <span class="key">"total"</span>:1, <span class="key">"records"</span>:[ … ]}</pre>
+        <p class="opsline">operations &nbsp;·&nbsp; <b>ping insert get update delete search promote relate traverse</b></p>
+      </div>
+    </section>
+
+    <!-- CLAUDE CODE -->
+    <section class="rec" id="claude">
+      <div class="off mono">0x0560</div>
+      <div class="col">
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0004</b>&nbsp;·&nbsp;type=semantic</p>
+        <div class="twoup">
+          <div>
+            <h2 class="title">Long-term memory for Claude&nbsp;Code.</h2>
+            <p class="lede">An MCP server plus session hooks: relevant memories are recalled into context on every prompt, and the ones worth keeping are captured when the session ends.</p>
+            <ul>
+              <li><b>Automatic recall</b> on each prompt, inside a strict time budget.</li>
+              <li><b>Automatic capture</b> at session end, filtered by salience.</li>
+              <li><b>Per-project namespaces</b> — isolated by default, shared by choice.</li>
+              <li><b>Fails open</b> — if the backend is down, your session keeps working.</li>
+            </ul>
+          </div>
+          <div>
+            <p class="cap">.mcp.json</p>
+<pre>{
+  <span class="key">"mcpServers"</span>: {
+    <span class="key">"memory"</span>: {
+      <span class="key">"command"</span>: <span class="s">"python3"</span>,
+      <span class="key">"args"</span>: [<span class="s">"-m"</span>, <span class="s">"aegis_mcp.server"</span>],
+      <span class="key">"env"</span>: {
+        <span class="key">"AEGIS_NAMESPACE"</span>: <span class="s">"my-project"</span>,
+        <span class="key">"AEGIS_EMBEDDING_DIMENSIONS"</span>: <span class="s">"1024"</span>
       }
     }
   }
 }</pre>
+          </div>
         </div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <section id="start">
-    <div class="wrap">
-      <h2>Get started</h2>
-      <p class="sub">Clone, build, and run — no external dependencies to install.</p>
-      <div class="steps">
-        <div class="step">
-          <div class="n"></div>
-          <div class="body">
-            <strong>Clone &amp; build</strong>
-            <p><code>git clone https://github.com/d4n-larsson/aegisdb &amp;&amp; cd aegisdb &amp;&amp; make</code></p>
+    <!-- GET STARTED -->
+    <section class="rec" id="start">
+      <div class="off mono">0x0710</div>
+      <div class="col">
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0005</b>&nbsp;·&nbsp;type=episodic</p>
+        <h2 class="title">Clone, build, talk to it.</h2>
+        <p class="lede">No external dependencies to install. Four lines and you're holding a connection.</p>
+        <div class="start-log">
+          <div class="row2">
+            <span class="seq">01</span>
+            <div>
+              <p class="what">Clone &amp; build</p>
+              <code>git clone https://github.com/d4n-larsson/aegisdb &amp;&amp; cd aegisdb &amp;&amp; make</code>
+            </div>
           </div>
-        </div>
-        <div class="step">
-          <div class="n"></div>
-          <div class="body">
-            <strong>Run the server</strong>
-            <p><code>./build/aegisdb --data-dir ./data --port 9470 --embedding-dim 1024</code></p>
+          <div class="row2">
+            <span class="seq">02</span>
+            <div>
+              <p class="what">Run the server</p>
+              <code>./build/aegisdb --data-dir ./data --port 9470 --embedding-dim 1024</code>
+            </div>
           </div>
-        </div>
-        <div class="step">
-          <div class="n"></div>
-          <div class="body">
-            <strong>Talk to it</strong>
-            <p><code>echo '{"operation":"ping"}' | nc -q1 localhost 9470</code></p>
+          <div class="row2">
+            <span class="seq">03</span>
+            <div>
+              <p class="what">Open a connection</p>
+              <code>echo '{"operation":"ping"}' | nc -q1 localhost 9470</code>
+            </div>
           </div>
-        </div>
-        <div class="step">
-          <div class="n"></div>
-          <div class="body">
-            <strong>Read the docs</strong>
-            <p>The <a href="https://github.com/d4n-larsson/aegisdb/blob/main/docs/wire-protocol.md">wire-protocol reference</a> and <a href="https://github.com/d4n-larsson/aegisdb/blob/main/docs/quickstart.md">quickstart</a> cover the full API.</p>
+          <div class="row2">
+            <span class="seq">04</span>
+            <div>
+              <p class="what">Read the reference</p>
+              <p class="ann">The <a href="https://github.com/d4n-larsson/aegisdb/blob/main/docs/wire-protocol.md">wire-protocol reference</a> and <a href="https://github.com/d4n-larsson/aegisdb/blob/main/docs/quickstart.md">quickstart</a> cover every operation.</p>
+            </div>
           </div>
         </div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <footer>
-    <div class="wrap">
-      <div class="links">
-        <a href="https://github.com/d4n-larsson/aegisdb">GitHub</a>
-        <a href="https://github.com/d4n-larsson/aegisdb/blob/main/docs/wire-protocol.md">Wire protocol</a>
-        <a href="https://github.com/d4n-larsson/aegisdb/blob/main/docs/quickstart.md">Quickstart</a>
-        <a href="https://github.com/d4n-larsson/aegisdb/tree/main/integrations/claude-code">Claude Code integration</a>
+    <!-- FOOTER -->
+    <footer class="rec">
+      <div class="off mono">EOF</div>
+      <div class="col">
+        <p class="foot-eof">— end of log · indexes synced ·</p>
+        <div class="foot-links">
+          <a href="https://github.com/d4n-larsson/aegisdb">github</a>
+          <a href="https://github.com/d4n-larsson/aegisdb/blob/main/docs/wire-protocol.md">wire&nbsp;protocol</a>
+          <a href="https://github.com/d4n-larsson/aegisdb/blob/main/docs/quickstart.md">quickstart</a>
+          <a href="https://github.com/d4n-larsson/aegisdb/tree/main/integrations/claude-code">claude&nbsp;code&nbsp;integration</a>
+        </div>
+        <p class="foot-meta">AegisDB — persistent memory for AI agents · MIT licensed</p>
       </div>
-      <div>AegisDB — persistent memory for AI agents · MIT licensed</div>
-    </div>
-  </footer>
+    </footer>
+
+  </div>
+
+  <script>
+    // Live append-only log: records are written, never overwritten.
+    (function () {
+      var body = document.getElementById("logbody");
+      if (!body) return;
+
+      var entries = [
+        { req: ['{', '"operation"',':','"insert"',', ','"type"',':','episodic',', ','"data"',':','"User shipped v2 to prod"','}'], cls:'ep',
+          res: '→ ok  id=41  seq=0x1A40  crc=ok' },
+        { req: ['{', '"operation"',':','"insert"',', ','"type"',':','semantic',', ','"data"',':','"Prefers Rust over Go"','}'], cls:'se',
+          res: '→ ok  id=42  (supersedes id=17)' },
+        { req: ['{', '"operation"',':','"insert"',', ','"type"',':','working',', ','"ttl"',':','900',', ','"data"',':','"debugging auth flow"','}'], cls:'wk',
+          res: '→ ok  id=43  expires_in=900s' },
+        { req: ['{', '"operation"',':','"search"',', ','"query"',':','"what does the user prefer?"',', ','"top_k"',':','3','}'], cls:'se',
+          res: '→ ok  total=3  by similarity×importance' },
+        { req: ['{', '"operation"',':','"relate"',', ','"from"',':','42',', ','"to"',':','41','}'], cls:'se',
+          res: '→ ok  edge created' },
+      ];
+
+      var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      var lineNo = 1;
+
+      function fmt(tokens, cls) {
+        var html = "";
+        for (var i = 0; i < tokens.length; i++) {
+          var t = tokens[i];
+          if (t === '"operation"') html += '<span class="key">"operation"</span>';
+          else if (t === '"insert"') html += '<span class="op">"insert"</span>';
+          else if (t === '"search"') html += '<span class="op">"search"</span>';
+          else if (t === '"relate"') html += '<span class="op">"relate"</span>';
+          else if (t === 'episodic') html += '"<span class="ep">episodic</span>"';
+          else if (t === 'semantic') html += '"<span class="se">semantic</span>"';
+          else if (t === 'working')  html += '"<span class="wk">working</span>"';
+          else if (t.charAt(0) === '"') html += '<span class="str">' + t + '</span>';
+          else if (t === '{' || t === '}' || t === ':' || t === ', ') html += '<span class="key">' + t + '</span>';
+          else html += t;
+        }
+        return html;
+      }
+
+      function addLine(cls, html, isResp) {
+        var ln = document.createElement("div");
+        ln.className = "ln" + (isResp ? " resp" : "");
+        ln.innerHTML = '<span class="num">' + (isResp ? "" : String(lineNo).padStart(3, "0")) + '</span><span class="txt">' + html + '</span>';
+        body.appendChild(ln);
+        if (!isResp) lineNo++;
+        body.scrollTop = body.scrollHeight;
+        return ln;
+      }
+
+      if (reduce) {
+        entries.forEach(function (e) {
+          addLine(e.cls, fmt(e.req, e.cls), false);
+          addLine(e.cls, e.res, true);
+        });
+        return;
+      }
+
+      var ei = 0;
+      function typeReq() {
+        if (ei >= entries.length) {
+          // pause, then keep the log persistent (don't clear) and loop a tail
+          setTimeout(function () {
+            ei = 0; lineNo = 1; body.innerHTML = "";
+            typeReq();
+          }, 4200);
+          return;
+        }
+        var e = entries[ei];
+        var full = fmt(e.req, e.cls);
+        var ln = addLine(e.cls, "", false);
+        var txt = ln.querySelector(".txt");
+        // type char-grouped by token for speed + realism
+        var toks = e.req.slice();
+        var acc = [];
+        var ti = 0;
+        var caret = '<span class="caret"></span>';
+        txt.innerHTML = caret;
+        function step() {
+          if (ti < toks.length) {
+            acc.push(toks[ti]); ti++;
+            txt.innerHTML = fmt(acc, e.cls) + caret;
+            body.scrollTop = body.scrollHeight;
+            setTimeout(step, 55 + Math.min(ti, 6) * 6);
+          } else {
+            txt.innerHTML = full;
+            setTimeout(function () {
+              addLine(e.cls, e.res, true);
+              ei++;
+              setTimeout(typeReq, 620);
+            }, 240);
+          }
+        }
+        setTimeout(step, 120);
+      }
+      typeReq();
+    })();
+  </script>
 </body>
 </html>
