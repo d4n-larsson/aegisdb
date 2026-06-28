@@ -8,6 +8,7 @@ be driven by CTest / make.
 Usage:
     python3 tests/contract/test_wire_protocol.py [path/to/aegisdb]
 """
+import hashlib
 import json
 import os
 import socket
@@ -343,6 +344,33 @@ def test_multitenancy(binary, port):
               "unknown token -> UNAUTHORIZED")
 
 
+def test_hashed_tokens(binary, port):
+    print("[auth: tokens hashed at rest]")
+    secret = "acme-secret-token"
+    digest = hashlib.sha256(secret.encode()).hexdigest()
+
+    # --hash-token must produce the same 'sha256$<hex>' the server accepts
+    out = subprocess.run([binary, "--hash-token", secret],
+                         capture_output=True, text=True).stdout.strip()
+    check(out == "sha256$" + digest, "--hash-token matches sha256(token)")
+
+    lines = ["admintok", f"sha256${digest} acme rw"]
+    with Server(binary, port, phase=4, token_lines=lines) as srv:
+        # the plaintext token authenticates against the stored hash
+        r = srv.req({"operation": "insert", "type": "episodic",
+                     "data": "hashed-auth", "token": secret})
+        check(r.get("ok") is True and r["record"].get("agent_id") == "acme",
+              "plaintext token authenticates against hashed entry")
+        # and still carries its namespace + scope
+        r = srv.req({"operation": "search", "top_k": 10, "token": secret})
+        check(r.get("ok") is True, "hashed token retains read access")
+        # a wrong token is rejected
+        r = srv.req({"operation": "insert", "type": "episodic",
+                     "data": "x", "token": "wrong"})
+        check(r.get("ok") is False and r["error"]["code"] == "UNAUTHORIZED",
+              "wrong token against hashed entry -> UNAUTHORIZED")
+
+
 def test_phase_gating(binary, port):
     print("[phase 1: gating]")
     with Server(binary, port, phase=1) as srv:
@@ -375,6 +403,7 @@ def main():
     test_phase_gating(binary, 19471)
     test_stats(binary, 19474)
     test_multitenancy(binary, 19475)
+    test_hashed_tokens(binary, 19476)
 
     print()
     if FAILURES:

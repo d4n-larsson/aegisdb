@@ -208,6 +208,11 @@ and then enforces it:
 A global **admin** token (or auth-disabled mode) keeps the original unrestricted
 behavior. This makes one server safely shareable across tenants/agents.
 
+Tokens may be stored **hashed at rest** (`sha256$<hex>` entries, generated with
+`--hash-token`): the request still sends the plaintext token, which the server
+SHA-256s and compares in constant time against the stored digest. Bearer tokens
+are high-entropy, so an unsalted hash is sufficient (`src/util/sha256.c`).
+
 Tokens travel in plaintext, so run the server behind an encrypted channel (a
 TLS-terminating reverse proxy, `stunnel`, or a private network) when auth is
 enabled. TLS is deliberately kept out of the binary — see Non-goals.

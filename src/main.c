@@ -9,6 +9,7 @@
 #include "aegisdb/db.h"
 #include "aegisdb/health.h"
 #include "aegisdb/logging.h"
+#include "aegisdb/sha256.h"
 #include "aegisdb/tcp_server.h"
 
 static void on_signal(int sig) {
@@ -22,6 +23,18 @@ int main(int argc, char **argv) {
     int pr = config_parse_args(&cfg, argc, argv);
     if (pr != 0) { config_free(&cfg); return pr < 0 ? 1 : 0; } /* -1 err, 1 help */
     aegis_log_set_level((AegisLogLevel)cfg.log_level);
+
+    /* One-shot: print the hashed form of a token for the token file, then exit. */
+    if (cfg.hash_token) {
+        uint8_t d[SHA256_DIGEST_LEN];
+        sha256(cfg.hash_token, strlen(cfg.hash_token), d);
+        char hex[2 * SHA256_DIGEST_LEN + 1];
+        for (int i = 0; i < SHA256_DIGEST_LEN; i++)
+            snprintf(hex + i * 2, 3, "%02x", d[i]);
+        printf("sha256$%s\n", hex);
+        config_free(&cfg);
+        return 0;
+    }
 
     /* One-shot liveness probe (container HEALTHCHECK): connect to a running
      * server on --port, ping it, and exit with the result. */

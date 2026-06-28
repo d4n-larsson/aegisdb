@@ -58,8 +58,28 @@ size_t config_effective_fsync_batch(const Config *cfg) {
     }
 }
 
-/* Append a token bound to `ns` (NULL = global) with `scope`. Copies the
- * strings. Returns 0 on success. */
+/* Decode `n` hex chars from `s` into `out`. Returns 0 on success, -1 on a
+ * non-hex digit or odd length. */
+static int hex_decode(const char *s, uint8_t *out, size_t n) {
+    if (n % 2) return -1;
+    for (size_t i = 0; i < n; i += 2) {
+        int hi = -1, lo = -1;
+        char a = s[i], b = s[i + 1];
+        hi = (a >= '0' && a <= '9') ? a - '0'
+             : (a >= 'a' && a <= 'f') ? a - 'a' + 10
+             : (a >= 'A' && a <= 'F') ? a - 'A' + 10 : -1;
+        lo = (b >= '0' && b <= '9') ? b - '0'
+             : (b >= 'a' && b <= 'f') ? b - 'a' + 10
+             : (b >= 'A' && b <= 'F') ? b - 'A' + 10 : -1;
+        if (hi < 0 || lo < 0) return -1;
+        out[i / 2] = (uint8_t)((hi << 4) | lo);
+    }
+    return 0;
+}
+
+/* Append a token bound to `ns` (NULL = global) with `scope`. `tok` is either a
+ * plaintext secret or a `sha256$<64-hex>` digest (hashed at rest). Copies the
+ * strings. Returns 0 on success, -1 on OOM or a malformed hash. */
 static int append_token(Config *cfg, const char *tok, const char *ns,
                         int scope) {
     AuthToken *grown = realloc(cfg->auth_tokens,
@@ -67,9 +87,19 @@ static int append_token(Config *cfg, const char *tok, const char *ns,
     if (!grown) return -1;
     cfg->auth_tokens = grown;
     AuthToken *t = &cfg->auth_tokens[cfg->auth_token_count];
-    t->token = strdup(tok);
-    if (!t->token) return -1;
+    t->token = NULL;
     t->namespace = NULL;
+    t->hashed = 0;
+    memset(t->hash, 0, sizeof(t->hash));
+
+    if (strncmp(tok, "sha256$", 7) == 0) {
+        const char *hex = tok + 7;
+        if (strlen(hex) != 64 || hex_decode(hex, t->hash, 64) != 0) return -1;
+        t->hashed = 1;
+    } else {
+        t->token = strdup(tok);
+        if (!t->token) return -1;
+    }
     if (ns) {
         t->namespace = strdup(ns);
         if (!t->namespace) {
@@ -175,7 +205,11 @@ static void usage(const char *prog) {
             "  --auth-token <token>     accept this global admin token (repeatable)\n"
             "  --auth-token-file <path> accept tokens, one per line; each line is\n"
             "                           '<token> [namespace] [ro|rw|admin]' — a\n"
-            "                           namespace binds the token to one tenant\n"
+            "                           namespace binds the token to one tenant.\n"
+            "                           A token may be 'sha256$<hex>' to store it\n"
+            "                           hashed at rest (see --hash-token)\n"
+            "  --hash-token <token>     print the token's 'sha256$<hex>' form and\n"
+            "                           exit (paste into the token file)\n"
             "  --log-level <level>      error|warn|info|debug (default info,\n"
             "                           or $AEGISDB_LOG_LEVEL)\n"
             "  --health-check           probe a local server (--port) and exit\n"
@@ -203,6 +237,9 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
             return 1;
         } else if (strcmp(a, "--health-check") == 0) {
             cfg->run_health_check = 1;
+        } else if (strcmp(a, "--hash-token") == 0) {
+            NEXT("--hash-token");
+            cfg->hash_token = val; /* borrows argv; printed and exits in main */
         } else if (strcmp(a, "--data-dir") == 0) {
             NEXT("--data-dir");
             strncpy(cfg->data_dir, val, sizeof(cfg->data_dir) - 1);
