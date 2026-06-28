@@ -18,4 +18,7 @@ void tag_index_remove(TagIndex *t, const char *tag, uint64_t id);
 int tag_index_query(const TagIndex *t, const char *const *tags, size_t n,
                     int match_all, uint64_t **out, size_t *out_n);
 
+/* Number of distinct tags currently indexed. */
+size_t tag_index_count(const TagIndex *t);
+
 #endif /* AEGISDB_TAG_INDEX_H */

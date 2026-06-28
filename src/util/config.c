@@ -16,6 +16,9 @@ void config_defaults(Config *cfg) {
     cfg->working_capacity = 256;
     cfg->default_ttl_ms = 3600000; /* 1 hour */
     cfg->fsync_batch_size = 1000;
+    cfg->durability = AEGIS_DURABILITY_INTERVAL;
+    cfg->fsync_interval_ms = 1000;
+    cfg->checkpoint_sec = 60;
     cfg->worker_threads = 4;
     cfg->enabled_phase = 4; /* all features enabled by default */
     cfg->log_level = AEGIS_LOG_INFO;
@@ -26,6 +29,32 @@ void config_defaults(Config *cfg) {
         AegisLogLevel lvl;
         if (aegis_log_level_from_string(env, &lvl) == 0)
             cfg->log_level = lvl;
+    }
+}
+
+const char *aegis_durability_name(int mode) {
+    switch (mode) {
+        case AEGIS_DURABILITY_SYNC: return "sync";
+        case AEGIS_DURABILITY_BATCH: return "batch";
+        case AEGIS_DURABILITY_INTERVAL: return "interval";
+        default: return "unknown";
+    }
+}
+
+int aegis_durability_from_string(const char *s, int *out) {
+    if (!s) return -1;
+    if (strcmp(s, "sync") == 0) *out = AEGIS_DURABILITY_SYNC;
+    else if (strcmp(s, "batch") == 0) *out = AEGIS_DURABILITY_BATCH;
+    else if (strcmp(s, "interval") == 0) *out = AEGIS_DURABILITY_INTERVAL;
+    else return -1;
+    return 0;
+}
+
+size_t config_effective_fsync_batch(const Config *cfg) {
+    switch (cfg->durability) {
+        case AEGIS_DURABILITY_SYNC: return 1;
+        case AEGIS_DURABILITY_INTERVAL: return SIZE_MAX; /* never on count */
+        default: return cfg->fsync_batch_size; /* BATCH */
     }
 }
 
@@ -87,7 +116,13 @@ static void usage(const char *prog) {
             "  --workers <n>            worker thread count (default 4)\n"
             "  --max-payload <bytes>    max data size (default 1048576)\n"
             "  --embedding-dim <n>      expected vector length (default 384)\n"
-            "  --fsync-batch <n>        records between fsync (default 1000)\n"
+            "  --durability <mode>      sync|batch|interval (default interval)\n"
+            "  --fsync-batch <n>        records between fsync in batch mode\n"
+            "                           (default 1000)\n"
+            "  --fsync-interval-ms <n>  flush cadence in interval mode\n"
+            "                           (default 1000)\n"
+            "  --checkpoint-sec <n>     index checkpoint cadence, 0 disables\n"
+            "                           (default 60)\n"
             "  --working-capacity <n>   ring buffer size (default 256)\n"
             "  --auth-token <token>     accept this bearer token (repeatable)\n"
             "  --auth-token-file <path> accept tokens listed one per line\n"
@@ -160,6 +195,31 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
                 fprintf(stderr, "%s: invalid fsync-batch '%s'\n", prog, val);
                 return -1;
             }
+        } else if (strcmp(a, "--durability") == 0) {
+            NEXT("--durability");
+            if (aegis_durability_from_string(val, &cfg->durability) != 0) {
+                fprintf(stderr, "%s: invalid durability '%s' "
+                                "(sync|batch|interval)\n",
+                        prog, val);
+                return -1;
+            }
+        } else if (strcmp(a, "--fsync-interval-ms") == 0) {
+            NEXT("--fsync-interval-ms");
+            size_t ms;
+            if (parse_size(val, &ms) || ms == 0) {
+                fprintf(stderr, "%s: invalid fsync-interval-ms '%s'\n", prog,
+                        val);
+                return -1;
+            }
+            cfg->fsync_interval_ms = (uint64_t)ms;
+        } else if (strcmp(a, "--checkpoint-sec") == 0) {
+            NEXT("--checkpoint-sec");
+            int cs;
+            if (parse_int(val, &cs) || cs < 0) {
+                fprintf(stderr, "%s: invalid checkpoint-sec '%s'\n", prog, val);
+                return -1;
+            }
+            cfg->checkpoint_sec = (unsigned)cs;
         } else if (strcmp(a, "--working-capacity") == 0) {
             NEXT("--working-capacity");
             int wc;

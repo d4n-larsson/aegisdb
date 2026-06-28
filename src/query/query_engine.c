@@ -606,6 +606,54 @@ static cJSON *handle_ping(AegisDB *db) {
     return o;
 }
 
+/* Operational snapshot: durability posture, durability lag, record/index
+ * counts. Read-only; intended for monitoring and capacity planning. */
+static cJSON *handle_stats(AegisDB *db) {
+    cJSON *o = json_ok();
+    cJSON_AddStringToObject(o, "version", AEGIS_VERSION_STRING);
+    cJSON_AddNumberToObject(o, "phase", db->config.enabled_phase);
+    cJSON_AddNumberToObject(o, "uptime_ms",
+                            (double)(db_now_ms() - db->started_ms));
+
+    cJSON_AddStringToObject(o, "durability",
+                            aegis_durability_name(db->config.durability));
+    if (db->config.durability == AEGIS_DURABILITY_BATCH)
+        cJSON_AddNumberToObject(o, "fsync_batch",
+                                (double)db->config.fsync_batch_size);
+    else if (db->config.durability == AEGIS_DURABILITY_INTERVAL)
+        cJSON_AddNumberToObject(o, "fsync_interval_ms",
+                                (double)db->config.fsync_interval_ms);
+
+    pthread_rwlock_rdlock(&db->index_lock);
+    size_t live = 0, tombstones = 0;
+    const HashIndex *h = db->hash;
+    for (size_t i = 0; i < h->cap; i++) {
+        if (!h->buckets[i].used) continue;
+        if (h->buckets[i].deleted) tombstones++;
+        else live++;
+    }
+    cJSON_AddNumberToObject(o, "records", (double)live);
+    cJSON_AddNumberToObject(o, "tombstones", (double)tombstones);
+    cJSON_AddNumberToObject(o, "log_bytes", (double)db->log.size);
+    cJSON_AddBoolToObject(o, "log_flush_pending", log_flush_pending(&db->log));
+
+    cJSON *idx = cJSON_AddObjectToObject(o, "indexes");
+    if (idx) {
+        cJSON_AddNumberToObject(idx, "time", (double)db->time->n);
+        cJSON_AddNumberToObject(idx, "tags", (double)tag_index_count(db->tags));
+        cJSON_AddNumberToObject(idx, "semantic",
+                                (double)semantic_index_count(db->sem));
+        cJSON_AddNumberToObject(idx, "working",
+                                (double)working_store_count(db->working));
+    }
+    pthread_rwlock_unlock(&db->index_lock);
+
+    pthread_mutex_lock(&db->id_lock);
+    cJSON_AddNumberToObject(o, "next_id", (double)db->next_id);
+    pthread_mutex_unlock(&db->id_lock);
+    return o;
+}
+
 static cJSON *handle_insert(AegisDB *db, const cJSON *req) {
     MemoryRecord in;
     aegis_status_t err;
@@ -823,6 +871,7 @@ cJSON *query_engine_dispatch(AegisDB *db, const cJSON *req) {
     LOG_DEBUG("dispatch: operation \"%s\"", op);
 
     if (strcmp(op, "ping") == 0) return handle_ping(db);
+    if (strcmp(op, "stats") == 0) return handle_stats(db);
     if (strcmp(op, "insert") == 0) return handle_insert(db, req);
     if (strcmp(op, "get") == 0) return handle_get(db, req);
     if (strcmp(op, "update") == 0) return handle_update(db, req);

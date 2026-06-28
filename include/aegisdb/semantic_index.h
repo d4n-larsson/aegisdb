@@ -27,4 +27,7 @@ int semantic_index_search(const SemanticIndex *s, const float *query,
                           size_t dim, size_t top_k, uint64_t **out_ids,
                           float **out_scores, size_t *out_n);
 
+/* Number of stored vectors. */
+size_t semantic_index_count(const SemanticIndex *s);
+
 #endif /* AEGISDB_SEMANTIC_INDEX_H */

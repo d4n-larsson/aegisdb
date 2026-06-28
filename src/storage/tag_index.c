@@ -32,6 +32,14 @@ TagIndex *tag_index_create(void) {
     return t;
 }
 
+size_t tag_index_count(const TagIndex *t) {
+    if (!t) return 0;
+    size_t n = 0;
+    for (size_t i = 0; i < NBUCKETS; i++)
+        for (const TagNode *node = t->buckets[i]; node; node = node->next) n++;
+    return n;
+}
+
 void tag_index_free(TagIndex *t) {
     if (!t) return;
     for (size_t i = 0; i < NBUCKETS; i++) {

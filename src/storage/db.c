@@ -65,6 +65,19 @@ int db_save_metadata(AegisDB *db) {
     return rename(tmp, db->path_meta);
 }
 
+int db_checkpoint(AegisDB *db) {
+    /* Capture a consistent (hash, covered offset, next_id) tuple under the read
+     * lock, then write it. Readers proceed; writers pause only for the write. */
+    pthread_rwlock_rdlock(&db->index_lock);
+    pthread_mutex_lock(&db->id_lock);
+    uint64_t nid = db->next_id;
+    pthread_mutex_unlock(&db->id_lock);
+    uint64_t covered = (uint64_t)db->log.size;
+    int rv = hash_index_save(db->hash, db->path_index, covered, nid);
+    pthread_rwlock_unlock(&db->index_lock);
+    return rv;
+}
+
 int db_open(AegisDB *db, const Config *cfg) {
     memset(db, 0, sizeof(*db));
     db->config = *cfg;
@@ -90,7 +103,8 @@ int db_open(AegisDB *db, const Config *cfg) {
         return -1;
     }
 
-    if (log_open(&db->log, db->path_log, cfg->fsync_batch_size) != 0) {
+    if (log_open(&db->log, db->path_log, config_effective_fsync_batch(cfg)) !=
+        0) {
         LOG_ERROR("cannot open log: %s", db->path_log);
         goto fail_locks;
     }
@@ -111,6 +125,7 @@ int db_open(AegisDB *db, const Config *cfg) {
         goto fail_indexes;
     }
     LOG_INFO("recovery complete: %ld records loaded", loaded);
+    db->started_ms = db_now_ms();
     db->running = 1;
     return 0;
 
@@ -131,8 +146,8 @@ void db_close(AegisDB *db) {
     db->running = 0;
     LOG_DEBUG("closing database: flushing log and persisting index/metadata");
     log_fsync(&db->log);
-    if (hash_index_save(db->hash, db->path_index) != 0)
-        LOG_WARN("failed to persist hash index to %s", db->path_index);
+    if (db_checkpoint(db) != 0)
+        LOG_WARN("failed to persist checkpoint to %s", db->path_index);
     if (db_save_metadata(db) != 0)
         LOG_WARN("failed to persist metadata to %s", db->path_meta);
     hash_index_free(db->hash);

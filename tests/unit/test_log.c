@@ -1,9 +1,11 @@
 /* Unit tests for the append-only log: framing, read-back, scan, torn tail. */
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#include "aegisdb/crc32.h"
 #include "aegisdb/log.h"
 #include "unity.h"
 
@@ -60,10 +62,12 @@ static void test_scan_visits_all_frames(void) {
         log_append(&lf, (const uint8_t *)tmp, strlen(tmp), &off);
     }
     int n = 0;
-    uint64_t valid_end = 0;
-    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf, count_cb, &n, &valid_end));
+    LogScanResult res = {0};
+    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf, 0, count_cb, &n, &res));
     TEST_ASSERT_EQUAL_INT(5, n);
-    TEST_ASSERT_EQUAL_UINT64((uint64_t)lf.size, valid_end);
+    TEST_ASSERT_EQUAL_size_t(5, res.good_frames);
+    TEST_ASSERT_EQUAL_size_t(0, res.corrupt_frames);
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)lf.size, res.truncate_to);
     log_close(&lf);
 }
 
@@ -110,11 +114,89 @@ static void test_torn_tail_detected(void) {
     LogFile lf2;
     TEST_ASSERT_EQUAL_INT(0, log_open(&lf2, g_path, 0));
     int n = 0;
-    uint64_t valid_end = 0;
-    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf2, count_cb, &n, &valid_end));
+    LogScanResult res = {0};
+    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf2, 0, count_cb, &n, &res));
     TEST_ASSERT_EQUAL_INT(1, n); /* only the complete frame */
-    TEST_ASSERT_EQUAL_UINT64(good_end, valid_end);
+    TEST_ASSERT_EQUAL_UINT64(good_end, res.truncate_to);
     log_close(&lf2);
+}
+
+/* Flip a byte inside the FIRST of three frames. Recovery must skip the damaged
+ * frame and still recover the two that follow it (no whole-tail truncation). */
+static void test_midlog_corruption_recovers_tail(void) {
+    uint64_t off[3];
+    uint64_t payload_start;
+    {
+        LogFile lf;
+        TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 0));
+        log_append(&lf, (const uint8_t *)"alpha", 5, &off[0]);
+        log_append(&lf, (const uint8_t *)"bravo", 5, &off[1]);
+        log_append(&lf, (const uint8_t *)"charlie", 7, &off[2]);
+        payload_start = off[0] + LOG_FRAME_HEADER; /* first frame's payload */
+        log_close(&lf);
+    }
+    /* Corrupt a payload byte of frame 0 (header CRC stays valid, payload CRC
+     * fails) so the scanner skips exactly that frame by its trusted length. */
+    int fd = open(g_path, O_RDWR);
+    TEST_ASSERT_TRUE(fd >= 0);
+    uint8_t b = 0;
+    TEST_ASSERT_EQUAL_INT(1, pread(fd, &b, 1, (off_t)payload_start));
+    b ^= 0xFF;
+    TEST_ASSERT_EQUAL_INT(1, pwrite(fd, &b, 1, (off_t)payload_start));
+    close(fd);
+
+    LogFile lf2;
+    TEST_ASSERT_EQUAL_INT(0, log_open(&lf2, g_path, 0));
+    int n = 0;
+    LogScanResult res = {0};
+    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf2, 0, count_cb, &n, &res));
+    TEST_ASSERT_EQUAL_INT(2, n); /* bravo + charlie survive */
+    TEST_ASSERT_EQUAL_size_t(2, res.good_frames);
+    TEST_ASSERT_EQUAL_size_t(1, res.corrupt_frames);
+    TEST_ASSERT_TRUE(res.recovered_after_hole);
+    /* The good tail is preserved, not truncated. */
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)lf2.size, res.truncate_to);
+    log_close(&lf2);
+}
+
+/* A legacy v1 log (8-byte [crc][len] frames, no magic) is migrated on open and
+ * its records read back through the v2 path. */
+static void test_legacy_v1_migration(void) {
+    /* Hand-write two v1 frames: [crc32(payload) u32 LE][len u32 LE][payload]. */
+    const char *p0 = "legacy-one";
+    const char *p1 = "legacy-two-longer";
+    int fd = open(g_path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    TEST_ASSERT_TRUE(fd >= 0);
+    off_t at = 0;
+    const char *payloads[2] = {p0, p1};
+    for (int i = 0; i < 2; i++) {
+        size_t len = strlen(payloads[i]);
+        uint8_t h[8];
+        uint32_t crc = crc32_compute((const uint8_t *)payloads[i], len);
+        for (int k = 0; k < 4; k++) h[k] = (uint8_t)(crc >> (8 * k));
+        for (int k = 0; k < 4; k++) h[4 + k] = (uint8_t)(len >> (8 * k));
+        TEST_ASSERT_EQUAL_INT(8, pwrite(fd, h, 8, at));
+        at += 8;
+        TEST_ASSERT_EQUAL_INT((int)len, pwrite(fd, payloads[i], len, at));
+        at += (off_t)len;
+    }
+    close(fd);
+
+    LogFile lf;
+    TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 0)); /* triggers migration */
+    int n = 0;
+    LogScanResult res = {0};
+    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf, 0, count_cb, &n, &res));
+    TEST_ASSERT_EQUAL_INT(2, n);
+    TEST_ASSERT_EQUAL_size_t(0, res.corrupt_frames);
+
+    uint8_t *out = NULL;
+    size_t out_len = 0;
+    TEST_ASSERT_EQUAL_INT(0, log_read(&lf, 0, &out, &out_len));
+    TEST_ASSERT_EQUAL_size_t(strlen(p0), out_len);
+    TEST_ASSERT_EQUAL_MEMORY(p0, out, out_len);
+    free(out);
+    log_close(&lf);
 }
 
 int main(void) {
@@ -123,5 +205,7 @@ int main(void) {
     RUN_TEST(test_scan_visits_all_frames);
     RUN_TEST(test_reopen_persists);
     RUN_TEST(test_torn_tail_detected);
+    RUN_TEST(test_midlog_corruption_recovers_tail);
+    RUN_TEST(test_legacy_v1_migration);
     return UNITY_END();
 }

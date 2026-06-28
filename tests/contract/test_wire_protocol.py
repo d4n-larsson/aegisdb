@@ -139,6 +139,40 @@ def test_full_phase(binary, port):
               and r.get("records") == [], "search no match -> empty result")
 
 
+def test_stats(binary, port):
+    print("[phase 4: stats]")
+    with Server(binary, port, phase=4) as srv:
+        r = srv.req({"operation": "stats"})
+        check(r.get("ok") is True, "stats ok")
+        check(r.get("version") == "0.1.0", "stats reports version")
+        check(r.get("durability") in ("sync", "batch", "interval"),
+              "stats reports durability mode")
+        for field in ("records", "tombstones", "log_bytes", "next_id"):
+            check(field in r, f"stats reports {field}")
+        check(isinstance(r.get("log_flush_pending"), bool),
+              "stats reports log_flush_pending bool")
+        check(isinstance(r.get("indexes"), dict)
+              and {"time", "tags", "semantic", "working"} <= set(r["indexes"]),
+              "stats reports per-index counts")
+
+        base = srv.req({"operation": "stats"})["records"]
+        srv.req({"operation": "insert", "type": "episodic",
+                 "tags": ["s"], "data": "counted"})
+        r = srv.req({"operation": "stats"})
+        check(r["records"] == base + 1, "stats records increments on insert")
+
+        ins = srv.req({"operation": "insert", "type": "episodic",
+                       "tags": ["s"], "data": "doomed"})
+        srv.req({"operation": "delete", "id": ins["record"]["id"]})
+        r = srv.req({"operation": "stats"})
+        check(r["records"] == base + 1 and r["tombstones"] >= 1,
+              "stats moves a deleted record to tombstones")
+
+        # request_id is echoed on stats like any other op
+        r = srv.req({"operation": "stats", "request_id": "stat-rid"})
+        check(r.get("request_id") == "stat-rid", "stats echoes request_id")
+
+
 def test_delete(binary, port):
     print("[phase 4: delete]")
     with Server(binary, port, phase=4) as srv:
@@ -225,6 +259,13 @@ def test_auth(binary, port):
         check(r.get("request_id") == "rid-2",
               "request_id echoed on UNAUTHORIZED")
 
+        # stats is NOT exempt (unlike ping) -> requires a token
+        r = srv.req({"operation": "stats"})
+        check(r.get("ok") is False and r["error"]["code"] == "UNAUTHORIZED",
+              "stats without token -> UNAUTHORIZED")
+        r = srv.req({"operation": "stats", "token": "s3cret"})
+        check(r.get("ok") is True, "stats with correct token -> ok")
+
 
 def test_phase_gating(binary, port):
     print("[phase 1: gating]")
@@ -256,6 +297,7 @@ def main():
     test_delete(binary, 19472)
     test_auth(binary, 19473)
     test_phase_gating(binary, 19471)
+    test_stats(binary, 19474)
 
     print()
     if FAILURES:

@@ -42,6 +42,16 @@ WorkingStore *working_store_create(uint32_t capacity, uint64_t default_ttl_ms) {
     return ws;
 }
 
+size_t working_store_count(const WorkingStore *ws) {
+    if (!ws) return 0;
+    size_t n = 0;
+    for (size_t i = 0; i < SBUCKETS; i++)
+        for (const Session *s = ws->buckets[i]; s; s = s->next)
+            for (uint32_t k = 0; k < s->capacity; k++)
+                if (s->slots[k].rec) n++;
+    return n;
+}
+
 void working_store_free(WorkingStore *ws) {
     if (!ws) return;
     for (size_t i = 0; i < SBUCKETS; i++) {
