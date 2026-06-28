@@ -1,0 +1,28 @@
+# Build artifacts — rebuilt inside the image
+build/
+**/*.o
+
+# Local runtime state — never bake into the image; mount a volume instead
+data/
+
+# Version control & CI
+.git/
+.gitignore
+.github/
+
+# Docs, site, and project metadata not needed for the build
+site/
+docs/
+specs/
+README.md
+LICENSE
+CLAUDE.md
+
+# Integrations build/run on their own toolchain
+integrations/
+
+# Editor / OS cruft
+.vscode/
+.idea/
+*.swp
+.DS_Store

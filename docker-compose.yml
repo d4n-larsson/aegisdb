@@ -1,0 +1,26 @@
+services:
+  aegisdb:
+    build: .
+    image: aegisdb:latest
+    container_name: aegisdb
+    ports:
+      - "9470:9470"
+    volumes:
+      # Named volume keeps memory durable across container restarts.
+      - aegis-data:/data
+    restart: unless-stopped
+    # Override the default flags here. The wire protocol carries no encryption
+    # and tokens travel in plaintext, so enable auth only behind a trusted
+    # network / TLS-terminating proxy.
+    command:
+      - "--data-dir"
+      - "/data"
+      - "--port"
+      - "9470"
+      # - "--embedding-dim"
+      # - "1024"
+      # - "--auth-token-file"
+      # - "/data/tokens.txt"
+
+volumes:
+  aegis-data:
