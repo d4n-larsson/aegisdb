@@ -68,7 +68,7 @@ static void test_compaction_preserves_live_drops_deleted(void) {
         char b[16];
         snprintf(b, sizeof(b), "drop-%d", i);
         drop[i] = insert_ep(&g_db, b);
-        TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_delete(&g_db, drop[i]));
+        TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_delete(&g_db, drop[i], NULL));
     }
 
     uint64_t before = (uint64_t)g_db.log.size;
@@ -91,7 +91,7 @@ static void test_compaction_preserves_live_drops_deleted(void) {
 static void test_compacted_log_recovers(void) {
     uint64_t a = insert_ep(&g_db, "alpha");
     uint64_t b = insert_ep(&g_db, "beta");
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_delete(&g_db, a));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_delete(&g_db, a, NULL));
     TEST_ASSERT_EQUAL_INT(0, compaction_run_once(&g_db));
 
     /* Reopen the database: recovery rebuilds indexes from the compacted log. */
