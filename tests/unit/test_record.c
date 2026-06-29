@@ -155,7 +155,10 @@ static void test_clone_is_deep(void) {
     /* Distinct allocations: freeing the source must not corrupt the clone. */
     TEST_ASSERT_NOT_EQUAL(r.data, c->data);
     record_free(&r);
-    TEST_ASSERT_EQUAL_STRING("payload", (char *)c->data);
+    /* data is an opaque length-delimited payload (not NUL-terminated), so it
+     * must be compared by length — EQUAL_STRING would read past the buffer. */
+    TEST_ASSERT_EQUAL_size_t(7, c->data_len);
+    TEST_ASSERT_EQUAL_MEMORY("payload", c->data, c->data_len);
 
     record_free(c);
     free(c);
