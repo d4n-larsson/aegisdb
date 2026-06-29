@@ -2,6 +2,7 @@
 #include "aegisdb/compaction.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -206,16 +207,16 @@ struct Compactor {
     pthread_t thread;
     unsigned sweep_sec;
     unsigned compact_sec;
-    volatile int stop;
+    atomic_int stop; /* relaxed: pthread_join sets up the shutdown happens-before */
 };
 
 static void *maint_loop(void *arg) {
     Compactor *c = arg;
     unsigned elapsed = 0;
     uint64_t last_fsync = db_now_ms();
-    while (!c->stop) {
+    while (!atomic_load_explicit(&c->stop, memory_order_relaxed)) {
         sleep(1);
-        if (c->stop) break;
+        if (atomic_load_explicit(&c->stop, memory_order_relaxed)) break;
         elapsed++;
         /* INTERVAL durability: flush the log on a time cadence so an idle
          * server cannot leave acknowledged writes unflushed indefinitely.
@@ -266,7 +267,7 @@ Compactor *compaction_start(AegisDB *db, unsigned sweep_sec,
 
 void compaction_stop(Compactor *c) {
     if (!c) return;
-    c->stop = 1;
+    atomic_store_explicit(&c->stop, 1, memory_order_relaxed);
     pthread_join(c->thread, NULL);
     free(c);
 }
