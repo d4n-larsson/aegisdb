@@ -6,8 +6,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "aegisdb/logging.h"
+
+/* Default worker-thread count. Each connection occupies one worker for its
+ * whole lifetime (see tcp_server), so this also bounds concurrent clients.
+ * Scale with the machine but keep a floor for headroom with mostly-idle
+ * persistent connections, and a cap so huge boxes don't spawn a thread storm.
+ * Operators with many concurrent clients should raise --workers. */
+static int default_worker_threads(void) {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    long want = (n > 0) ? n * 2 : 8;
+    if (want < 8) want = 8;
+    if (want > 64) want = 64;
+    return (int)want;
+}
 
 void config_defaults(Config *cfg) {
     memset(cfg, 0, sizeof(*cfg));
@@ -21,7 +35,7 @@ void config_defaults(Config *cfg) {
     cfg->durability = AEGIS_DURABILITY_INTERVAL;
     cfg->fsync_interval_ms = 1000;
     cfg->checkpoint_sec = 60;
-    cfg->worker_threads = 4;
+    cfg->worker_threads = default_worker_threads();
     cfg->enabled_phase = 4; /* all features enabled by default */
     cfg->log_level = AEGIS_LOG_INFO;
 
@@ -200,7 +214,9 @@ static void usage(const char *prog) {
             "  --data-dir <path>        persistence directory (default ./data)\n"
             "  --port <n>               TCP listen port (default 9470)\n"
             "  --phase <1-4>            highest enabled feature phase (default 4)\n"
-            "  --workers <n>            worker thread count (default 4)\n"
+            "  --workers <n>            worker threads; also the max concurrent\n"
+            "                           connections (default: 2x CPUs, 8-64). Raise\n"
+            "                           it if you have many concurrent clients.\n"
             "  --max-payload <bytes>    max data size (default 1048576)\n"
             "  --embedding-dim <n>      expected vector length (default 384)\n"
             "  --durability <mode>      sync|batch|interval (default interval)\n"
