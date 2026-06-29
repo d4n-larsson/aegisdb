@@ -56,7 +56,7 @@ typedef struct {
     int durability;             /* AegisDurability; default INTERVAL */
     uint64_t fsync_interval_ms; /* INTERVAL flush cadence; default 1000 */
     unsigned checkpoint_sec;    /* index checkpoint cadence; 0 disables; def 60 */
-    int worker_threads;         /* default 4 */
+    int worker_threads;         /* also caps concurrent connections; default 2x CPUs (8-64) */
     int enabled_phase;          /* default 4: gate operations above this phase */
     int run_health_check;       /* 1 if --health-check: probe a server and exit */
     const char *hash_token;     /* --hash-token <tok>: print sha256$<hex> & exit */
