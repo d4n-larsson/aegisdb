@@ -2,7 +2,9 @@
  * recall test compares its top-k against a brute-force exact ground truth and
  * asserts a recall floor rather than exact equality. */
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "aegisdb/hnsw.h"
 #include "unity.h"
@@ -204,6 +206,68 @@ static void test_hnsw_hub_isolation(void) {
     hnsw_free(h);
 }
 
+/* Save then load reproduces the graph exactly: identical query results, count,
+ * and tombstones; and the reloaded graph keeps working for new inserts. Also
+ * checks the rejection paths (missing file, dim mismatch, truncation). */
+static void test_hnsw_save_load(void) {
+    const size_t N = 800, K = 10, Q = 30;
+    g_rng = 0xABCDEF01ULL;
+    float *vecs = malloc(N * DIM * sizeof(float));
+    for (size_t i = 0; i < N; i++) rand_vec(&vecs[i * DIM]);
+
+    HnswParams p = {.M = 16, .ef_construction = 200, .ef_search = 64, .seed = 5};
+    Hnsw *h = hnsw_create(DIM, &p);
+    for (size_t i = 0; i < N; i++) hnsw_add(h, i, &vecs[i * DIM], DIM);
+    for (size_t i = 0; i < N; i += 7) hnsw_remove(h, i); /* some tombstones */
+    size_t live = hnsw_count(h);
+
+    char path[256];
+    snprintf(path, sizeof(path), "/tmp/aegis_hnsw_%d.bin", (int)getpid());
+    uint64_t covered = 123456;
+    TEST_ASSERT_EQUAL_INT(0, hnsw_save(h, path, covered));
+
+    uint64_t got_covered = 0;
+    Hnsw *h2 = hnsw_load(path, DIM, &got_covered);
+    TEST_ASSERT_NOT_NULL(h2);
+    TEST_ASSERT_EQUAL_UINT64(covered, got_covered);
+    TEST_ASSERT_EQUAL_size_t(live, hnsw_count(h2));
+
+    /* identical query results before/after */
+    for (size_t qi = 0; qi < Q; qi++) {
+        float q[DIM];
+        rand_vec(q);
+        uint64_t *a = NULL, *b = NULL;
+        float *sa = NULL, *sb = NULL;
+        size_t na = 0, nb = 0;
+        TEST_ASSERT_EQUAL_INT(0, hnsw_search(h, q, DIM, K, 0, &a, &sa, &na));
+        TEST_ASSERT_EQUAL_INT(0, hnsw_search(h2, q, DIM, K, 0, &b, &sb, &nb));
+        TEST_ASSERT_EQUAL_size_t(na, nb);
+        for (size_t i = 0; i < na; i++) TEST_ASSERT_EQUAL_UINT64(a[i], b[i]);
+        free(a); free(b); free(sa); free(sb);
+    }
+
+    /* a removed id stays gone, and the reloaded graph accepts new inserts */
+    float nv[DIM];
+    rand_vec(nv);
+    TEST_ASSERT_EQUAL_INT(0, hnsw_add(h2, 100000, nv, DIM));
+    uint64_t *ids = NULL; float *sc = NULL; size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, hnsw_search(h2, nv, DIM, 1, 0, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_UINT64(100000, ids[0]);
+    free(ids); free(sc);
+
+    hnsw_free(h);
+    hnsw_free(h2);
+
+    /* rejection paths */
+    TEST_ASSERT_NULL(hnsw_load(path, DIM + 1, &got_covered)); /* dim mismatch */
+    TEST_ASSERT_NULL(hnsw_load("/tmp/aegis_hnsw_does_not_exist.bin", DIM, &got_covered));
+    /* truncate -> bad CRC -> reject */
+    TEST_ASSERT_EQUAL_INT(0, truncate(path, 64));
+    TEST_ASSERT_NULL(hnsw_load(path, DIM, &got_covered));
+    unlink(path);
+    free(vecs);
+}
+
 static void test_hnsw_empty(void) {
     Hnsw *h = hnsw_create(DIM, NULL);
     float q[DIM] = {1.0f};
@@ -222,5 +286,6 @@ int main(void) {
     RUN_TEST(test_hnsw_delete);
     RUN_TEST(test_hnsw_update);
     RUN_TEST(test_hnsw_reproducible);
+    RUN_TEST(test_hnsw_save_load);
     return UNITY_END();
 }
