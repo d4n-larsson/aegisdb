@@ -156,6 +156,80 @@ static void test_semantic_remove_reclaims(void) {
     semantic_index_free(s);
 }
 
+/* Re-adding an existing id replaces its vector in place (no duplicate slot),
+ * and search reflects the new direction. */
+static void test_semantic_overwrite_in_place(void) {
+    const size_t dim = 2;
+    SemanticIndex *s = semantic_index_create(dim);
+    float along_x[] = {1.0f, 0.0f};
+    float along_y[] = {0.0f, 1.0f};
+    semantic_index_add(s, 7, along_x, dim);
+    TEST_ASSERT_EQUAL_size_t(1, semantic_index_count(s));
+
+    /* overwrite id 7 to point along y */
+    semantic_index_add(s, 7, along_y, dim);
+    TEST_ASSERT_EQUAL_size_t(1, semantic_index_count(s)); /* no new slot */
+
+    float qy[] = {0.0f, 1.0f};
+    uint64_t *ids = NULL;
+    float *scores = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(
+        0, semantic_index_search(s, qy, dim, 1, &ids, &scores, &n));
+    TEST_ASSERT_EQUAL_size_t(1, n);
+    TEST_ASSERT_EQUAL_UINT64(7, ids[0]);
+    TEST_ASSERT_TRUE(scores[0] > 0.99f); /* now aligned with y */
+    free(ids);
+    free(scores);
+    semantic_index_free(s);
+}
+
+/* Build a large index, then remove a scattered subset. The swap-remove must
+ * keep the id->slot map consistent: every surviving id stays findable and every
+ * removed id disappears. A stale dense-index mapping or a broken probe chain
+ * (from the open-addressing delete) would surface here. */
+static void test_semantic_bulk_add_remove_consistency(void) {
+    const size_t dim = 1;
+    const uint64_t N = 1000;
+    SemanticIndex *s = semantic_index_create(dim);
+    for (uint64_t id = 1; id <= N; id++) {
+        float v[] = {(float)id};
+        TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, dim));
+    }
+    TEST_ASSERT_EQUAL_size_t((size_t)N, semantic_index_count(s));
+
+    /* remove every third id */
+    size_t removed = 0;
+    for (uint64_t id = 1; id <= N; id++)
+        if (id % 3 == 0) {
+            semantic_index_remove(s, id);
+            removed++;
+        }
+    TEST_ASSERT_EQUAL_size_t((size_t)N - removed, semantic_index_count(s));
+
+    /* Pull the whole index back and confirm exactly the survivors remain. */
+    float q[] = {1.0f};
+    uint64_t *ids = NULL;
+    float *scores = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(
+        0, semantic_index_search(s, q, dim, (size_t)N, &ids, &scores, &n));
+    TEST_ASSERT_EQUAL_size_t((size_t)N - removed, n);
+
+    char seen[1001] = {0};
+    for (size_t i = 0; i < n; i++) {
+        TEST_ASSERT_TRUE(ids[i] >= 1 && ids[i] <= N);
+        TEST_ASSERT_TRUE(ids[i] % 3 != 0); /* no removed id resurfaces */
+        TEST_ASSERT_FALSE(seen[ids[i]]);   /* no duplicates */
+        seen[ids[i]] = 1;
+    }
+    for (uint64_t id = 1; id <= N; id++)
+        if (id % 3 != 0) TEST_ASSERT_TRUE(seen[id]); /* every survivor present */
+    free(ids);
+    free(scores);
+    semantic_index_free(s);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_time_range_chronological);
@@ -164,5 +238,7 @@ int main(void) {
     RUN_TEST(test_tag_remove);
     RUN_TEST(test_semantic_topk_ordering);
     RUN_TEST(test_semantic_remove_reclaims);
+    RUN_TEST(test_semantic_overwrite_in_place);
+    RUN_TEST(test_semantic_bulk_add_remove_consistency);
     return UNITY_END();
 }
