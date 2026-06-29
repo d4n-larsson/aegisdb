@@ -28,6 +28,7 @@ void config_defaults(Config *cfg) {
     strncpy(cfg->data_dir, "./data", sizeof(cfg->data_dir) - 1);
     cfg->max_payload_bytes = 1048576; /* 1 MiB */
     cfg->embedding_dimensions = 384;
+    cfg->ann_ef_search = 0; /* 0 -> HNSW built-in default */
     cfg->working_capacity = 256;
     cfg->default_ttl_ms = 3600000; /* 1 hour */
     cfg->fsync_batch_size = 1000;
@@ -218,6 +219,8 @@ static void usage(const char *prog) {
             "                           not cap concurrent connections. Alias: --workers\n"
             "  --max-payload <bytes>    max data size (default 1048576)\n"
             "  --embedding-dim <n>      expected vector length (default 384)\n"
+            "  --ann-ef-search <n>      HNSW query beam for large semantic indexes;\n"
+            "                           higher = better recall, slower (default 50)\n"
             "  --durability <mode>      sync|batch|interval (default interval)\n"
             "  --fsync-batch <n>        records between fsync in batch mode\n"
             "                           (default 1000)\n"
@@ -298,6 +301,12 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
             NEXT("--embedding-dim");
             if (parse_size(val, &cfg->embedding_dimensions)) {
                 fprintf(stderr, "%s: invalid embedding-dim '%s'\n", prog, val);
+                return -1;
+            }
+        } else if (strcmp(a, "--ann-ef-search") == 0) {
+            NEXT("--ann-ef-search");
+            if (parse_size(val, &cfg->ann_ef_search)) {
+                fprintf(stderr, "%s: invalid ann-ef-search '%s'\n", prog, val);
                 return -1;
             }
         } else if (strcmp(a, "--fsync-batch") == 0) {

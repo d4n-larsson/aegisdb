@@ -97,7 +97,7 @@ static void test_tag_remove(void) {
 
 static void test_semantic_topk_ordering(void) {
     const size_t dim = 3;
-    SemanticIndex *s = semantic_index_create(dim);
+    SemanticIndex *s = semantic_index_create(dim, 0, 0);
     float a[] = {1.0f, 0.0f, 0.0f};  /* id 1 */
     float b[] = {0.9f, 0.1f, 0.0f};  /* id 2 (close to query) */
     float c[] = {0.0f, 1.0f, 0.0f};  /* id 3 (orthogonal-ish) */
@@ -125,7 +125,7 @@ static void test_semantic_topk_ordering(void) {
  * remove/re-add churn must not grow the index (no leaked/dead slots). */
 static void test_semantic_remove_reclaims(void) {
     const size_t dim = 2;
-    SemanticIndex *s = semantic_index_create(dim);
+    SemanticIndex *s = semantic_index_create(dim, 0, 0);
     float v1[] = {1.0f, 0.0f};
     float v2[] = {0.0f, 1.0f};
     semantic_index_add(s, 1, v1, dim);
@@ -160,7 +160,7 @@ static void test_semantic_remove_reclaims(void) {
  * and search reflects the new direction. */
 static void test_semantic_overwrite_in_place(void) {
     const size_t dim = 2;
-    SemanticIndex *s = semantic_index_create(dim);
+    SemanticIndex *s = semantic_index_create(dim, 0, 0);
     float along_x[] = {1.0f, 0.0f};
     float along_y[] = {0.0f, 1.0f};
     semantic_index_add(s, 7, along_x, dim);
@@ -191,7 +191,7 @@ static void test_semantic_overwrite_in_place(void) {
 static void test_semantic_bulk_add_remove_consistency(void) {
     const size_t dim = 1;
     const uint64_t N = 1000;
-    SemanticIndex *s = semantic_index_create(dim);
+    SemanticIndex *s = semantic_index_create(dim, 0, 0);
     for (uint64_t id = 1; id <= N; id++) {
         float v[] = {(float)id};
         TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, dim));
@@ -237,7 +237,7 @@ static void test_semantic_bulk_add_remove_consistency(void) {
 static void test_semantic_topk_partial_selection(void) {
     const size_t dim = 2;
     const uint64_t N = 200, K = 5;
-    SemanticIndex *s = semantic_index_create(dim);
+    SemanticIndex *s = semantic_index_create(dim, 0, 0);
     /* scramble insertion order with a coprime stride */
     for (uint64_t step = 0; step < N; step++) {
         uint64_t id = 1 + (step * 73 + 11) % N;
@@ -262,6 +262,52 @@ static void test_semantic_topk_partial_selection(void) {
     semantic_index_free(s);
 }
 
+/* Crossing ann_threshold switches search to the HNSW graph. With well-separated
+ * vectors (id i -> (1, i-1), monotonic angle from the query) the approximate
+ * path still returns the exact top-k, and remove/overwrite stay correct through
+ * it. */
+static void test_semantic_hnsw_path(void) {
+    const size_t dim = 2;
+    const uint64_t N = 300, K = 5;
+    SemanticIndex *s = semantic_index_create(dim, 16, 100); /* HNSW once n>=16 */
+    for (uint64_t id = 1; id <= N; id++) {
+        float v[] = {1.0f, (float)(id - 1)};
+        TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, dim));
+    }
+    TEST_ASSERT_EQUAL_size_t((size_t)N, semantic_index_count(s));
+
+    float q[] = {1.0f, 0.0f};
+    uint64_t *ids = NULL;
+    float *sc = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_search(s, q, dim, K, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_size_t((size_t)K, n);
+    for (uint64_t i = 0; i < K; i++) {
+        TEST_ASSERT_EQUAL_UINT64(i + 1, ids[i]);            /* nearest are 1..5 */
+        if (i > 0) TEST_ASSERT_TRUE(sc[i - 1] >= sc[i]);
+    }
+    free(ids);
+    free(sc);
+
+    /* remove the nearest (id 1) through the HNSW path: id 2 becomes nearest */
+    semantic_index_remove(s, 1);
+    TEST_ASSERT_EQUAL_size_t((size_t)N - 1, semantic_index_count(s));
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_search(s, q, dim, K, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_UINT64(2, ids[0]);
+    for (size_t i = 0; i < n; i++) TEST_ASSERT_TRUE(ids[i] != 1);
+    free(ids);
+    free(sc);
+
+    /* overwrite id 2 to point away from q: it drops out, id 3 becomes nearest */
+    float away[] = {0.0f, 1.0f};
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, 2, away, dim));
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_search(s, q, dim, K, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_UINT64(3, ids[0]);
+    free(ids);
+    free(sc);
+    semantic_index_free(s);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_time_range_chronological);
@@ -273,5 +319,6 @@ int main(void) {
     RUN_TEST(test_semantic_overwrite_in_place);
     RUN_TEST(test_semantic_bulk_add_remove_consistency);
     RUN_TEST(test_semantic_topk_partial_selection);
+    RUN_TEST(test_semantic_hnsw_path);
     return UNITY_END();
 }

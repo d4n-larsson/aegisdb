@@ -13,7 +13,12 @@
 
 typedef struct SemanticIndex SemanticIndex;
 
-SemanticIndex *semantic_index_create(size_t dim);
+/* Create a semantic index over `dim`-length vectors. Search is exact while the
+ * live count is below `ann_threshold` (0 = a built-in default); above it the
+ * index builds and queries an HNSW graph for sublinear approximate top-K.
+ * `ef_search` tunes the HNSW query beam (0 = the HNSW default). */
+SemanticIndex *semantic_index_create(size_t dim, size_t ann_threshold,
+                                     size_t ef_search);
 void semantic_index_free(SemanticIndex *s);
 
 /* Add or replace the vector for `id` (copied). dim must match. Returns 0/-1. */

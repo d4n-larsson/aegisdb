@@ -50,6 +50,7 @@ typedef struct {
     char data_dir[1024];        /* default "./data" */
     size_t max_payload_bytes;   /* default 1 MiB */
     size_t embedding_dimensions;/* default 384 */
+    size_t ann_ef_search;       /* HNSW query beam width once the semantic index is large; 0 = HNSW default. Recall/latency knob */
     uint32_t working_capacity;  /* default 256 */
     uint64_t default_ttl_ms;    /* default 3600000 */
     size_t fsync_batch_size;    /* default 1000; used in BATCH mode */
@@ -86,7 +87,7 @@ int aegis_durability_from_string(const char *s, int *out);
 size_t config_effective_fsync_batch(const Config *cfg);
 
 /* Parse argv (supports --data-dir, --port, --phase, --io-threads (alias
- * --workers), --max-payload, --embedding-dim, --fsync-batch,
+ * --workers), --max-payload, --embedding-dim, --ann-ef-search, --fsync-batch,
  * --working-capacity, --auth-token, --auth-token-file, --log-level, --help).
  * Returns 0 on success, -1 on error, 1 if --help was requested. */
 int config_parse_args(Config *cfg, int argc, char **argv);

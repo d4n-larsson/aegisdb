@@ -1,14 +1,23 @@
-/* Semantic index (T035): exact cosine top-K over stored float32 vectors.
+/* Semantic index (T035, #38): hybrid cosine top-K over stored float32 vectors.
  *
  * Vectors live in a dense array `e[0..n)`; an open-addressing `id -> slot` map
  * keeps add / lookup / remove O(1) so building or recovering an index of N
  * vectors is O(N), not O(N^2). The map stores the dense index, so a swap-remove
- * only has to repoint the one moved entry. */
+ * only has to repoint the one moved entry.
+ *
+ * Search is exact (brute-force scan) while small. Once the live count crosses
+ * `ann_threshold`, an HNSW graph is built and kept incrementally in sync, and
+ * search switches to it for sublinear approximate top-K. The dense array stays
+ * authoritative (storage + the build source + the small-n / exact path). */
 #include "aegisdb/semantic_index.h"
 
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "aegisdb/hnsw.h"
+
+#define DEFAULT_ANN_THRESHOLD 10000 /* live vectors above which HNSW kicks in */
 
 typedef struct {
     uint64_t id;
@@ -30,6 +39,9 @@ struct SemanticIndex {
     size_t cap;
     MapSlot *map; /* id -> dense slot; power-of-two capacity, NULL until first add */
     size_t mcap;
+    Hnsw *hnsw;          /* NULL until the live count crosses ann_threshold */
+    size_t ann_threshold;
+    size_t ef_search;    /* HNSW query beam width; 0 = the HNSW default */
 };
 
 #define MAP_INITIAL_CAP 128 /* power of two; covers the dense array's first growths */
@@ -90,10 +102,13 @@ static void map_delete_at(SemanticIndex *s, size_t i) {
     }
 }
 
-SemanticIndex *semantic_index_create(size_t dim) {
+SemanticIndex *semantic_index_create(size_t dim, size_t ann_threshold,
+                                     size_t ef_search) {
     SemanticIndex *s = calloc(1, sizeof(*s));
     if (!s) return NULL;
     s->dim = dim;
+    s->ann_threshold = ann_threshold ? ann_threshold : DEFAULT_ANN_THRESHOLD;
+    s->ef_search = ef_search;
     return s;
 }
 
@@ -104,7 +119,24 @@ void semantic_index_free(SemanticIndex *s) {
     for (size_t i = 0; i < s->n; i++) free(s->e[i].vec);
     free(s->e);
     free(s->map);
+    hnsw_free(s->hnsw);
     free(s);
+}
+
+/* Build the HNSW graph from the current dense array (one-time, at the threshold
+ * crossing); thereafter add/remove keep it in sync. Returns 0/-1. */
+static int build_hnsw(SemanticIndex *s) {
+    HnswParams p = {.ef_search = s->ef_search, .seed = 0x9E3779B97F4A7C15ULL};
+    Hnsw *h = hnsw_create(s->dim, &p);
+    if (!h) return -1;
+    for (size_t i = 0; i < s->n; i++) {
+        if (hnsw_add(h, s->e[i].id, s->e[i].vec, s->dim) != 0) {
+            hnsw_free(h);
+            return -1;
+        }
+    }
+    s->hnsw = h;
+    return 0;
 }
 
 static float l2norm(const float *v, size_t dim) {
@@ -127,6 +159,7 @@ int semantic_index_add(SemanticIndex *s, uint64_t id, const float *vec,
         memcpy(nv, vec, dim * sizeof(float));
         e->vec = nv;
         e->norm = l2norm(vec, dim);
+        if (s->hnsw && hnsw_add(s->hnsw, id, vec, dim) != 0) return -1;
         return 0;
     }
 
@@ -162,6 +195,13 @@ int semantic_index_add(SemanticIndex *s, uint64_t id, const float *vec,
     s->map[j].used = 1;
     s->map[j].id = id;
     s->map[j].idx = idx;
+
+    if (s->hnsw) {
+        if (hnsw_add(s->hnsw, id, vec, dim) != 0) return -1;
+    } else if (s->n >= s->ann_threshold) {
+        /* crossed the threshold: build the graph (includes this entry) */
+        if (build_hnsw(s) != 0) return -1;
+    }
     return 0;
 }
 
@@ -182,6 +222,7 @@ void semantic_index_remove(SemanticIndex *s, uint64_t id) {
         s->map[mj].idx = idx;
     }
     s->n--;
+    if (s->hnsw) hnsw_remove(s->hnsw, id);
 }
 
 typedef struct {
@@ -216,6 +257,11 @@ int semantic_index_search(const SemanticIndex *s, const float *query,
                           size_t dim, size_t top_k, uint64_t **out_ids,
                           float **out_scores, size_t *out_n) {
     if (dim != s->dim) return -1;
+    /* Above the threshold, answer from the HNSW graph (top_k==0 means "all",
+     * which only the exact scan supports). */
+    if (s->hnsw && top_k > 0)
+        return hnsw_search(s->hnsw, query, dim, top_k, s->ef_search, out_ids,
+                           out_scores, out_n);
     float qnorm = l2norm(query, dim);
     Scored *all = malloc((s->n ? s->n : 1) * sizeof(Scored));
     if (!all) return -1;
