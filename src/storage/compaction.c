@@ -139,6 +139,11 @@ int compaction_run_once(AegisDB *db) {
 
     log_fsync(&newlog);
     log_close(&newlog);
+
+    /* Swapping the log invalidates every existing offset, so exclude lock-free
+     * readers (they hold log_lock for read across their disk I/O) for the swap
+     * and hash rebuild. Acquired while holding index_lock — order index->log. */
+    pthread_rwlock_wrlock(&db->log_lock);
     log_close(&db->log);
 
     if (rename(newpath, db->path_log) != 0) {
@@ -147,6 +152,7 @@ int compaction_run_once(AegisDB *db) {
         /* try to reopen the original log so the server keeps working */
         log_open(&db->log, db->path_log,
                  config_effective_fsync_batch(&db->config));
+        pthread_rwlock_unlock(&db->log_lock);
         free(locs);
         pthread_rwlock_unlock(&db->index_lock);
         return -1;
@@ -154,6 +160,7 @@ int compaction_run_once(AegisDB *db) {
     if (log_open(&db->log, db->path_log,
                  config_effective_fsync_batch(&db->config)) != 0) {
         LOG_ERROR("compaction: cannot reopen compacted log %s", db->path_log);
+        pthread_rwlock_unlock(&db->log_lock);
         free(locs);
         pthread_rwlock_unlock(&db->index_lock);
         return -1;
@@ -164,6 +171,7 @@ int compaction_run_once(AegisDB *db) {
      * record deleted mid-compaction is not resurrected by its phase-2 copy. */
     HashIndex *nh = hash_index_create();
     if (!nh) {
+        pthread_rwlock_unlock(&db->log_lock);
         free(locs);
         pthread_rwlock_unlock(&db->index_lock);
         return -1;
@@ -173,6 +181,7 @@ int compaction_run_once(AegisDB *db) {
                        locs[i].type, locs[i].deleted);
     hash_index_free(db->hash);
     db->hash = nh;
+    pthread_rwlock_unlock(&db->log_lock);
     free(locs);
 
     /* The rewrite changed every log offset, so the on-disk checkpoint now points

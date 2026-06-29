@@ -25,7 +25,12 @@ typedef struct {
     uint64_t started_ms;     /* server start time (epoch ms) for uptime stats */
     uint64_t next_id;        /* monotonic id allocator for persisted records */
     pthread_mutex_t id_lock; /* guards next_id */
-    pthread_rwlock_t index_lock; /* guards in-memory indexes + log reads (T051) */
+    pthread_rwlock_t index_lock; /* guards the in-memory indexes (T051) */
+    /* Guards the log-file lifecycle so a reader can resolve an id->offset under
+     * index_lock, then drop it and do the disk read holding only this lock.
+     * Only compaction's log swap takes it for write; appends never do (they
+     * never invalidate an existing offset). Always acquire AFTER index_lock. */
+    pthread_rwlock_t log_lock;
 
     char path_log[1200];
     char path_index[1200];

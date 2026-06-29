@@ -116,6 +116,11 @@ int db_open(AegisDB *db, const Config *cfg) {
         pthread_mutex_destroy(&db->id_lock);
         return -1;
     }
+    if (pthread_rwlock_init(&db->log_lock, NULL) != 0) {
+        pthread_rwlock_destroy(&db->index_lock);
+        pthread_mutex_destroy(&db->id_lock);
+        return -1;
+    }
 
     if (log_open(&db->log, db->path_log, config_effective_fsync_batch(cfg)) !=
         0) {
@@ -166,6 +171,7 @@ fail_indexes:
 fail_locks:
     pthread_mutex_destroy(&db->id_lock);
     pthread_rwlock_destroy(&db->index_lock);
+    pthread_rwlock_destroy(&db->log_lock);
     return -1;
 }
 
@@ -185,4 +191,5 @@ void db_close(AegisDB *db) {
     log_close(&db->log);
     pthread_mutex_destroy(&db->id_lock);
     pthread_rwlock_destroy(&db->index_lock);
+    pthread_rwlock_destroy(&db->log_lock);
 }
