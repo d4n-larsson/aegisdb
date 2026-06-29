@@ -353,6 +353,24 @@ static int cmp_created_asc(const void *a, const void *b) {
     return 0;
 }
 
+/* Bounded selection over candidate *indices*: a size-k heap whose root is the
+ * worst-ranked kept candidate (per cmp; cmp(x,y)>0 means x ranks after y), so
+ * the heap retains the k best. Operating on indices avoids moving the heavy
+ * MemoryRecord values. */
+static void idx_sift_down(size_t *h, size_t n, size_t i, const Cand *c,
+                          int (*cmp)(const void *, const void *)) {
+    for (;;) {
+        size_t l = 2 * i + 1, r = 2 * i + 2, worst = i;
+        if (l < n && cmp(&c[h[l]], &c[h[worst]]) > 0) worst = l;
+        if (r < n && cmp(&c[h[r]], &c[h[worst]]) > 0) worst = r;
+        if (worst == i) break;
+        size_t t = h[i];
+        h[i] = h[worst];
+        h[worst] = t;
+        i = worst;
+    }
+}
+
 aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
                          MemoryRecord **out_records, size_t *out_n) {
     aegis_status_t st = require_phase(db, p->embedding_dim ? 3 : 2);
@@ -458,20 +476,71 @@ aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
     free(snap);
 
     /* 3. order + truncate */
-    if (semantic)
-        qsort(cands, m, sizeof(Cand), cmp_score_desc);
-    else
-        qsort(cands, m, sizeof(Cand), cmp_created_asc);
-
+    int (*cmp)(const void *, const void *) =
+        semantic ? cmp_score_desc : cmp_created_asc;
     size_t keep = (top_k < m) ? top_k : m;
-    MemoryRecord *res = malloc((keep ? keep : 1) * sizeof(MemoryRecord));
-    if (!res) {
+
+    if (keep >= m) {
+        /* returning everything: a single full sort is simplest */
+        qsort(cands, m, sizeof(Cand), cmp);
+        MemoryRecord *res = malloc((m ? m : 1) * sizeof(MemoryRecord));
+        if (!res) {
+            for (size_t i = 0; i < m; i++) record_free(&cands[i].rec);
+            free(cands);
+            return AEGIS_ERR_INTERNAL;
+        }
+        for (size_t i = 0; i < m; i++) res[i] = cands[i].rec;
+        free(cands);
+        *out_records = res;
+        *out_n = m;
+        return AEGIS_OK;
+    }
+
+    /* Select the keep best in O(m log keep) via a bounded index heap, then sort
+     * only those keep and free the records that did not make the cut. */
+    size_t *heap = malloc(keep * sizeof(*heap));
+    char *sel = calloc(m, 1);
+    MemoryRecord *res = malloc(keep * sizeof(MemoryRecord));
+    Cand *top = malloc(keep * sizeof(Cand));
+    if (!heap || !sel || !res || !top) {
         for (size_t i = 0; i < m; i++) record_free(&cands[i].rec);
         free(cands);
+        free(heap);
+        free(sel);
+        free(res);
+        free(top);
         return AEGIS_ERR_INTERNAL;
     }
-    for (size_t i = 0; i < keep; i++) res[i] = cands[i].rec;
-    for (size_t i = keep; i < m; i++) record_free(&cands[i].rec);
+    size_t hn = 0;
+    for (size_t i = 0; i < m; i++) {
+        if (hn < keep) {
+            /* push: sift the new leaf up toward the (worst-ranked) root */
+            size_t j = hn++;
+            heap[j] = i;
+            while (j > 0) {
+                size_t pa = (j - 1) / 2;
+                if (cmp(&cands[heap[j]], &cands[heap[pa]]) <= 0) break;
+                size_t t = heap[j];
+                heap[j] = heap[pa];
+                heap[pa] = t;
+                j = pa;
+            }
+        } else if (cmp(&cands[i], &cands[heap[0]]) < 0) {
+            heap[0] = i; /* better than the worst kept: evict the root */
+            idx_sift_down(heap, hn, 0, cands, cmp);
+        }
+    }
+    for (size_t t = 0; t < keep; t++) {
+        sel[heap[t]] = 1;
+        top[t] = cands[heap[t]];
+    }
+    qsort(top, keep, sizeof(Cand), cmp);
+    for (size_t t = 0; t < keep; t++) res[t] = top[t].rec;
+    for (size_t i = 0; i < m; i++)
+        if (!sel[i]) record_free(&cands[i].rec);
+    free(top);
+    free(heap);
+    free(sel);
     free(cands);
     *out_records = res;
     *out_n = keep;

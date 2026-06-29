@@ -197,6 +197,21 @@ static int cmp_scored_desc(const void *a, const void *b) {
     return 0;
 }
 
+/* Sift element i down a heap of size n ordered so the root is the LOWEST score
+ * (the next to evict): a size-k heap built this way retains the k top scores. */
+static void scored_sift_down(Scored *a, size_t n, size_t i) {
+    for (;;) {
+        size_t l = 2 * i + 1, r = 2 * i + 2, low = i;
+        if (l < n && a[l].score < a[low].score) low = l;
+        if (r < n && a[r].score < a[low].score) low = r;
+        if (low == i) break;
+        Scored t = a[i];
+        a[i] = a[low];
+        a[low] = t;
+        i = low;
+    }
+}
+
 int semantic_index_search(const SemanticIndex *s, const float *query,
                           size_t dim, size_t top_k, uint64_t **out_ids,
                           float **out_scores, size_t *out_n) {
@@ -216,8 +231,18 @@ int semantic_index_search(const SemanticIndex *s, const float *query,
         all[m].score = sim;
         m++;
     }
-    qsort(all, m, sizeof(Scored), cmp_scored_desc);
     size_t k = (top_k && top_k < m) ? top_k : m;
+    /* Select the k highest scores in O(m log k): keep a size-k min-heap of the
+     * best seen, then sort just those k. Falls back to a full sort when k == m. */
+    if (k < m) {
+        for (size_t i = k / 2; i-- > 0;) scored_sift_down(all, k, i);
+        for (size_t i = k; i < m; i++)
+            if (all[i].score > all[0].score) {
+                all[0] = all[i];
+                scored_sift_down(all, k, 0);
+            }
+    }
+    qsort(all, k, sizeof(Scored), cmp_scored_desc);
     uint64_t *ids = malloc((k ? k : 1) * sizeof(uint64_t));
     float *sc = malloc((k ? k : 1) * sizeof(float));
     if (!ids || !sc) {

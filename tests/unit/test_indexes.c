@@ -230,6 +230,38 @@ static void test_semantic_bulk_add_remove_consistency(void) {
     semantic_index_free(s);
 }
 
+/* With many more vectors than top_k, the partial selection must return exactly
+ * the k highest-similarity ids in descending order. id i has vector (1, i-1),
+ * so cosine to the query (1,0) strictly decreases as i grows: the top k are
+ * ids 1..k. Inserted in a scrambled order to defeat any reliance on it. */
+static void test_semantic_topk_partial_selection(void) {
+    const size_t dim = 2;
+    const uint64_t N = 200, K = 5;
+    SemanticIndex *s = semantic_index_create(dim);
+    /* scramble insertion order with a coprime stride */
+    for (uint64_t step = 0; step < N; step++) {
+        uint64_t id = 1 + (step * 73 + 11) % N;
+        float v[] = {1.0f, (float)(id - 1)};
+        semantic_index_add(s, id, v, dim);
+    }
+    TEST_ASSERT_EQUAL_size_t((size_t)N, semantic_index_count(s));
+
+    float q[] = {1.0f, 0.0f};
+    uint64_t *ids = NULL;
+    float *scores = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(
+        0, semantic_index_search(s, q, dim, K, &ids, &scores, &n));
+    TEST_ASSERT_EQUAL_size_t((size_t)K, n);
+    for (uint64_t i = 0; i < K; i++) {
+        TEST_ASSERT_EQUAL_UINT64(i + 1, ids[i]);          /* exact top-k set */
+        if (i > 0) TEST_ASSERT_TRUE(scores[i - 1] >= scores[i]); /* descending */
+    }
+    free(ids);
+    free(scores);
+    semantic_index_free(s);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_time_range_chronological);
@@ -240,5 +272,6 @@ int main(void) {
     RUN_TEST(test_semantic_remove_reclaims);
     RUN_TEST(test_semantic_overwrite_in_place);
     RUN_TEST(test_semantic_bulk_add_remove_consistency);
+    RUN_TEST(test_semantic_topk_partial_selection);
     return UNITY_END();
 }

@@ -184,6 +184,44 @@ static void test_semantic_search(void) {
     free(recs);
 }
 
+/* qe_search must return exactly the top_k best candidates in rank order even
+ * when far more match — exercising the bounded partial selection. Six semantic
+ * vectors at increasing angle from the query have strictly decreasing
+ * similarity; top_k=3 must yield the three nearest, in descending order. */
+static void test_search_top_k_selection(void) {
+    /* y-offsets chosen so cosine to (1,0,0) is strictly decreasing */
+    float ys[6] = {0.0f, 0.25f, 0.5f, 1.0f, 2.0f, 4.0f};
+    uint64_t ids[6];
+    int order[6] = {3, 0, 5, 2, 4, 1}; /* insert scrambled */
+    for (int k = 0; k < 6; k++) {
+        int i = order[k];
+        float v[3] = {1.0f, ys[i], 0.0f};
+        MemoryRecord in = make_input(MEM_SEMANTIC, "v");
+        in.embedding = v;
+        in.embedding_dim = 3;
+        MemoryRecord out;
+        TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &in, NULL, 0, &out));
+        ids[i] = out.id;
+        record_free(&out);
+    }
+
+    SearchParams p = {0};
+    float query[3] = {1.0f, 0.0f, 0.0f};
+    p.embedding = query;
+    p.embedding_dim = 3;
+    p.top_k = 3;
+    MemoryRecord *recs = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &recs, &n));
+    TEST_ASSERT_EQUAL_size_t(3, n);
+    /* nearest three are y=0,0.25,0.5 -> ids[0],ids[1],ids[2], in that order */
+    TEST_ASSERT_EQUAL_UINT64(ids[0], recs[0].id);
+    TEST_ASSERT_EQUAL_UINT64(ids[1], recs[1].id);
+    TEST_ASSERT_EQUAL_UINT64(ids[2], recs[2].id);
+    for (size_t i = 0; i < n; i++) record_free(&recs[i]);
+    free(recs);
+}
+
 static void test_working_memory_promote(void) {
     MemoryRecord in = make_input(MEM_WORKING, "scratch note");
     MemoryRecord out;
@@ -313,6 +351,7 @@ int main(void) {
     RUN_TEST(test_semantic_update);
     RUN_TEST(test_search_by_time_and_tags);
     RUN_TEST(test_semantic_search);
+    RUN_TEST(test_search_top_k_selection);
     RUN_TEST(test_working_memory_promote);
     RUN_TEST(test_relate_and_traverse);
     RUN_TEST(test_agent_namespace_filter);
