@@ -180,6 +180,30 @@ static void test_hnsw_reproducible(void) {
     free(vecs);
 }
 
+/* Hub-isolation regression: vectors on a ray (id i -> (1, i-1)) put id 1 = (1,0)
+ * angularly far from its nearest neighbour while everything else is densely
+ * packed. The plain "keep M closest" rule strands id 1 (no node links back to
+ * it) and it vanishes from results; the diversity heuristic keeps it reachable. */
+static void test_hnsw_hub_isolation(void) {
+    const size_t N = 300;
+    Hnsw *h = hnsw_create(2, NULL);
+    for (size_t i = 1; i <= N; i++) {
+        float v[2] = {1.0f, (float)(i - 1)};
+        hnsw_add(h, i, v, 2);
+    }
+    float q[2] = {1.0f, 0.0f}; /* exactly id 1's vector */
+    uint64_t *ids = NULL;
+    float *sc = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, hnsw_search(h, q, 2, 5, 0, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_size_t(5, n);
+    TEST_ASSERT_EQUAL_UINT64(1, ids[0]); /* the isolated point must be found */
+    TEST_ASSERT_TRUE(sc[0] > 0.999f);    /* sim ~ 1.0 */
+    free(ids);
+    free(sc);
+    hnsw_free(h);
+}
+
 static void test_hnsw_empty(void) {
     Hnsw *h = hnsw_create(DIM, NULL);
     float q[DIM] = {1.0f};
@@ -193,6 +217,7 @@ static void test_hnsw_empty(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_hnsw_empty);
+    RUN_TEST(test_hnsw_hub_isolation);
     RUN_TEST(test_hnsw_recall);
     RUN_TEST(test_hnsw_delete);
     RUN_TEST(test_hnsw_update);

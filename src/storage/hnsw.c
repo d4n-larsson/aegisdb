@@ -42,6 +42,11 @@ typedef struct {
     int used;
 } MapSlot;
 
+typedef struct {
+    float d;
+    uint32_t node;
+} Cand;
+
 struct Hnsw {
     size_t dim, M, M0, ef_construction, ef_search;
     double mL;       /* level-generation normalization = 1/ln(M) */
@@ -55,6 +60,11 @@ struct Hnsw {
 
     MapSlot *map;    /* id -> node index; power-of-two capacity */
     size_t mcap;
+
+    /* reusable scratch for neighbour pruning (insert is single-threaded under
+     * the caller's write lock): scratch_cand sized M0+1, scratch_sel sized M0 */
+    Cand *scratch_cand;
+    uint32_t *scratch_sel;
 };
 
 static uint64_t mix64(uint64_t x) {
@@ -147,11 +157,6 @@ static float dist_q(const Hnsw *h, const float *q, float qnorm, uint32_t node) {
 }
 
 /* ------------------------------------------------------------ candidate heaps */
-typedef struct {
-    float d;
-    uint32_t node;
-} Cand;
-
 typedef struct {
     Cand *a;
     size_t n, cap;
@@ -345,36 +350,64 @@ static int node_layer_cap(const Hnsw *h, int layer) {
     return layer == 0 ? (int)h->M0 : (int)h->M;
 }
 
-/* Add a directed link a -> b at `layer`, keeping a's list to its capacity by
- * evicting a's current farthest neighbour when full. */
+/* Cosine distance (1 - similarity) between two stored nodes. */
+static float dist_nn(const Hnsw *h, uint32_t a, uint32_t b) {
+    const Node *na = &h->nodes[a], *nb = &h->nodes[b];
+    double dot = 0;
+    for (size_t i = 0; i < h->dim; i++) dot += (double)na->vec[i] * nb->vec[i];
+    float den = na->norm * nb->norm;
+    return den > 0 ? 1.0f - (float)(dot / den) : 1.0f;
+}
+
+/* Diversity neighbour selection (Malkov & Yashunin, Algorithm 4): from the
+ * candidates (each .d = distance to the target node), keep up to M that are
+ * closer to the target than to any already-kept neighbour. This preserves
+ * long-range links so an angularly isolated point stays reachable — the plain
+ * "keep the M closest" rule strands such points and tanks recall. Remaining
+ * slots are backfilled with the nearest leftovers for connectivity. Writes the
+ * chosen node indices to `out` and returns the count; sorts `cand` ascending. */
+static size_t select_heuristic(const Hnsw *h, Cand *cand, size_t nc, size_t M,
+                               uint32_t *out) {
+    qsort(cand, nc, sizeof(Cand), cmp_cand_asc);
+    size_t r = 0;
+    for (size_t i = 0; i < nc && r < M; i++) {
+        int good = 1;
+        for (size_t j = 0; j < r; j++)
+            if (dist_nn(h, cand[i].node, out[j]) < cand[i].d) { good = 0; break; }
+        if (good) out[r++] = cand[i].node;
+    }
+    for (size_t i = 0; i < nc && r < M; i++) {
+        int in = 0;
+        for (size_t j = 0; j < r; j++)
+            if (out[j] == cand[i].node) { in = 1; break; }
+        if (!in) out[r++] = cand[i].node;
+    }
+    return r;
+}
+
+/* Add a directed link a -> b at `layer`; when a's list is full, re-select the
+ * capacity-many best neighbours (current ones + b) with the diversity heuristic
+ * so connectivity is preserved rather than just keeping the closest. */
 static void connect(Hnsw *h, uint32_t a, uint32_t b, int layer) {
     Node *na = &h->nodes[a];
     size_t cap = (size_t)node_layer_cap(h, layer);
-    uint32_t *L = na->links[layer];
     if (na->link_cnt[layer] < cap) {
-        L[na->link_cnt[layer]++] = b;
+        na->links[layer][na->link_cnt[layer]++] = b;
         return;
     }
-    /* full: replace the neighbour farthest from `a` if `b` is closer */
-    float a_norm = na->norm;
-    const float *av = na->vec;
-    /* distance helper from node a to node x */
-    size_t worst = 0;
-    float worst_d = -1.0f;
-    for (size_t i = 0; i < cap; i++) {
-        const Node *nx = &h->nodes[L[i]];
-        double dot = 0;
-        for (size_t k = 0; k < h->dim; k++) dot += (double)av[k] * nx->vec[k];
-        float den = a_norm * nx->norm;
-        float d = den > 0 ? 1.0f - (float)(dot / den) : 1.0f;
-        if (d > worst_d) { worst_d = d; worst = i; }
+    Cand *cand = h->scratch_cand; /* sized M0 + 1 */
+    size_t nc = 0;
+    for (uint32_t i = 0; i < na->link_cnt[layer]; i++) {
+        cand[nc].node = na->links[layer][i];
+        cand[nc].d = dist_nn(h, a, na->links[layer][i]);
+        nc++;
     }
-    const Node *nb = &h->nodes[b];
-    double dotb = 0;
-    for (size_t k = 0; k < h->dim; k++) dotb += (double)av[k] * nb->vec[k];
-    float denb = a_norm * nb->norm;
-    float db = denb > 0 ? 1.0f - (float)(dotb / denb) : 1.0f;
-    if (db < worst_d) L[worst] = b;
+    cand[nc].node = b;
+    cand[nc].d = dist_nn(h, a, b);
+    nc++;
+    size_t ns = select_heuristic(h, cand, nc, cap, h->scratch_sel);
+    for (size_t i = 0; i < ns; i++) na->links[layer][i] = h->scratch_sel[i];
+    na->link_cnt[layer] = (uint32_t)ns;
 }
 
 static int rand_level(Hnsw *h) {
@@ -464,17 +497,17 @@ int hnsw_add(Hnsw *h, uint64_t id, const float *vec, size_t dim) {
             break;
         }
         if (W.n == 0) continue; /* only tombstoned around: leave unlinked here */
-        /* select the M closest of W as neighbours (W is a max-heap; sort asc) */
         size_t cap = (size_t)node_layer_cap(h, lc);
-        /* simple selection: repeatedly pop the max until <= cap remain, leaving
-         * the cap nearest in W.a[0..W.n) */
-        while (W.n > cap) heap_pop(&W, 1);
-        for (size_t i = 0; i < W.n; i++) {
-            uint32_t nb = W.a[i].node;
-            connect(h, cur, nb, lc);
-            connect(h, nb, cur, lc);
+        /* pick this node's neighbours from W with the diversity heuristic. Copy
+         * them out first: connect() reuses h->scratch_sel for its own pruning. */
+        uint32_t chosen[64 + 1]; /* M0 <= 64 for any sane M; guarded below */
+        size_t want = cap < 64 ? cap : 64;
+        size_t ns = select_heuristic(h, W.a, W.n, want, chosen);
+        for (size_t i = 0; i < ns; i++) {
+            connect(h, cur, chosen[i], lc); /* cur has room (ns <= cap) */
+            connect(h, chosen[i], cur, lc); /* may prune chosen[i] */
         }
-        ep = W.a[0].node; /* nearest seen, for the next layer down */
+        ep = W.a[0].node; /* select_heuristic sorted W.a asc -> nearest first */
     }
     free(W.a);
     if (rc != 0) return -1;
@@ -559,6 +592,14 @@ Hnsw *hnsw_create(size_t dim, const HnswParams *params) {
     h->mL = 1.0 / log((double)(h->M < 2 ? 2 : h->M));
     h->entry = NPOS;
     h->max_layer = 0;
+    h->scratch_cand = malloc((h->M0 + 1) * sizeof(Cand));
+    h->scratch_sel = malloc(h->M0 * sizeof(uint32_t));
+    if (!h->scratch_cand || !h->scratch_sel) {
+        free(h->scratch_cand);
+        free(h->scratch_sel);
+        free(h);
+        return NULL;
+    }
     return h;
 }
 
@@ -573,5 +614,7 @@ void hnsw_free(Hnsw *h) {
     }
     free(h->nodes);
     free(h->map);
+    free(h->scratch_cand);
+    free(h->scratch_sel);
     free(h);
 }
