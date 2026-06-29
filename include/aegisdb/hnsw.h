@@ -49,4 +49,16 @@ int hnsw_search(const Hnsw *h, const float *query, size_t dim, size_t top_k,
 /* Number of live (non-tombstoned) vectors. */
 size_t hnsw_count(const Hnsw *h);
 
+/* Persist the graph to `path` (atomic .tmp + rename, CRC-protected), tagging it
+ * with the log offset it reflects so recovery can replay only the tail. Returns
+ * 0/-1. */
+int hnsw_save(const Hnsw *h, const char *path, uint64_t covered_log_size);
+
+/* Load a graph previously written by hnsw_save. Returns NULL if the file is
+ * missing, truncated/corrupt (bad CRC), a different format version, or built
+ * for a different `expected_dim` — the caller then falls back to a full
+ * rebuild. On success writes the tagged offset to *out_covered_log_size. */
+Hnsw *hnsw_load(const char *path, size_t expected_dim,
+                uint64_t *out_covered_log_size);
+
 #endif /* AEGISDB_HNSW_H */

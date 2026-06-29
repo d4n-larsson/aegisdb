@@ -9,9 +9,19 @@
  * connectivity but is never returned and never linked to by new inserts. */
 #include "aegisdb/hnsw.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <math.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+#include "aegisdb/crc32.h"
+
+#define HNSW_FORMAT_MAGIC "AHNS"
+#define HNSW_FORMAT_VERSION 1u
 
 #define NPOS UINT32_MAX
 
@@ -579,17 +589,19 @@ int hnsw_search(const Hnsw *h, const float *query, size_t dim, size_t top_k,
 
 size_t hnsw_count(const Hnsw *h) { return h ? h->live : 0; }
 
-Hnsw *hnsw_create(size_t dim, const HnswParams *params) {
+/* Allocate an empty index with the given (already-resolved) parameters and rng
+ * state. Shared by hnsw_create and hnsw_load. */
+static Hnsw *hnsw_alloc(size_t dim, size_t M, size_t ef_construction,
+                        size_t ef_search, uint64_t rng) {
     Hnsw *h = calloc(1, sizeof(*h));
     if (!h) return NULL;
     h->dim = dim;
-    h->M = (params && params->M) ? params->M : 16;
+    h->M = M < 2 ? 2 : M;
     h->M0 = h->M * 2;
-    h->ef_construction =
-        (params && params->ef_construction) ? params->ef_construction : 200;
-    h->ef_search = (params && params->ef_search) ? params->ef_search : 50;
-    h->rng = (params && params->seed) ? params->seed : 0x9E3779B97F4A7C15ULL;
-    h->mL = 1.0 / log((double)(h->M < 2 ? 2 : h->M));
+    h->ef_construction = ef_construction;
+    h->ef_search = ef_search;
+    h->rng = rng;
+    h->mL = 1.0 / log((double)h->M);
     h->entry = NPOS;
     h->max_layer = 0;
     h->scratch_cand = malloc((h->M0 + 1) * sizeof(Cand));
@@ -601,6 +613,14 @@ Hnsw *hnsw_create(size_t dim, const HnswParams *params) {
         return NULL;
     }
     return h;
+}
+
+Hnsw *hnsw_create(size_t dim, const HnswParams *params) {
+    size_t M = (params && params->M) ? params->M : 16;
+    size_t efc = (params && params->ef_construction) ? params->ef_construction : 200;
+    size_t efs = (params && params->ef_search) ? params->ef_search : 50;
+    uint64_t seed = (params && params->seed) ? params->seed : 0x9E3779B97F4A7C15ULL;
+    return hnsw_alloc(dim, M, efc, efs, seed);
 }
 
 void hnsw_free(Hnsw *h) {
@@ -617,4 +637,180 @@ void hnsw_free(Hnsw *h) {
     free(h->scratch_cand);
     free(h->scratch_sel);
     free(h);
+}
+
+/* --------------------------------------------------------- persistence ----
+ * A node index is stable across save/load (nodes are written in array order,
+ * tombstones included), so the neighbour links stay valid. Scalars are written
+ * in native byte order — checkpoints are local files, like the hash index's. */
+
+typedef struct { uint8_t *p; size_t n, cap; int err; } Buf;
+
+static void buf_put(Buf *b, const void *src, size_t len) {
+    if (b->err) return;
+    if (b->n + len > b->cap) {
+        size_t nc = b->cap ? b->cap * 2 : 4096;
+        while (nc < b->n + len) nc *= 2;
+        uint8_t *np = realloc(b->p, nc);
+        if (!np) { b->err = 1; return; }
+        b->p = np;
+        b->cap = nc;
+    }
+    memcpy(b->p + b->n, src, len);
+    b->n += len;
+}
+static void buf_u32(Buf *b, uint32_t v) { buf_put(b, &v, sizeof v); }
+static void buf_u64(Buf *b, uint64_t v) { buf_put(b, &v, sizeof v); }
+
+typedef struct { const uint8_t *p; size_t n, off; int err; } Rd;
+
+static void rd_get(Rd *r, void *dst, size_t len) {
+    if (r->err || r->off + len > r->n) { r->err = 1; return; }
+    memcpy(dst, r->p + r->off, len);
+    r->off += len;
+}
+static uint32_t rd_u32(Rd *r) { uint32_t v = 0; rd_get(r, &v, sizeof v); return v; }
+static uint64_t rd_u64(Rd *r) { uint64_t v = 0; rd_get(r, &v, sizeof v); return v; }
+
+int hnsw_save(const Hnsw *h, const char *path, uint64_t covered_log_size) {
+    Buf b = {0};
+    buf_put(&b, HNSW_FORMAT_MAGIC, 4);
+    buf_u32(&b, HNSW_FORMAT_VERSION);
+    buf_u32(&b, (uint32_t)h->dim);
+    buf_u32(&b, (uint32_t)h->M);
+    buf_u32(&b, (uint32_t)h->ef_construction);
+    buf_u32(&b, (uint32_t)h->ef_search);
+    buf_u64(&b, h->rng); /* live PRNG state: future inserts continue the stream */
+    buf_u64(&b, (uint64_t)h->n);
+    buf_u64(&b, (uint64_t)h->live);
+    buf_u32(&b, h->entry);
+    buf_u32(&b, (uint32_t)h->max_layer);
+    buf_u64(&b, covered_log_size);
+    for (size_t i = 0; i < h->n; i++) {
+        const Node *nd = &h->nodes[i];
+        buf_u64(&b, nd->id);
+        uint32_t flags = (uint32_t)(nd->deleted ? 1 : 0);
+        buf_u32(&b, flags);
+        buf_u32(&b, (uint32_t)nd->top_layer);
+        buf_put(&b, &nd->norm, sizeof(float));
+        buf_put(&b, nd->vec, h->dim * sizeof(float));
+        for (int l = 0; l <= nd->top_layer; l++) {
+            buf_u32(&b, nd->link_cnt[l]);
+            buf_put(&b, nd->links[l], nd->link_cnt[l] * sizeof(uint32_t));
+        }
+    }
+    if (b.err) { free(b.p); return -1; }
+    buf_u32(&b, crc32_compute(b.p, b.n)); /* trailing CRC over everything above */
+    if (b.err) { free(b.p); return -1; }
+
+    char tmp[1300];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) { free(b.p); return -1; }
+    int ok = 1;
+    for (size_t off = 0; off < b.n;) {
+        ssize_t w = write(fd, b.p + off, b.n - off);
+        if (w < 0) { if (errno == EINTR) continue; ok = 0; break; }
+        off += (size_t)w;
+    }
+    if (ok) ok = (fsync(fd) == 0);
+    close(fd);
+    free(b.p);
+    if (!ok || rename(tmp, path) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+Hnsw *hnsw_load(const char *path, size_t expected_dim,
+                uint64_t *out_covered_log_size) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return NULL;
+    off_t size = lseek(fd, 0, SEEK_END);
+    if (size < 4 + 4 || lseek(fd, 0, SEEK_SET) != 0) { close(fd); return NULL; }
+    uint8_t *buf = malloc((size_t)size);
+    if (!buf) { close(fd); return NULL; }
+    for (size_t off = 0; off < (size_t)size;) {
+        ssize_t r = read(fd, buf + off, (size_t)size - off);
+        if (r <= 0) { if (r < 0 && errno == EINTR) continue; close(fd); free(buf); return NULL; }
+        off += (size_t)r;
+    }
+    close(fd);
+
+    size_t body = (size_t)size - 4; /* trailing CRC */
+    uint32_t want;
+    memcpy(&want, buf + body, 4);
+    if (crc32_compute(buf, body) != want) { free(buf); return NULL; }
+
+    Rd r = {buf, body, 0, 0};
+    char magic[4];
+    rd_get(&r, magic, 4);
+    if (r.err || memcmp(magic, HNSW_FORMAT_MAGIC, 4) != 0) { free(buf); return NULL; }
+    if (rd_u32(&r) != HNSW_FORMAT_VERSION) { free(buf); return NULL; }
+    size_t dim = rd_u32(&r);
+    if (dim != expected_dim) { free(buf); return NULL; }
+    size_t M = rd_u32(&r);
+    size_t efc = rd_u32(&r);
+    size_t efs = rd_u32(&r);
+    uint64_t rng = rd_u64(&r);
+    uint64_t ncount = rd_u64(&r);
+    uint64_t live = rd_u64(&r);
+    uint32_t entry = rd_u32(&r);
+    int max_layer = (int)rd_u32(&r);
+    uint64_t covered = rd_u64(&r);
+    if (r.err) { free(buf); return NULL; }
+
+    Hnsw *h = hnsw_alloc(dim, M, efc, efs, rng);
+    if (!h) { free(buf); return NULL; }
+    if (ncount > 0) {
+        h->nodes = calloc((size_t)ncount, sizeof(Node));
+        if (!h->nodes) { hnsw_free(h); free(buf); return NULL; }
+        h->cap = (size_t)ncount;
+    }
+
+    for (uint64_t i = 0; i < ncount; i++) {
+        Node *nd = &h->nodes[i];
+        nd->id = rd_u64(&r);
+        nd->deleted = (int)rd_u32(&r);
+        nd->top_layer = (int)rd_u32(&r);
+        if (r.err || nd->top_layer < 0) goto bad;
+        nd->vec = malloc(dim * sizeof(float));
+        nd->links = calloc((size_t)nd->top_layer + 1, sizeof(uint32_t *));
+        nd->link_cnt = calloc((size_t)nd->top_layer + 1, sizeof(uint32_t));
+        if (!nd->vec || !nd->links || !nd->link_cnt) goto bad;
+        h->n = i + 1; /* keep the freeable prefix accurate for the error path */
+        rd_get(&r, &nd->norm, sizeof(float));
+        rd_get(&r, nd->vec, dim * sizeof(float));
+        for (int l = 0; l <= nd->top_layer; l++) {
+            uint32_t cnt = rd_u32(&r);
+            size_t cap = (size_t)node_layer_cap(h, l);
+            if (r.err || cnt > cap) goto bad;
+            nd->links[l] = malloc(cap * sizeof(uint32_t));
+            if (!nd->links[l]) goto bad;
+            nd->link_cnt[l] = cnt;
+            rd_get(&r, nd->links[l], cnt * sizeof(uint32_t));
+        }
+    }
+    if (r.err || r.off != body) goto bad; /* trailing garbage or short read */
+
+    h->live = live;
+    h->entry = entry;
+    h->max_layer = max_layer;
+    /* Pre-size the id->node map for the whole live set before rebuilding it:
+     * map_put grows against h->live, so a tiny initial map would otherwise
+     * overflow (and spin) under a bulk load. Keep the load factor < 0.7. */
+    size_t mcap = 64;
+    while (mcap * 7 < (live + 1) * 10) mcap *= 2;
+    if (map_grow(h, mcap) != 0) goto bad;
+    for (size_t i = 0; i < h->n; i++)
+        if (!h->nodes[i].deleted && map_put(h, h->nodes[i].id, (uint32_t)i) != 0)
+            goto bad;
+    free(buf);
+    if (out_covered_log_size) *out_covered_log_size = covered;
+    return h;
+bad:
+    hnsw_free(h);
+    free(buf);
+    return NULL;
 }
