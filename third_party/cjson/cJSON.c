@@ -89,7 +89,19 @@ typedef struct {
     const unsigned char *json;
     size_t position;
 } error;
-static error global_error = { NULL, 0 };
+/* LOCAL PATCH (aegisdb — see LOCAL_PATCHES.md, issue #41): upstream keeps this
+ * parse-error record process-global. aegisdb parses requests concurrently on
+ * worker threads, which is a data race on the global. Make it thread-local. */
+#if defined(_MSC_VER)
+#define CJSON_THREAD_LOCAL __declspec(thread)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#define CJSON_THREAD_LOCAL _Thread_local
+#elif defined(__GNUC__)
+#define CJSON_THREAD_LOCAL __thread
+#else
+#define CJSON_THREAD_LOCAL
+#endif
+static CJSON_THREAD_LOCAL error global_error = { NULL, 0 };
 
 CJSON_PUBLIC(const char *) cJSON_GetErrorPtr(void)
 {
