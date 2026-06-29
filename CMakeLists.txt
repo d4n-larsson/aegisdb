@@ -11,6 +11,15 @@ endif()
 
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
+# Opt-in host-CPU tuning (mirrors the Makefile's NATIVE=1): auto-vectorizes the
+# vector-search hot loops for a faster semantic search, but the binary uses
+# instructions specific to this machine and is NOT portable to other CPUs.
+# Off by default; enable with -DAEGISDB_NATIVE=ON.
+option(AEGISDB_NATIVE "Optimize for the host CPU (-march=native); not portable" OFF)
+if(AEGISDB_NATIVE)
+  add_compile_options(-march=native)
+endif()
+
 find_package(Threads REQUIRED)
 
 # ---------------------------------------------------------------------------
@@ -28,6 +37,15 @@ list(REMOVE_ITEM AEGISDB_CORE_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/main.c)
 add_library(aegisdb_core STATIC ${AEGISDB_CORE_SOURCES})
 target_include_directories(aegisdb_core PUBLIC include third_party/cjson)
 target_link_libraries(aegisdb_core PUBLIC cjson Threads::Threads m)
+
+# Relaxed FP only for the vector-search translation unit, so the cosine
+# reduction can vectorize under AEGISDB_NATIVE; scoped here so isnan/isinf
+# elsewhere (e.g. cJSON number parsing) keep strict IEEE semantics.
+if(AEGISDB_NATIVE)
+  set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/storage/semantic_index.c
+    PROPERTIES COMPILE_OPTIONS "-ffast-math")
+endif()
 
 # Version baked into the binary. Override with -DAEGISDB_VERSION=x.y.z; otherwise
 # derive from `git describe` (stripping a leading v), or fall back to a dev marker.

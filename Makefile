@@ -13,6 +13,16 @@ CPPFLAGS:= -Iinclude -Ithird_party/cjson -D_GNU_SOURCE -DAEGIS_VERSION_STRING='"
 LDFLAGS :=
 LDLIBS  := -lpthread -lm
 
+# Opt-in host-CPU tuning (`make NATIVE=1`): -O3 + -march=native auto-vectorizes
+# the vector-search hot loops for a faster semantic search, but the resulting
+# binary uses instructions specific to this machine and is NOT portable to other
+# CPUs. Off by default so the standard build stays portable. (-O3 matters: at
+# the default -O2 the cosine reduction stays scalar. The canonical CMake build
+# is already Release/-O3.)
+ifeq ($(NATIVE),1)
+CFLAGS += -O3 -march=native
+endif
+
 BUILD   := build
 CORE_SRC := $(filter-out src/main.c,$(shell find src -name '*.c'))
 CORE_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(CORE_SRC))
@@ -38,6 +48,13 @@ $(BIN): $(CORE_OBJ) $(CJSON_OBJ) $(MAIN_OBJ)
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CSTD) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
+
+# Relaxed FP only for the vector-search translation unit, so the cosine
+# reduction can vectorize under NATIVE; scoped here so isnan/isinf elsewhere
+# (e.g. cJSON number parsing) keep strict IEEE semantics.
+ifeq ($(NATIVE),1)
+$(BUILD)/src/storage/semantic_index.o: CFLAGS += -ffast-math
+endif
 
 # Tests: each test file links against all core objects + unity.
 $(BUILD)/tests/%: tests/unit/%.c $(CORE_OBJ) $(CJSON_OBJ) $(UNITY_OBJ)
