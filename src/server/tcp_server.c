@@ -316,7 +316,7 @@ static int make_listener(int port) {
 int tcp_server_run(AegisDB *db) {
     signal(SIGPIPE, SIG_IGN);
 
-    int nthreads = db->config.worker_threads;
+    int nthreads = db->config.io_threads;
     if (nthreads < 1) nthreads = 1;
 
     /* Create all listeners up front so a bind failure is caught before any

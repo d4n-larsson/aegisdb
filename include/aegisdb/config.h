@@ -56,7 +56,7 @@ typedef struct {
     int durability;             /* AegisDurability; default INTERVAL */
     uint64_t fsync_interval_ms; /* INTERVAL flush cadence; default 1000 */
     unsigned checkpoint_sec;    /* index checkpoint cadence; 0 disables; def 60 */
-    int worker_threads;         /* also caps concurrent connections; default 2x CPUs (8-64) */
+    int io_threads;             /* poll() event-loop threads (dispatch parallelism, NOT a connection cap); default 2x CPUs (8-64) */
     int enabled_phase;          /* default 4: gate operations above this phase */
     int run_health_check;       /* 1 if --health-check: probe a server and exit */
     const char *hash_token;     /* --hash-token <tok>: print sha256$<hex> & exit */
@@ -85,9 +85,9 @@ int aegis_durability_from_string(const char *s, int *out);
  * 1 for SYNC, fsync_batch_size for BATCH, SIZE_MAX (never) for INTERVAL. */
 size_t config_effective_fsync_batch(const Config *cfg);
 
-/* Parse argv (supports --data-dir, --port, --phase, --workers,
- * --max-payload, --embedding-dim, --fsync-batch, --working-capacity,
- * --auth-token, --auth-token-file, --log-level, --help).
+/* Parse argv (supports --data-dir, --port, --phase, --io-threads (alias
+ * --workers), --max-payload, --embedding-dim, --fsync-batch,
+ * --working-capacity, --auth-token, --auth-token-file, --log-level, --help).
  * Returns 0 on success, -1 on error, 1 if --help was requested. */
 int config_parse_args(Config *cfg, int argc, char **argv);
 
