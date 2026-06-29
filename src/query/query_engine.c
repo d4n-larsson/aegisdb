@@ -82,6 +82,32 @@ static aegis_status_t load_record(AegisDB *db, uint64_t id, MemoryRecord *out) {
     return rv == 0 ? AEGIS_OK : AEGIS_ERR_INTERNAL;
 }
 
+/* Read + decode a record for a read-only operation, keeping the disk I/O off
+ * the index lock: resolve the id -> log offset under index_lock (read), pin the
+ * log against compaction with log_lock (read), drop index_lock, then read. So
+ * writers — which take index_lock for write but never log_lock — are not
+ * blocked by the read's I/O. Caller must hold neither lock. */
+static aegis_status_t load_record_ro(AegisDB *db, uint64_t id,
+                                     MemoryRecord *out) {
+    pthread_rwlock_rdlock(&db->index_lock);
+    const HashEntry *e = hash_index_get(db->hash, id);
+    if (!e) {
+        pthread_rwlock_unlock(&db->index_lock);
+        return AEGIS_ERR_NOT_FOUND;
+    }
+    uint64_t off = e->offset;
+    pthread_rwlock_rdlock(&db->log_lock);
+    pthread_rwlock_unlock(&db->index_lock);
+    uint8_t *buf = NULL;
+    size_t len = 0;
+    int rv = log_read(&db->log, off, &buf, &len);
+    pthread_rwlock_unlock(&db->log_lock);
+    if (rv != 0) return AEGIS_ERR_INTERNAL;
+    rv = record_decode(buf, len, out);
+    free(buf);
+    return rv == 0 ? AEGIS_OK : AEGIS_ERR_INTERNAL;
+}
+
 /* ----- core operations -------------------------------------------------- */
 
 aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
@@ -149,9 +175,7 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
 
 aegis_status_t qe_get(AegisDB *db, uint64_t id, const char *agent_filter,
                       MemoryRecord *out) {
-    pthread_rwlock_rdlock(&db->index_lock);
-    aegis_status_t st = load_record(db, id, out);
-    pthread_rwlock_unlock(&db->index_lock);
+    aegis_status_t st = load_record_ro(db, id, out);
     if (st != AEGIS_OK) return st;
     if (out->deleted) {
         record_free(out);
@@ -299,6 +323,13 @@ typedef struct {
     float score;
 } Cand;
 
+/* A candidate's log offset + similarity score, snapshotted under the index lock
+ * so the record body can be read off it. */
+typedef struct {
+    uint64_t off;
+    float score;
+} SearchSnap;
+
 static int cmp_score_desc(const void *a, const void *b) {
     float x = ((const Cand *)a)->score, y = ((const Cand *)b)->score;
     if (x < y) return 1;
@@ -359,18 +390,45 @@ aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
         }
     }
 
-    /* 2. load + post-filter */
-    Cand *cands = malloc((nids ? nids : 1) * sizeof(Cand));
-    if (!cands) {
+    /* 2. resolve each candidate id -> log offset while still under the index
+     * lock, snapshotting (offset, similarity) so the disk reads can run off it. */
+    SearchSnap *snap = malloc((nids ? nids : 1) * sizeof(SearchSnap));
+    if (!snap) {
         free(ids);
         free(scores);
         pthread_rwlock_unlock(&db->index_lock);
         return AEGIS_ERR_INTERNAL;
     }
-    size_t m = 0;
+    size_t sn = 0;
     for (size_t i = 0; i < nids; i++) {
+        const HashEntry *e = hash_index_get(db->hash, ids[i]);
+        if (!e) continue;
+        snap[sn].off = e->offset;
+        snap[sn].score = semantic ? scores[i] : 0.0f;
+        sn++;
+    }
+    pthread_rwlock_rdlock(&db->log_lock); /* pin the log before dropping index */
+    pthread_rwlock_unlock(&db->index_lock);
+    free(ids);
+    free(scores);
+
+    /* 3. load + decode + post-filter off the index lock; disk I/O holds only
+     * log_lock, so concurrent writers are not blocked by it. */
+    Cand *cands = malloc((sn ? sn : 1) * sizeof(Cand));
+    if (!cands) {
+        pthread_rwlock_unlock(&db->log_lock);
+        free(snap);
+        return AEGIS_ERR_INTERNAL;
+    }
+    size_t m = 0;
+    for (size_t i = 0; i < sn; i++) {
+        uint8_t *buf = NULL;
+        size_t len = 0;
+        if (log_read(&db->log, snap[i].off, &buf, &len) != 0) continue;
         MemoryRecord r;
-        if (load_record(db, ids[i], &r) != AEGIS_OK) continue;
+        int dec = record_decode(buf, len, &r);
+        free(buf);
+        if (dec != 0) continue;
         if (!passes_filters(&r, p)) {
             record_free(&r);
             continue;
@@ -378,7 +436,7 @@ aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
         cands[m].rec = r;
         if (semantic) {
             /* T038: re-rank by importance * confidence * similarity */
-            float sim = scores[i];
+            float sim = snap[i].score;
             float w = r.importance * r.confidence;
             cands[m].score = (w > 0 ? w : 1.0f) * sim;
         } else {
@@ -386,9 +444,8 @@ aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
         }
         m++;
     }
-    pthread_rwlock_unlock(&db->index_lock);
-    free(ids);
-    free(scores);
+    pthread_rwlock_unlock(&db->log_lock);
+    free(snap);
 
     /* 3. order + truncate */
     if (semantic)
@@ -489,10 +546,14 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
     Cand *acc = NULL;
     size_t acc_n = 0, acc_cap = 0;
 
-    pthread_rwlock_rdlock(&db->index_lock);
     for (int level = 0; level <= depth && front_n > 0; level++) {
-        uint64_t *next = NULL;
-        size_t next_n = 0, next_cap = 0;
+        /* Resolve this level's not-yet-seen ids to log offsets under the index
+         * lock, then read+decode them off it (disk I/O under log_lock only). */
+        uint64_t *offs = malloc(front_n * sizeof(uint64_t));
+        if (!offs) break; /* frontier freed after the loop; return what we have */
+        size_t off_n = 0;
+
+        pthread_rwlock_rdlock(&db->index_lock);
         for (size_t i = 0; i < front_n; i++) {
             uint64_t id = frontier[i];
             int dup = 0;
@@ -504,13 +565,28 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
                 seen = realloc(seen, seen_cap * sizeof(uint64_t));
             }
             seen[seen_n++] = id;
+            const HashEntry *e = hash_index_get(db->hash, id);
+            if (!e) continue;
+            offs[off_n++] = e->offset;
+        }
+        pthread_rwlock_rdlock(&db->log_lock);
+        pthread_rwlock_unlock(&db->index_lock);
+        free(frontier);
 
+        uint64_t *next = NULL;
+        size_t next_n = 0, next_cap = 0;
+        for (size_t i = 0; i < off_n; i++) {
+            uint8_t *buf = NULL;
+            size_t len = 0;
+            if (log_read(&db->log, offs[i], &buf, &len) != 0) continue;
             MemoryRecord r;
-            if (load_record(db, id, &r) != AEGIS_OK) continue;
+            int dec = record_decode(buf, len, &r);
+            free(buf);
+            if (dec != 0) continue;
             if (r.deleted ||
                 (agent_filter && (!r.agent_id ||
                                   strcmp(r.agent_id, agent_filter) != 0))) {
-                /* still traverse edges of filtered node? skip it entirely */
+                /* a filtered node is skipped entirely, edges and all */
                 record_free(&r);
                 continue;
             }
@@ -531,12 +607,12 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
                 next[next_n++] = r.relationships[k].to_id;
             }
         }
-        free(frontier);
+        pthread_rwlock_unlock(&db->log_lock);
+        free(offs);
         frontier = next;
         front_n = next_n;
         (void)next_cap;
     }
-    pthread_rwlock_unlock(&db->index_lock);
     free(frontier);
     free(seen);
 
