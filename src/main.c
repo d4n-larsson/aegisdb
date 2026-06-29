@@ -1,4 +1,5 @@
 /* AegisDB entry point: config -> recovery -> server (T019, T025). */
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,7 +16,9 @@
 
 static void on_signal(int sig) {
     (void)sig;
+    int saved = errno; /* a handler must not clobber the interrupted code's errno */
     tcp_server_request_stop();
+    errno = saved;
 }
 
 int main(int argc, char **argv) {
