@@ -108,6 +108,14 @@ static aegis_status_t load_record_ro(AegisDB *db, uint64_t id,
     return rv == 0 ? AEGIS_OK : AEGIS_ERR_INTERNAL;
 }
 
+/* Cross-tenant guard: when ns is set, a record whose agent_id the caller's
+ * namespace does not own (different or absent) must be indistinguishable from
+ * missing. agent_id is immutable per id, so checking it on the already-loaded
+ * record is equivalent to the old separate ownership pre-read. */
+static int ns_denies(const char *ns, const MemoryRecord *r) {
+    return ns && (!r->agent_id || strcmp(r->agent_id, ns) != 0);
+}
+
 /* ----- core operations -------------------------------------------------- */
 
 aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
@@ -190,7 +198,7 @@ aegis_status_t qe_get(AegisDB *db, uint64_t id, const char *agent_filter,
 }
 
 aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
-                         MemoryRecord *out) {
+                         const char *ns, MemoryRecord *out) {
     aegis_status_t st = require_phase(db, 2);
     if (st != AEGIS_OK) return st;
 
@@ -201,7 +209,9 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
         pthread_rwlock_unlock(&db->index_lock);
         return st;
     }
-    if (cur.deleted) {
+    /* A record outside the caller's namespace reads back as missing, checked
+     * before the type check so it cannot leak via an IMMUTABLE response. */
+    if (cur.deleted || ns_denies(ns, &cur)) {
         record_free(&cur);
         pthread_rwlock_unlock(&db->index_lock);
         return AEGIS_ERR_NOT_FOUND;
@@ -256,7 +266,7 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
     return AEGIS_OK;
 }
 
-aegis_status_t qe_delete(AegisDB *db, uint64_t id) {
+aegis_status_t qe_delete(AegisDB *db, uint64_t id, const char *ns) {
     aegis_status_t st = require_phase(db, 1);
     if (st != AEGIS_OK) return st;
 
@@ -267,7 +277,7 @@ aegis_status_t qe_delete(AegisDB *db, uint64_t id) {
         pthread_rwlock_unlock(&db->index_lock);
         return st;
     }
-    if (cur.deleted) {
+    if (cur.deleted || ns_denies(ns, &cur)) {
         record_free(&cur);
         pthread_rwlock_unlock(&db->index_lock);
         return AEGIS_ERR_NOT_FOUND;
@@ -499,22 +509,35 @@ aegis_status_t qe_promote(AegisDB *db, const char *session_id,
 }
 
 aegis_status_t qe_relate(AegisDB *db, uint64_t from_id, uint64_t to_id,
-                         const char *kind) {
+                         const char *kind, const char *ns) {
     aegis_status_t st = require_phase(db, 4);
     if (st != AEGIS_OK) return st;
 
     pthread_rwlock_wrlock(&db->index_lock);
-    /* target must exist */
-    if (!hash_index_get(db->hash, to_id)) {
-        pthread_rwlock_unlock(&db->index_lock);
-        return AEGIS_ERR_NOT_FOUND;
-    }
     MemoryRecord from;
     st = load_record(db, from_id, &from);
-    if (st != AEGIS_OK || from.deleted) {
+    if (st != AEGIS_OK || from.deleted || ns_denies(ns, &from)) {
         if (st == AEGIS_OK) record_free(&from);
         pthread_rwlock_unlock(&db->index_lock);
         return st == AEGIS_OK ? AEGIS_ERR_NOT_FOUND : st;
+    }
+    /* The target must exist; a namespaced caller must additionally own it, so it
+     * is loaded (not just existence-checked) to verify its namespace. Both cases
+     * collapse to NOT_FOUND so neither leaks across tenants. */
+    if (ns) {
+        MemoryRecord to_rec;
+        aegis_status_t tst = load_record(db, to_id, &to_rec);
+        if (tst != AEGIS_OK || to_rec.deleted || ns_denies(ns, &to_rec)) {
+            if (tst == AEGIS_OK) record_free(&to_rec);
+            record_free(&from);
+            pthread_rwlock_unlock(&db->index_lock);
+            return AEGIS_ERR_NOT_FOUND;
+        }
+        record_free(&to_rec);
+    } else if (!hash_index_get(db->hash, to_id)) {
+        record_free(&from);
+        pthread_rwlock_unlock(&db->index_lock);
+        return AEGIS_ERR_NOT_FOUND;
     }
     if (record_add_relationship(&from, from_id, to_id, kind) != 0) {
         record_free(&from);
@@ -749,17 +772,6 @@ static cJSON *handle_stats(AegisDB *db) {
     return o;
 }
 
-/* When `ns` is set, confirm `id` is a live record in that namespace; otherwise
- * AEGIS_ERR_NOT_FOUND. agent_id is immutable per id, so this pre-check stays
- * valid through a subsequent write (no existence leak across tenants). */
-static aegis_status_t ns_owns(AegisDB *db, uint64_t id, const char *ns) {
-    if (!ns) return AEGIS_OK;
-    MemoryRecord tmp;
-    aegis_status_t st = qe_get(db, id, ns, &tmp);
-    if (st == AEGIS_OK) record_free(&tmp);
-    return st;
-}
-
 static cJSON *handle_insert(AegisDB *db, const cJSON *req, const char *ns) {
     MemoryRecord in;
     aegis_status_t err;
@@ -803,8 +815,6 @@ static cJSON *handle_get(AegisDB *db, const cJSON *req, const char *ns) {
 static cJSON *handle_update(AegisDB *db, const cJSON *req, const char *ns) {
     uint64_t id;
     if (jr_u64(req, "id", &id) != 0) return json_error_status(AEGIS_ERR_INVALID_REQUEST);
-    aegis_status_t own = ns_owns(db, id, ns);
-    if (own != AEGIS_OK) return json_error_status(own);
     UpdatePatch patch;
     memset(&patch, 0, sizeof(patch));
     const char *data = jr_str(req, "data", NULL);
@@ -832,7 +842,7 @@ static cJSON *handle_update(AegisDB *db, const cJSON *req, const char *ns) {
         patch.tag_count = tn;
     }
     MemoryRecord out;
-    aegis_status_t st = qe_update(db, id, &patch, &out);
+    aegis_status_t st = qe_update(db, id, &patch, ns, &out);
     free(tags);
     if (st != AEGIS_OK) return json_error_status(st);
     cJSON *r = resp_record(&out);
@@ -844,9 +854,7 @@ static cJSON *handle_delete(AegisDB *db, const cJSON *req, const char *ns) {
     uint64_t id;
     if (jr_u64(req, "id", &id) != 0)
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
-    aegis_status_t own = ns_owns(db, id, ns);
-    if (own != AEGIS_OK) return json_error_status(own);
-    aegis_status_t st = qe_delete(db, id);
+    aegis_status_t st = qe_delete(db, id, ns);
     if (st != AEGIS_OK) return json_error_status(st);
     cJSON *o = json_ok();
     cJSON_AddNumberToObject(o, "id", (double)id);
@@ -925,12 +933,9 @@ static cJSON *handle_relate(AegisDB *db, const cJSON *req, const char *ns) {
     uint64_t from, to;
     if (jr_u64(req, "from_id", &from) != 0 || jr_u64(req, "to_id", &to) != 0)
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
-    /* both endpoints must live in the caller's namespace */
-    aegis_status_t own = ns_owns(db, from, ns);
-    if (own == AEGIS_OK) own = ns_owns(db, to, ns);
-    if (own != AEGIS_OK) return json_error_status(own);
     const char *kind = jr_str(req, "kind", NULL);
-    aegis_status_t st = qe_relate(db, from, to, kind);
+    /* qe_relate enforces that both endpoints live in the caller's namespace */
+    aegis_status_t st = qe_relate(db, from, to, kind, ns);
     if (st != AEGIS_OK) return json_error_status(st);
     cJSON *o = json_ok();
     cJSON *rel = cJSON_AddObjectToObject(o, "relationship");

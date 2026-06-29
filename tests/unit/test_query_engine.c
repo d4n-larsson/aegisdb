@@ -89,7 +89,7 @@ static void test_episodic_update_rejected(void) {
     patch.data_len = 7;
     MemoryRecord upd;
     TEST_ASSERT_EQUAL_INT(AEGIS_ERR_IMMUTABLE,
-                          qe_update(&g_db, id, &patch, &upd));
+                          qe_update(&g_db, id, &patch, NULL, &upd));
 }
 
 static void test_semantic_update(void) {
@@ -107,7 +107,7 @@ static void test_semantic_update(void) {
     patch.has_confidence = 1;
     patch.confidence = 0.9f;
     MemoryRecord upd;
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_update(&g_db, id, &patch, &upd));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_update(&g_db, id, &patch, NULL, &upd));
     TEST_ASSERT_EQUAL_MEMORY("sky is azure", upd.data, upd.data_len);
     TEST_ASSERT_EQUAL_FLOAT(0.9f, upd.confidence);
     TEST_ASSERT_GREATER_OR_EQUAL_UINT64(upd.created, upd.updated);
@@ -218,11 +218,11 @@ static void test_relate_and_traverse(void) {
     record_free(&ob);
 
     TEST_ASSERT_EQUAL_INT(AEGIS_OK,
-                          qe_relate(&g_db, from, to, "derived_from"));
+                          qe_relate(&g_db, from, to, "derived_from", NULL));
 
     /* Relating from a nonexistent id must fail with NOT_FOUND. */
     TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND,
-                          qe_relate(&g_db, 999999, to, "x"));
+                          qe_relate(&g_db, 999999, to, "x", NULL));
 
     MemoryRecord *recs = NULL;
     size_t n = 0;
@@ -255,6 +255,56 @@ static void test_agent_namespace_filter(void) {
                           qe_get(&g_db, id, "agent-B", &got));
 }
 
+/* Writes scoped to a namespace must treat another tenant's record as missing.
+ * Critically, an update from the wrong namespace returns NOT_FOUND, not the
+ * type-specific IMMUTABLE, so existence/type cannot leak across tenants. */
+static void test_ns_scoped_writes(void) {
+    MemoryRecord sem = make_input(MEM_SEMANTIC, "A's fact");
+    sem.agent_id = strdup("agent-A");
+    MemoryRecord os;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &sem, NULL, 0, &os));
+    uint64_t sid = os.id;
+    free(sem.agent_id);
+    record_free(&os);
+
+    UpdatePatch patch = {0};
+    patch.has_data = 1;
+    patch.data = "edited";
+    patch.data_len = 6;
+    MemoryRecord upd;
+
+    /* wrong tenant: indistinguishable from missing */
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND,
+                          qe_update(&g_db, sid, &patch, "agent-B", &upd));
+    /* owner: succeeds */
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_update(&g_db, sid, &patch, "agent-A", &upd));
+    record_free(&upd);
+
+    /* An episodic record from the wrong tenant is NOT_FOUND, never IMMUTABLE. */
+    MemoryRecord ep = make_input(MEM_EPISODIC, "A's event");
+    ep.agent_id = strdup("agent-A");
+    MemoryRecord oe;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &ep, NULL, 0, &oe));
+    uint64_t eid = oe.id;
+    free(ep.agent_id);
+    record_free(&oe);
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND,
+                          qe_update(&g_db, eid, &patch, "agent-B", &upd));
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_IMMUTABLE,
+                          qe_update(&g_db, eid, &patch, "agent-A", &upd));
+
+    /* relate: both endpoints must be owned */
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND,
+                          qe_relate(&g_db, sid, eid, "x", "agent-B"));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_relate(&g_db, sid, eid, "x", "agent-A"));
+
+    /* delete: wrong tenant is NOT_FOUND, owner succeeds */
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_delete(&g_db, sid, "agent-B"));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_delete(&g_db, sid, "agent-A"));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_insert_get_episodic);
@@ -266,5 +316,6 @@ int main(void) {
     RUN_TEST(test_working_memory_promote);
     RUN_TEST(test_relate_and_traverse);
     RUN_TEST(test_agent_namespace_filter);
+    RUN_TEST(test_ns_scoped_writes);
     return UNITY_END();
 }

@@ -39,13 +39,16 @@ typedef struct {
     const char *const *tags;
     size_t tag_count;
 } UpdatePatch;
+/* Update a semantic record. When `ns` is non-NULL the record must belong to that
+ * namespace, or it reads back as NOT_FOUND (no cross-tenant leak). */
 aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
-                         MemoryRecord *out);
+                         const char *ns, MemoryRecord *out);
 
 /* Soft-delete a persisted record by id (writes a tombstone version to the log
  * and drops it from the secondary indexes). Returns NOT_FOUND if the id is
- * unknown or already deleted. Works for both episodic and semantic records. */
-aegis_status_t qe_delete(AegisDB *db, uint64_t id);
+ * unknown, already deleted, or (when `ns` is non-NULL) outside that namespace.
+ * Works for both episodic and semantic records. */
+aegis_status_t qe_delete(AegisDB *db, uint64_t id, const char *ns);
 
 typedef struct {
     int has_time;
@@ -72,8 +75,10 @@ aegis_status_t qe_promote(AegisDB *db, const char *session_id,
                           uint64_t working_id, MemoryType to_type,
                           const char *ns, MemoryRecord *out);
 
+/* Add a directed relationship from_id -> to_id. When `ns` is non-NULL both
+ * endpoints must belong to that namespace, or NOT_FOUND (no cross-tenant leak). */
 aegis_status_t qe_relate(AegisDB *db, uint64_t from_id, uint64_t to_id,
-                         const char *kind);
+                         const char *kind, const char *ns);
 
 /* Breadth-first relationship traversal from start_id up to `depth` hops. */
 aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
