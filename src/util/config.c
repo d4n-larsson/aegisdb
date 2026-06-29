@@ -10,12 +10,11 @@
 
 #include "aegisdb/logging.h"
 
-/* Default worker-thread count. Each connection occupies one worker for its
- * whole lifetime (see tcp_server), so this also bounds concurrent clients.
- * Scale with the machine but keep a floor for headroom with mostly-idle
- * persistent connections, and a cap so huge boxes don't spawn a thread storm.
- * Operators with many concurrent clients should raise --workers. */
-static int default_worker_threads(void) {
+/* Default count of poll() event-loop (I/O) threads. Connections are sharded
+ * across these threads and a connection's request is dispatched inline, so this
+ * sets dispatch parallelism — it does NOT cap concurrent connections. Scale
+ * with the machine, with a floor and a cap so huge boxes don't over-spawn. */
+static int default_io_threads(void) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     long want = (n > 0) ? n * 2 : 8;
     if (want < 8) want = 8;
@@ -35,7 +34,7 @@ void config_defaults(Config *cfg) {
     cfg->durability = AEGIS_DURABILITY_INTERVAL;
     cfg->fsync_interval_ms = 1000;
     cfg->checkpoint_sec = 60;
-    cfg->worker_threads = default_worker_threads();
+    cfg->io_threads = default_io_threads();
     cfg->enabled_phase = 4; /* all features enabled by default */
     cfg->log_level = AEGIS_LOG_INFO;
 
@@ -214,9 +213,9 @@ static void usage(const char *prog) {
             "  --data-dir <path>        persistence directory (default ./data)\n"
             "  --port <n>               TCP listen port (default 9470)\n"
             "  --phase <1-4>            highest enabled feature phase (default 4)\n"
-            "  --workers <n>            worker threads; also the max concurrent\n"
-            "                           connections (default: 2x CPUs, 8-64). Raise\n"
-            "                           it if you have many concurrent clients.\n"
+            "  --io-threads <n>         poll() event-loop threads for dispatch\n"
+            "                           parallelism (default: 2x CPUs, 8-64). Does\n"
+            "                           not cap concurrent connections. Alias: --workers\n"
             "  --max-payload <bytes>    max data size (default 1048576)\n"
             "  --embedding-dim <n>      expected vector length (default 384)\n"
             "  --durability <mode>      sync|batch|interval (default interval)\n"
@@ -283,10 +282,10 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
                 fprintf(stderr, "%s: invalid phase '%s' (1-4)\n", prog, val);
                 return -1;
             }
-        } else if (strcmp(a, "--workers") == 0) {
-            NEXT("--workers");
-            if (parse_int(val, &cfg->worker_threads) || cfg->worker_threads < 1) {
-                fprintf(stderr, "%s: invalid workers '%s'\n", prog, val);
+        } else if (strcmp(a, "--io-threads") == 0 || strcmp(a, "--workers") == 0) {
+            NEXT(a); /* --workers kept as a back-compat alias for --io-threads */
+            if (parse_int(val, &cfg->io_threads) || cfg->io_threads < 1) {
+                fprintf(stderr, "%s: invalid %s '%s'\n", prog, a, val);
                 return -1;
             }
         } else if (strcmp(a, "--max-payload") == 0) {

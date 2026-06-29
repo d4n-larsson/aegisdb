@@ -177,11 +177,19 @@ deployments never set it. See the tier table in
 
 ## Concurrency
 
-- A fixed **worker thread pool** (`--workers`, default 4) handles connections;
-  each connection is submitted to the pool (`src/server/thread_pool.c`).
-- A single **`pthread_rwlock_t`** (`index_lock`) guards the in-memory indexes and
-  log reads: reads take the shared lock, writes take it exclusively. This is a
-  simple, correct model rather than a lock-free or sharded design.
+- **Sharded `poll()` event loops** (`--io-threads`, default 2× CPUs, 8–64)
+  serve connections (`src/server/tcp_server.c`). Each I/O thread owns its own
+  `SO_REUSEPORT` listener and connection set and does non-blocking I/O; a
+  connection is owned by one thread and its request is dispatched inline. The
+  number of concurrent connections is therefore **not** bounded by the thread
+  count — an idle connection costs an fd + a small buffer, not a thread. There
+  is at most one in-flight request per connection (the next request is not read
+  until the current response drains), which preserves ordering and provides
+  backpressure.
+- **`index_lock`** (`pthread_rwlock_t`) guards the in-memory indexes. Read
+  operations resolve a record's log offset under it, then release it and read
+  the log holding only **`log_lock`** — so a read's disk I/O does not block
+  writers. `log_lock` is taken for write only by compaction's log swap.
 - `fsync` follows the configured `--durability` mode as described above; in
   `interval` mode the maintenance thread drives the periodic flush.
 

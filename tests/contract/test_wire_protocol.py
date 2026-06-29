@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 FAILURES = []
@@ -29,18 +30,22 @@ def check(cond, msg):
 
 
 class Server:
-    def __init__(self, binary, port, phase=4, auth_token=None, token_lines=None):
+    def __init__(self, binary, port, phase=4, auth_token=None, token_lines=None,
+                 io_threads=None):
         self.binary = binary
         self.port = port
         self.phase = phase
         self.auth_token = auth_token
         self.token_lines = token_lines  # lines for --auth-token-file
+        self.io_threads = io_threads
         self.proc = None
         self.datadir = tempfile.mkdtemp(prefix="aegis_contract_")
 
     def __enter__(self):
         args = [self.binary, "--data-dir", self.datadir, "--port",
                 str(self.port), "--phase", str(self.phase)]
+        if self.io_threads is not None:
+            args += ["--io-threads", str(self.io_threads)]
         if self.auth_token:
             args += ["--auth-token", self.auth_token]
         if self.token_lines:
@@ -477,6 +482,64 @@ def test_phase_gating(binary, port):
               "search gated -> NOT_READY at phase 1")
 
 
+def test_concurrency(binary, port):
+    print("[concurrency: connections >> io-threads]")
+    N = 24
+    # Only 2 io-threads, but N persistent connections must all be served
+    # concurrently. Under the old thread-per-connection model this capped at 2.
+    with Server(binary, port, phase=4, io_threads=2) as srv:
+        results = [False] * N
+
+        def worker(idx):
+            try:
+                s = socket.create_connection(("127.0.0.1", port), timeout=5)
+                s.settimeout(5)
+                f = s.makefile("rwb")
+                for j in range(5):  # several round-trips on a persistent conn
+                    req = {"operation": "insert", "type": "episodic",
+                           "tags": ["c"], "data": f"w{idx}-{j}"}
+                    f.write((json.dumps(req) + "\n").encode())
+                    f.flush()
+                    if not json.loads(f.readline().decode()).get("ok"):
+                        return
+                f.write((json.dumps({"operation": "search", "tags": ["c"],
+                                     "top_k": 3}) + "\n").encode())
+                f.flush()
+                if not json.loads(f.readline().decode()).get("ok"):
+                    return
+                s.close()
+                results[idx] = True
+            except OSError:
+                results[idx] = False
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(N)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=20)
+        served = sum(results)
+        check(served == N,
+              f"{served}/{N} persistent connections served concurrently by 2 io-threads")
+
+        # Many idle connections must not starve a freshly active one.
+        idles = []
+        try:
+            for _ in range(30):
+                idles.append(socket.create_connection(("127.0.0.1", port), timeout=2))
+            a = socket.create_connection(("127.0.0.1", port), timeout=2)
+            a.settimeout(3)
+            af = a.makefile("rwb")
+            af.write(b'{"operation":"ping"}\n')
+            af.flush()
+            r = json.loads(af.readline().decode())
+            check(r.get("ok") is True,
+                  "active connection served while 30 idle connections are open")
+            a.close()
+        finally:
+            for s in idles:
+                s.close()
+
+
 def main():
     binary = sys.argv[1] if len(sys.argv) > 1 else "build/aegisdb"
     if not os.path.exists(binary):
@@ -492,6 +555,7 @@ def main():
     test_hashed_tokens(binary, 19476)
     test_cli(binary, 19477)
     test_search_limits(binary, 19478)
+    test_concurrency(binary, 19479)
 
     print()
     if FAILURES:
