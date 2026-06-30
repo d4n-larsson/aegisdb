@@ -74,8 +74,12 @@ int db_checkpoint(AegisDB *db) {
     pthread_mutex_unlock(&db->id_lock);
     uint64_t covered = (uint64_t)db->log.size;
     int rv = hash_index_save(db->hash, db->path_index, covered, nid);
+    /* Persist the HNSW graph at the same covered offset so recovery can load it
+     * and replay only the tail. No-op (drops any stale file) below the ANN
+     * threshold, where search is the exact scan. */
+    int rv2 = semantic_index_save(db->sem, db->path_sem, covered);
     pthread_rwlock_unlock(&db->index_lock);
-    return rv;
+    return (rv == 0 && rv2 == 0) ? 0 : -1;
 }
 
 /* Read the persisted next_id from metadata.db, or 0 if absent/unreadable. It is
@@ -110,6 +114,8 @@ int db_open(AegisDB *db, const Config *cfg) {
              cfg->data_dir);
     snprintf(db->path_meta, sizeof(db->path_meta), "%s/metadata.db",
              cfg->data_dir);
+    snprintf(db->path_sem, sizeof(db->path_sem), "%s/memory.sem",
+             cfg->data_dir);
 
     if (pthread_mutex_init(&db->id_lock, NULL) != 0) return -1;
     if (pthread_rwlock_init(&db->index_lock, NULL) != 0) {
@@ -130,8 +136,8 @@ int db_open(AegisDB *db, const Config *cfg) {
     db->hash = hash_index_create();
     db->time = time_index_create();
     db->tags = tag_index_create();
-    db->sem = semantic_index_create(cfg->embedding_dimensions, 0,
-                                    cfg->ann_ef_search);
+    db->sem = semantic_index_create(cfg->embedding_dimensions,
+                                    cfg->ann_threshold, cfg->ann_ef_search);
     db->working =
         working_store_create(cfg->working_capacity, cfg->default_ttl_ms);
     if (!db->hash || !db->time || !db->tags || !db->sem || !db->working) {

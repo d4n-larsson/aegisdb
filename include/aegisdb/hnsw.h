@@ -49,6 +49,13 @@ int hnsw_search(const Hnsw *h, const float *query, size_t dim, size_t top_k,
 /* Number of live (non-tombstoned) vectors. */
 size_t hnsw_count(const Hnsw *h);
 
+/* Invoke `cb(id, vec, ctx)` for each live vector (vec is the stored copy, length
+ * = the index dim). Stops early and returns cb's value if it returns nonzero;
+ * otherwise returns 0. Used to repopulate a caller-side store after a load. */
+int hnsw_foreach_live(const Hnsw *h,
+                      int (*cb)(uint64_t id, const float *vec, void *ctx),
+                      void *ctx);
+
 /* Persist the graph to `path` (atomic .tmp + rename, CRC-protected), tagging it
  * with the log offset it reflects so recovery can replay only the tail. Returns
  * 0/-1. */

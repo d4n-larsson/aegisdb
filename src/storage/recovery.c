@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "aegisdb/hash_index.h"
 #include "aegisdb/logging.h"
 #include "aegisdb/record.h"
 
@@ -11,6 +12,11 @@ typedef struct {
     AegisDB *db;
     uint64_t max_id;
 } ScanCtx;
+
+/* reconcile predicate: keep a semantic id only while it's a live hash entry */
+static int recover_keep(uint64_t id, void *ctx) {
+    return hash_index_get((const HashIndex *)ctx, id) != NULL;
+}
 
 /* Pass 1: build the hash index (latest frame per id wins) and track max id. */
 static int scan_cb(uint64_t offset, const uint8_t *payload, size_t len,
@@ -85,7 +91,31 @@ long recovery_run(AegisDB *db) {
     LOG_DEBUG("recovery: hash index rebuilt, %zu entries, next id %llu",
               db->hash->count, (unsigned long long)db->next_id);
 
-    /* Pass 2: populate secondary indexes from the surviving (latest) records. */
+    /* Try the semantic (HNSW) checkpoint: it carries the live vectors and the
+     * graph as of its covered offset, so we skip the O(n log n) graph rebuild
+     * and only replay the semantic tail. A missing/corrupt/stale checkpoint
+     * leaves the index empty and falls back to a full rebuild in pass 2. */
+    uint64_t sem_covered = 0;
+    int sem_loaded = 0;
+    if (semantic_index_load(db->sem, db->path_sem, &sem_covered) == 0) {
+        if (sem_covered <= (uint64_t)db->log.size) {
+            sem_loaded = 1;
+            LOG_DEBUG("recovery: loaded semantic checkpoint (%zu vectors, covers "
+                      "%llu bytes)",
+                      semantic_index_count(db->sem),
+                      (unsigned long long)sem_covered);
+        } else {
+            LOG_WARN("recovery: semantic checkpoint covers %llu bytes but log "
+                     "holds only %llu; ignoring it",
+                     (unsigned long long)sem_covered,
+                     (unsigned long long)db->log.size);
+            semantic_index_clear(db->sem);
+        }
+    }
+
+    /* Pass 2: populate secondary indexes from the surviving (latest) records.
+     * time/tag are always rebuilt; semantic is rebuilt fully unless a checkpoint
+     * loaded, in which case only the tail (offset >= sem_covered) is applied. */
     long live = 0;
     HashIndex *h = db->hash;
     for (size_t i = 0; i < h->cap; i++) {
@@ -100,13 +130,19 @@ long recovery_run(AegisDB *db) {
             for (size_t k = 0; k < r.tag_count; k++)
                 tag_index_add(db->tags, r.tags[k], r.id);
             if (r.embedding_dim == db->config.embedding_dimensions &&
-                r.embedding)
+                r.embedding && (!sem_loaded || e->offset >= sem_covered))
                 semantic_index_add(db->sem, r.id, r.embedding, r.embedding_dim);
             record_free(&r);
             live++;
         }
         free(buf);
     }
+
+    /* The loaded graph reflects the checkpoint's covered prefix and cannot see
+     * records deleted in the tail (pass 2 skips deleted hash entries), so evict
+     * any semantic id the final hash no longer reports live. */
+    if (sem_loaded) semantic_index_reconcile(db->sem, recover_keep, db->hash);
+
     LOG_DEBUG("recovery: secondary indexes populated from %ld live record(s)",
               live);
     return live;

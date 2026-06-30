@@ -35,6 +35,60 @@ static void open_db(AegisDB *db) {
     TEST_ASSERT_EQUAL_INT(0, db_open(db, &cfg));
 }
 
+/* Open with a small embedding dim and a low ANN threshold so a handful of
+ * vectors crosses it and exercises the HNSW build/persist path. */
+static void open_db_ann(AegisDB *db, size_t threshold) {
+    Config cfg;
+    config_defaults(&cfg);
+    strncpy(cfg.data_dir, g_dir, sizeof(cfg.data_dir) - 1);
+    cfg.checkpoint_sec = 0;
+    cfg.embedding_dimensions = 4;
+    cfg.ann_threshold = threshold;
+    cfg.ann_ef_search = 64;
+    TEST_ASSERT_EQUAL_INT(0, db_open(db, &cfg));
+}
+
+/* id i (1-based) -> vector (1, i*0.25, 0, 0): distinct, monotonic directions. */
+static void vec_for(unsigned i, float out[4]) {
+    out[0] = 1.0f;
+    out[1] = (float)i * 0.25f;
+    out[2] = out[3] = 0.0f;
+}
+
+static uint64_t insert_vec(AegisDB *db, const float *emb) {
+    MemoryRecord in;
+    record_init(&in);
+    in.type = MEM_EPISODIC;
+    in.data = (void *)"v";
+    in.data_len = 1;
+    in.embedding = (float *)emb;
+    in.embedding_dim = 4;
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(db, &in, NULL, 0, &out));
+    uint64_t id = out.id;
+    in.data = NULL; /* borrowed */
+    in.data_len = 0;
+    in.embedding = NULL; /* borrowed */
+    in.embedding_dim = 0;
+    record_free(&in);
+    record_free(&out);
+    return id;
+}
+
+static uint64_t search_top(AegisDB *db, const float *emb) {
+    SearchParams p = {0};
+    p.embedding = (float *)emb;
+    p.embedding_dim = 4;
+    p.top_k = 1;
+    MemoryRecord *recs = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(db, &p, &recs, &n));
+    uint64_t id = n ? recs[0].id : 0;
+    for (size_t i = 0; i < n; i++) record_free(&recs[i]);
+    free(recs);
+    return id;
+}
+
 static uint64_t insert_ep(AegisDB *db, const char *data) {
     MemoryRecord in;
     record_init(&in);
@@ -180,11 +234,107 @@ static void test_recovery_next_id_does_not_regress(void) {
     db_close(&db2);
 }
 
+/* A clean close persists the HNSW graph; recovery loads it and the dense array
+ * it rebuilds answers semantic search correctly. */
+static void test_recovery_semantic_checkpoint(void) {
+    const unsigned N = 20;
+    float v[21][4];
+    uint64_t ids[21];
+    AegisDB db1;
+    open_db_ann(&db1, 8); /* HNSW once >8 vectors */
+    for (unsigned i = 1; i <= N; i++) {
+        vec_for(i, v[i]);
+        ids[i] = insert_vec(&db1, v[i]);
+    }
+    db_close(&db1); /* writes memory.sem (graph exists) */
+
+    char sem[320];
+    snprintf(sem, sizeof(sem), "%s/memory.sem", g_dir);
+    TEST_ASSERT_EQUAL_INT(0, access(sem, F_OK)); /* checkpoint was written */
+
+    AegisDB db2;
+    open_db_ann(&db2, 8); /* recovery loads the graph + rebuilds the dense array */
+    TEST_ASSERT_EQUAL_UINT64(ids[5], search_top(&db2, v[5]));
+    TEST_ASSERT_EQUAL_UINT64(ids[N], search_top(&db2, v[N]));
+    db_close(&db2);
+}
+
+/* Vectors written after the checkpoint are replayed from the log tail onto the
+ * loaded graph. */
+static void test_recovery_semantic_tail(void) {
+    float v[17][4];
+    uint64_t ids[17];
+    AegisDB db1;
+    open_db_ann(&db1, 8);
+    for (unsigned i = 1; i <= 12; i++) { vec_for(i, v[i]); ids[i] = insert_vec(&db1, v[i]); }
+    TEST_ASSERT_EQUAL_INT(0, db_checkpoint(&db1)); /* covers 1..12 */
+    for (unsigned i = 13; i <= 16; i++) { vec_for(i, v[i]); ids[i] = insert_vec(&db1, v[i]); }
+    log_fsync(&db1.log);
+
+    AegisDB db2;
+    open_db_ann(&db2, 8); /* load checkpoint + replay tail 13..16 */
+    TEST_ASSERT_EQUAL_UINT64(ids[15], search_top(&db2, v[15])); /* a tail vector */
+    TEST_ASSERT_EQUAL_UINT64(ids[3], search_top(&db2, v[3]));   /* a checkpointed one */
+    db_close(&db2);
+    db_close(&db1);
+}
+
+/* An id deleted in the tail is in the loaded graph but must be reconciled out:
+ * pass 2 skips deleted records, so recovery drops ids the hash no longer holds. */
+static void test_recovery_semantic_tail_delete(void) {
+    float v[13][4];
+    uint64_t ids[13];
+    AegisDB db1;
+    open_db_ann(&db1, 8);
+    for (unsigned i = 1; i <= 12; i++) { vec_for(i, v[i]); ids[i] = insert_vec(&db1, v[i]); }
+    TEST_ASSERT_EQUAL_INT(0, db_checkpoint(&db1)); /* graph includes id 5 */
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_delete(&db1, ids[5], NULL)); /* tail delete */
+    log_fsync(&db1.log);
+
+    AegisDB db2;
+    open_db_ann(&db2, 8);
+    MemoryRecord r;
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_get(&db2, ids[5], NULL, &r));
+    TEST_ASSERT_NOT_EQUAL(ids[5], search_top(&db2, v[5])); /* gone from results */
+    db_close(&db2);
+    db_close(&db1);
+}
+
+/* A corrupt semantic checkpoint is rejected; recovery rebuilds the graph from
+ * the log and search still works. */
+static void test_recovery_semantic_corrupt_fallback(void) {
+    float v[13][4];
+    uint64_t ids[13];
+    AegisDB db1;
+    open_db_ann(&db1, 8);
+    for (unsigned i = 1; i <= 12; i++) { vec_for(i, v[i]); ids[i] = insert_vec(&db1, v[i]); }
+    db_close(&db1);
+
+    char sem[320];
+    snprintf(sem, sizeof(sem), "%s/memory.sem", g_dir);
+    int fd = open(sem, O_RDWR);
+    TEST_ASSERT_TRUE(fd >= 0);
+    uint8_t byte = 0;
+    TEST_ASSERT_EQUAL_INT(1, pread(fd, &byte, 1, 48));
+    byte ^= 0xFF;
+    TEST_ASSERT_EQUAL_INT(1, pwrite(fd, &byte, 1, 48));
+    close(fd);
+
+    AegisDB db2;
+    open_db_ann(&db2, 8); /* checkpoint rejected -> full rebuild */
+    TEST_ASSERT_EQUAL_UINT64(ids[7], search_top(&db2, v[7]));
+    db_close(&db2);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_recovery_replays_tail_after_checkpoint);
     RUN_TEST(test_recovery_rebuilds_secondary_from_tail);
     RUN_TEST(test_recovery_falls_back_on_corrupt_checkpoint);
     RUN_TEST(test_recovery_next_id_does_not_regress);
+    RUN_TEST(test_recovery_semantic_checkpoint);
+    RUN_TEST(test_recovery_semantic_tail);
+    RUN_TEST(test_recovery_semantic_tail_delete);
+    RUN_TEST(test_recovery_semantic_corrupt_fallback);
     return UNITY_END();
 }
