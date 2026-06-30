@@ -96,12 +96,12 @@ int main(int argc, char **argv) {
     sigaction(SIGTERM, &sa, NULL);
 
     /* Maintenance: sweep expired working memory every 30s, checkpoint the index
-     * on its cadence, and (in INTERVAL durability) flush the log on its cadence;
-     * compaction is opt-in via signal/age in future — disabled on the timer by
-     * default. */
-    Compactor *maint = compaction_start(&db, 30, 0);
+     * on its cadence, (in INTERVAL durability) flush the log on its cadence, and
+     * compact the log every --compact-sec (only when >=25% of it is dead). */
+    Compactor *maint = compaction_start(&db, 30, cfg.compact_sec);
     if (maint)
-        LOG_DEBUG("maintenance thread started (working-memory sweep every 30s)");
+        LOG_DEBUG("maintenance thread started (working-memory sweep every 30s, "
+                  "compaction check every %us)", cfg.compact_sec);
     else {
         LOG_WARN("could not start maintenance thread; "
                  "expired working memory will not be swept");

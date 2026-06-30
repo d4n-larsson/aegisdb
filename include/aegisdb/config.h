@@ -58,6 +58,7 @@ typedef struct {
     int durability;             /* AegisDurability; default INTERVAL */
     uint64_t fsync_interval_ms; /* INTERVAL flush cadence; default 1000 */
     unsigned checkpoint_sec;    /* index checkpoint cadence; 0 disables; def 60 */
+    unsigned compact_sec;       /* compaction check cadence (runs only when >=25% dead); 0 disables; def 300 */
     int io_threads;             /* poll() event-loop threads (dispatch parallelism, NOT a connection cap); default 2x CPUs (8-64) */
     int enabled_phase;          /* default 4: gate operations above this phase */
     int run_health_check;       /* 1 if --health-check: probe a server and exit */

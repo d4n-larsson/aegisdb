@@ -36,6 +36,7 @@ void config_defaults(Config *cfg) {
     cfg->durability = AEGIS_DURABILITY_INTERVAL;
     cfg->fsync_interval_ms = 1000;
     cfg->checkpoint_sec = 60;
+    cfg->compact_sec = 300;
     cfg->io_threads = default_io_threads();
     cfg->enabled_phase = 4; /* all features enabled by default */
     cfg->log_level = AEGIS_LOG_INFO;
@@ -231,6 +232,8 @@ static void usage(const char *prog) {
             "                           (default 1000)\n"
             "  --checkpoint-sec <n>     index checkpoint cadence, 0 disables\n"
             "                           (default 60)\n"
+            "  --compact-sec <n>        log-compaction check cadence; compacts only\n"
+            "                           when >=25%% dead, 0 disables (default 300)\n"
             "  --working-capacity <n>   ring buffer size (default 256)\n"
             "  --auth-token <token>     accept this global admin token (repeatable)\n"
             "  --auth-token-file <path> accept tokens, one per line; each line is\n"
@@ -349,6 +352,14 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
                 return -1;
             }
             cfg->checkpoint_sec = (unsigned)cs;
+        } else if (strcmp(a, "--compact-sec") == 0) {
+            NEXT("--compact-sec");
+            int cs;
+            if (parse_int(val, &cs) || cs < 0) {
+                fprintf(stderr, "%s: invalid compact-sec '%s'\n", prog, val);
+                return -1;
+            }
+            cfg->compact_sec = (unsigned)cs;
         } else if (strcmp(a, "--working-capacity") == 0) {
             NEXT("--working-capacity");
             int wc;
