@@ -185,10 +185,11 @@ int compaction_run_once(AegisDB *db) {
     pthread_rwlock_unlock(&db->log_lock);
     free(locs);
 
-    /* The rewrite changed every log offset, so the on-disk checkpoint now points
-     * into the old layout. Invalidate it; the next periodic checkpoint (or clean
-     * shutdown) writes a fresh one. */
+    /* The rewrite changed every log offset, so the on-disk checkpoints now carry
+     * stale covered offsets. Invalidate both (hash + semantic); the next periodic
+     * checkpoint (or clean shutdown) writes fresh ones. */
     unlink(db->path_index);
+    unlink(db->path_sem);
 
     /* Count live entries from the rebuilt hash so duplicate ids (a phase-2 copy
      * superseded by a tail frame) are not double-counted. */

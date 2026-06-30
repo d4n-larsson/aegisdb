@@ -589,6 +589,17 @@ int hnsw_search(const Hnsw *h, const float *query, size_t dim, size_t top_k,
 
 size_t hnsw_count(const Hnsw *h) { return h ? h->live : 0; }
 
+int hnsw_foreach_live(const Hnsw *h,
+                      int (*cb)(uint64_t id, const float *vec, void *ctx),
+                      void *ctx) {
+    for (size_t i = 0; i < h->n; i++) {
+        if (h->nodes[i].deleted) continue;
+        int rc = cb(h->nodes[i].id, h->nodes[i].vec, ctx);
+        if (rc) return rc;
+    }
+    return 0;
+}
+
 /* Allocate an empty index with the given (already-resolved) parameters and rng
  * state. Shared by hnsw_create and hnsw_load. */
 static Hnsw *hnsw_alloc(size_t dim, size_t M, size_t ef_construction,

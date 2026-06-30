@@ -14,6 +14,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "aegisdb/hnsw.h"
 
@@ -116,11 +117,22 @@ size_t semantic_index_count(const SemanticIndex *s) { return s ? s->n : 0; }
 
 void semantic_index_free(SemanticIndex *s) {
     if (!s) return;
+    semantic_index_clear(s);
+    free(s);
+}
+
+/* Reset to empty, preserving dim/ann_threshold/ef_search. */
+void semantic_index_clear(SemanticIndex *s) {
+    if (!s) return;
     for (size_t i = 0; i < s->n; i++) free(s->e[i].vec);
     free(s->e);
+    s->e = NULL;
+    s->n = s->cap = 0;
     free(s->map);
+    s->map = NULL;
+    s->mcap = 0;
     hnsw_free(s->hnsw);
-    free(s);
+    s->hnsw = NULL;
 }
 
 /* Build the HNSW graph from the current dense array (one-time, at the threshold
@@ -145,21 +157,21 @@ static float l2norm(const float *v, size_t dim) {
     return (float)sqrt(acc);
 }
 
-int semantic_index_add(SemanticIndex *s, uint64_t id, const float *vec,
-                       size_t dim) {
-    if (dim != s->dim) return -1;
+/* Insert or replace id's vector in the dense array + id-map only (no graph).
+ * Returns 1 if a new entry was added, 0 if an existing one was replaced in
+ * place, -1 on allocation failure. */
+static int dense_put(SemanticIndex *s, uint64_t id, const float *vec,
+                     size_t dim) {
     if (s->mcap == 0 && map_grow(s, MAP_INITIAL_CAP) != 0) return -1;
 
     size_t j = map_probe(s->map, s->mcap, id);
     if (s->map[j].used) {
-        /* replace the vector for an existing id in place */
         SemEntry *e = &s->e[s->map[j].idx];
         float *nv = realloc(e->vec, dim * sizeof(float));
         if (!nv) return -1;
         memcpy(nv, vec, dim * sizeof(float));
         e->vec = nv;
         e->norm = l2norm(vec, dim);
-        if (s->hnsw && hnsw_add(s->hnsw, id, vec, dim) != 0) return -1;
         return 0;
     }
 
@@ -195,10 +207,17 @@ int semantic_index_add(SemanticIndex *s, uint64_t id, const float *vec,
     s->map[j].used = 1;
     s->map[j].id = id;
     s->map[j].idx = idx;
+    return 1;
+}
 
+int semantic_index_add(SemanticIndex *s, uint64_t id, const float *vec,
+                       size_t dim) {
+    if (dim != s->dim) return -1;
+    int rv = dense_put(s, id, vec, dim);
+    if (rv < 0) return -1;
     if (s->hnsw) {
         if (hnsw_add(s->hnsw, id, vec, dim) != 0) return -1;
-    } else if (s->n >= s->ann_threshold) {
+    } else if (rv == 1 && s->n >= s->ann_threshold) {
         /* crossed the threshold: build the graph (includes this entry) */
         if (build_hnsw(s) != 0) return -1;
     }
@@ -306,4 +325,67 @@ int semantic_index_search(const SemanticIndex *s, const float *query,
     *out_scores = sc;
     *out_n = k;
     return 0;
+}
+/* ----------------------------------------------------------- persistence -- */
+
+int semantic_index_save(const SemanticIndex *s, const char *path,
+                        uint64_t covered_log_size) {
+    if (!s->hnsw) {
+        /* below the threshold there is no graph; drop any stale checkpoint so
+         * recovery rebuilds from the log rather than trusting it */
+        unlink(path);
+        return 0;
+    }
+    return hnsw_save(s->hnsw, path, covered_log_size);
+}
+
+struct load_ctx {
+    SemanticIndex *s;
+    int err;
+};
+static int load_dense_cb(uint64_t id, const float *vec, void *ctx) {
+    struct load_ctx *c = ctx;
+    if (dense_put(c->s, id, vec, c->s->dim) < 0) {
+        c->err = 1;
+        return 1; /* stop */
+    }
+    return 0;
+}
+
+int semantic_index_load(SemanticIndex *s, const char *path,
+                        uint64_t *out_covered_log_size) {
+    if (s->hnsw || s->n != 0) return -1; /* must be a fresh index */
+    Hnsw *g = hnsw_load(path, s->dim, out_covered_log_size);
+    if (!g) return -1;
+    s->hnsw = g;
+    /* Option A: rebuild the authoritative dense array + id-map from the graph's
+     * live nodes (in-memory copies; no log I/O, no graph construction). */
+    struct load_ctx c = {s, 0};
+    hnsw_foreach_live(g, load_dense_cb, &c);
+    if (c.err) {
+        semantic_index_clear(s); /* leave a clean empty index for full rebuild */
+        return -1;
+    }
+    return 0;
+}
+
+void semantic_index_reconcile(SemanticIndex *s,
+                              int (*keep)(uint64_t id, void *ctx), void *ctx) {
+    uint64_t *drop = NULL;
+    size_t nd = 0, cap = 0;
+    for (size_t i = 0; i < s->n; i++) {
+        if (keep(s->e[i].id, ctx)) continue;
+        if (nd == cap) {
+            size_t nc = cap ? cap * 2 : 16;
+            uint64_t *g = realloc(drop, nc * sizeof(uint64_t));
+            if (!g) break; /* best-effort: stop gathering on OOM */
+            drop = g;
+            cap = nc;
+        }
+        drop[nd++] = s->e[i].id;
+    }
+    /* remove after gathering: semantic_index_remove swap-removes from the dense
+     * array, which would disturb the loop above */
+    for (size_t i = 0; i < nd; i++) semantic_index_remove(s, drop[i]);
+    free(drop);
 }

@@ -35,6 +35,7 @@ typedef struct {
     char path_log[1200];
     char path_index[1200];
     char path_meta[1200];
+    char path_sem[1200]; /* HNSW graph checkpoint */
 
     volatile int running;
 } AegisDB;
