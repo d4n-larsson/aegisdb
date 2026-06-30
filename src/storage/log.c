@@ -229,13 +229,28 @@ int log_append(LogFile *lf, const uint8_t *payload, size_t len,
     }
     lf->size = off + LOG_FRAME_HEADER + (off_t)len;
     lf->since_fsync++;
+    /* The fsync is deferred to log_fsync_if_batched(), which the caller invokes
+     * after releasing the index lock, so a durable write does not hold that lock
+     * across the fsync. */
+    pthread_mutex_unlock(&lf->wlock);
+    if (out_offset) *out_offset = (uint64_t)off;
+    return 0;
+}
+
+/* fsync when the configured batch threshold is reached (sync = every write,
+ * batch = every fsync_batch writes; interval never triggers here — the
+ * maintenance thread flushes on a timer). Group-commit safe: one fsync covers
+ * every frame appended since the last flush, and `since_fsync` is shared under
+ * the log mutex, so a writer that finds the counter already reset was made
+ * durable by a concurrent writer's fsync. */
+void log_fsync_if_batched(LogFile *lf) {
+    if (lf->fd < 0) return;
+    pthread_mutex_lock(&lf->wlock);
     if (lf->fsync_batch == 0 || lf->since_fsync >= lf->fsync_batch) {
         fsync(lf->fd);
         lf->since_fsync = 0;
     }
     pthread_mutex_unlock(&lf->wlock);
-    if (out_offset) *out_offset = (uint64_t)off;
-    return 0;
 }
 
 int log_read(LogFile *lf, uint64_t offset, uint8_t **out, size_t *out_len) {

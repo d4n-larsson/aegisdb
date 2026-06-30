@@ -63,13 +63,17 @@ static void test_effective_fsync_batch(void) {
     config_free(&cfg);
 }
 
-/* SYNC mode (batch == 1) leaves nothing pending after each append. */
+/* log_append no longer fsyncs inline (so the fsync can run off the index lock);
+ * the deferred batched flush log_fsync_if_batched does it. In SYNC mode
+ * (batch == 1) a single append is immediately due, so the flush clears it. */
 static void test_sync_batch_leaves_nothing_pending(void) {
     LogFile lf;
     TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 1));
     uint64_t off;
     TEST_ASSERT_EQUAL_INT(0, log_append(&lf, (const uint8_t *)"x", 1, &off));
-    TEST_ASSERT_FALSE(log_flush_pending(&lf));
+    TEST_ASSERT_TRUE(log_flush_pending(&lf)); /* append defers the fsync */
+    log_fsync_if_batched(&lf);
+    TEST_ASSERT_FALSE(log_flush_pending(&lf)); /* batch==1 -> flushed */
     log_close(&lf);
 }
 

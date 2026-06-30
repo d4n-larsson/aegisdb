@@ -326,8 +326,41 @@ static void test_recovery_semantic_corrupt_fallback(void) {
     db_close(&db2);
 }
 
+/* In sync durability the per-write fsync now runs after the index lock is
+ * released; the write path must still leave the log flushed before returning
+ * (ack-after-durable). In interval durability the insert defers the flush to
+ * the maintenance thread, so a flush stays pending. */
+static void test_sync_durability_flushes_per_write(void) {
+    Config cfg;
+    config_defaults(&cfg);
+    strncpy(cfg.data_dir, g_dir, sizeof(cfg.data_dir) - 1);
+    cfg.checkpoint_sec = 0;
+    cfg.durability = AEGIS_DURABILITY_SYNC;
+    AegisDB db;
+    TEST_ASSERT_EQUAL_INT(0, db_open(&db, &cfg));
+    insert_ep(&db, "durable");
+    TEST_ASSERT_FALSE(log_flush_pending(&db.log)); /* fsync ran off the lock */
+    db_close(&db);
+
+    char dir2[300];
+    snprintf(dir2, sizeof(dir2), "%s_iv", g_dir);
+    char rm[340];
+    snprintf(rm, sizeof(rm), "rm -rf '%s'", dir2);
+    (void)!system(rm);
+    config_defaults(&cfg);
+    strncpy(cfg.data_dir, dir2, sizeof(cfg.data_dir) - 1);
+    cfg.checkpoint_sec = 0; /* default durability = interval */
+    AegisDB db2;
+    TEST_ASSERT_EQUAL_INT(0, db_open(&db2, &cfg));
+    insert_ep(&db2, "deferred");
+    TEST_ASSERT_TRUE(log_flush_pending(&db2.log)); /* interval: flush deferred */
+    db_close(&db2);
+    (void)!system(rm);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_sync_durability_flushes_per_write);
     RUN_TEST(test_recovery_replays_tail_after_checkpoint);
     RUN_TEST(test_recovery_rebuilds_secondary_from_tail);
     RUN_TEST(test_recovery_falls_back_on_corrupt_checkpoint);
