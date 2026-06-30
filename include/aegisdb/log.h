@@ -52,6 +52,11 @@ int log_read(LogFile *lf, uint64_t offset, uint8_t **out, size_t *out_len);
 /* Force durability: fsync and reset the unflushed-append counter. */
 void log_fsync(LogFile *lf);
 
+/* fsync only if the configured batch threshold has been reached (sync/batch
+ * durability). Call after releasing the index lock so the fsync is not held
+ * under it; a no-op in interval mode. */
+void log_fsync_if_batched(LogFile *lf);
+
 /* True if appends have happened since the last fsync (a flush would do work).
  * Lock-free hint for the maintenance thread's interval flush. */
 int log_flush_pending(const LogFile *lf);
