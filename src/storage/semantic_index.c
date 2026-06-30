@@ -5,10 +5,11 @@
  * vectors is O(N), not O(N^2). The map stores the dense index, so a swap-remove
  * only has to repoint the one moved entry.
  *
- * Search is exact (brute-force scan) while small. Once the live count crosses
- * `ann_threshold`, an HNSW graph is built and kept incrementally in sync, and
- * search switches to it for sublinear approximate top-K. The dense array stays
- * authoritative (storage + the build source + the small-n / exact path). */
+ * Search is exact (brute-force scan over the dense array) while small. Once the
+ * live count crosses `ann_threshold`, an HNSW graph is built from the dense
+ * array and the dense array is freed: the graph then becomes the sole store
+ * (one copy of each vector) and serves add/remove/search/count. The switch is
+ * one-way — a later dip below the threshold keeps using the graph. */
 #include "aegisdb/semantic_index.h"
 
 #include <math.h>
@@ -113,7 +114,23 @@ SemanticIndex *semantic_index_create(size_t dim, size_t ann_threshold,
     return s;
 }
 
-size_t semantic_index_count(const SemanticIndex *s) { return s ? s->n : 0; }
+size_t semantic_index_count(const SemanticIndex *s) {
+    if (!s) return 0;
+    /* Above the threshold the graph is authoritative; the dense array is freed. */
+    return s->hnsw ? hnsw_count(s->hnsw) : s->n;
+}
+
+/* Free the dense array + id-map, keeping the HNSW graph. Used once the graph
+ * becomes authoritative so each vector is stored once (in the graph). */
+static void drop_dense(SemanticIndex *s) {
+    for (size_t i = 0; i < s->n; i++) free(s->e[i].vec);
+    free(s->e);
+    s->e = NULL;
+    s->n = s->cap = 0;
+    free(s->map);
+    s->map = NULL;
+    s->mcap = 0;
+}
 
 void semantic_index_free(SemanticIndex *s) {
     if (!s) return;
@@ -136,7 +153,8 @@ void semantic_index_clear(SemanticIndex *s) {
 }
 
 /* Build the HNSW graph from the current dense array (one-time, at the threshold
- * crossing); thereafter add/remove keep it in sync. Returns 0/-1. */
+ * crossing), then drop the dense array so the graph holds the only copy of each
+ * vector; thereafter add/remove operate on the graph. Returns 0/-1. */
 static int build_hnsw(SemanticIndex *s) {
     HnswParams p = {.ef_search = s->ef_search, .seed = 0x9E3779B97F4A7C15ULL};
     Hnsw *h = hnsw_create(s->dim, &p);
@@ -148,6 +166,7 @@ static int build_hnsw(SemanticIndex *s) {
         }
     }
     s->hnsw = h;
+    drop_dense(s);
     return 0;
 }
 
@@ -213,18 +232,21 @@ static int dense_put(SemanticIndex *s, uint64_t id, const float *vec,
 int semantic_index_add(SemanticIndex *s, uint64_t id, const float *vec,
                        size_t dim) {
     if (dim != s->dim) return -1;
+    /* Above the threshold the graph is authoritative (dense array is gone). */
+    if (s->hnsw) return hnsw_add(s->hnsw, id, vec, dim) == 0 ? 0 : -1;
+
     int rv = dense_put(s, id, vec, dim);
     if (rv < 0) return -1;
-    if (s->hnsw) {
-        if (hnsw_add(s->hnsw, id, vec, dim) != 0) return -1;
-    } else if (rv == 1 && s->n >= s->ann_threshold) {
-        /* crossed the threshold: build the graph (includes this entry) */
-        if (build_hnsw(s) != 0) return -1;
-    }
+    if (rv == 1 && s->n >= s->ann_threshold)
+        return build_hnsw(s); /* crossed the threshold: build graph, drop dense */
     return 0;
 }
 
 void semantic_index_remove(SemanticIndex *s, uint64_t id) {
+    if (s->hnsw) {
+        hnsw_remove(s->hnsw, id);
+        return;
+    }
     if (s->mcap == 0) return;
     size_t j = map_probe(s->map, s->mcap, id);
     if (!s->map[j].used) return;
@@ -241,7 +263,6 @@ void semantic_index_remove(SemanticIndex *s, uint64_t id) {
         s->map[mj].idx = idx;
     }
     s->n--;
-    if (s->hnsw) hnsw_remove(s->hnsw, id);
 }
 
 typedef struct {
@@ -276,11 +297,20 @@ int semantic_index_search(const SemanticIndex *s, const float *query,
                           size_t dim, size_t top_k, uint64_t **out_ids,
                           float **out_scores, size_t *out_n) {
     if (dim != s->dim) return -1;
-    /* Above the threshold, answer from the HNSW graph (top_k==0 means "all",
-     * which only the exact scan supports). */
-    if (s->hnsw && top_k > 0)
-        return hnsw_search(s->hnsw, query, dim, top_k, s->ef_search, out_ids,
+    /* Above the threshold the graph is authoritative; the dense array is gone.
+     * top_k==0 means "all", which the graph serves by querying for its live
+     * count. */
+    if (s->hnsw) {
+        size_t k = top_k ? top_k : hnsw_count(s->hnsw);
+        if (k == 0) {
+            *out_ids = malloc(sizeof(uint64_t));
+            *out_scores = malloc(sizeof(float));
+            *out_n = 0;
+            return (*out_ids && *out_scores) ? 0 : -1;
+        }
+        return hnsw_search(s->hnsw, query, dim, k, s->ef_search, out_ids,
                            out_scores, out_n);
+    }
     float qnorm = l2norm(query, dim);
     Scored *all = malloc((s->n ? s->n : 1) * sizeof(Scored));
     if (!all) return -1;
@@ -339,53 +369,46 @@ int semantic_index_save(const SemanticIndex *s, const char *path,
     return hnsw_save(s->hnsw, path, covered_log_size);
 }
 
-struct load_ctx {
-    SemanticIndex *s;
-    int err;
-};
-static int load_dense_cb(uint64_t id, const float *vec, void *ctx) {
-    struct load_ctx *c = ctx;
-    if (dense_put(c->s, id, vec, c->s->dim) < 0) {
-        c->err = 1;
-        return 1; /* stop */
-    }
-    return 0;
-}
-
 int semantic_index_load(SemanticIndex *s, const char *path,
                         uint64_t *out_covered_log_size) {
     if (s->hnsw || s->n != 0) return -1; /* must be a fresh index */
     Hnsw *g = hnsw_load(path, s->dim, out_covered_log_size);
     if (!g) return -1;
-    s->hnsw = g;
-    /* Option A: rebuild the authoritative dense array + id-map from the graph's
-     * live nodes (in-memory copies; no log I/O, no graph construction). */
-    struct load_ctx c = {s, 0};
-    hnsw_foreach_live(g, load_dense_cb, &c);
-    if (c.err) {
-        semantic_index_clear(s); /* leave a clean empty index for full rebuild */
-        return -1;
+    s->hnsw = g; /* the graph is authoritative; no dense array to rebuild */
+    return 0;
+}
+
+/* Gather every live id (from the graph if present, else the dense array) into a
+ * growing list. */
+struct id_list {
+    uint64_t *ids;
+    size_t n, cap;
+    int err;
+};
+static int collect_id(uint64_t id, const float *vec, void *ctx) {
+    (void)vec;
+    struct id_list *l = ctx;
+    if (l->n == l->cap) {
+        size_t nc = l->cap ? l->cap * 2 : 16;
+        uint64_t *g = realloc(l->ids, nc * sizeof(uint64_t));
+        if (!g) { l->err = 1; return 1; }
+        l->ids = g;
+        l->cap = nc;
     }
+    l->ids[l->n++] = id;
     return 0;
 }
 
 void semantic_index_reconcile(SemanticIndex *s,
                               int (*keep)(uint64_t id, void *ctx), void *ctx) {
-    uint64_t *drop = NULL;
-    size_t nd = 0, cap = 0;
-    for (size_t i = 0; i < s->n; i++) {
-        if (keep(s->e[i].id, ctx)) continue;
-        if (nd == cap) {
-            size_t nc = cap ? cap * 2 : 16;
-            uint64_t *g = realloc(drop, nc * sizeof(uint64_t));
-            if (!g) break; /* best-effort: stop gathering on OOM */
-            drop = g;
-            cap = nc;
-        }
-        drop[nd++] = s->e[i].id;
+    struct id_list l = {0};
+    if (s->hnsw) {
+        hnsw_foreach_live(s->hnsw, collect_id, &l);
+    } else {
+        for (size_t i = 0; i < s->n && !l.err; i++) collect_id(s->e[i].id, NULL, &l);
     }
-    /* remove after gathering: semantic_index_remove swap-removes from the dense
-     * array, which would disturb the loop above */
-    for (size_t i = 0; i < nd; i++) semantic_index_remove(s, drop[i]);
-    free(drop);
+    /* remove after gathering so we don't disturb the structure being iterated */
+    for (size_t i = 0; i < l.n; i++)
+        if (!keep(l.ids[i], ctx)) semantic_index_remove(s, l.ids[i]);
+    free(l.ids);
 }
