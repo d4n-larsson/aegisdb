@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AegisDB — memory that outlives the context window</title>
-  <meta name="description" content="AegisDB is a small, fast C database that gives AI agents durable memory — episodic, semantic, and working — over a one-line-of-JSON wire protocol, with vector search, a relationship graph, and a crash-safe append-only log with tunable durability and fast checkpoint recovery.">
+  <meta name="description" content="AegisDB is a small, fast C database that gives AI agents durable memory — episodic, semantic, and working — over a one-line-of-JSON wire protocol, with HNSW vector search, a relationship graph, and a crash-safe append-only log with tunable durability and fast checkpoint recovery.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%2314110E'/%3E%3Ctext x='12' y='17' font-family='monospace' font-size='13' font-weight='700' fill='%23C9A24B' text-anchor='middle'%3E%E2%96%8D%3C/text%3E%3C/svg%3E">
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -355,6 +355,10 @@
           <div class="feat" data-k="0x02F0">
             <h3><span class="bar"></span>Recall, three ways</h3>
             <p>Search by <b>vector similarity</b>, by tags (<span class="mono">all</span>/<span class="mono">any</span>), or by time range — each on a purpose-built index, not a scan.</p>
+          </div>
+          <div class="feat se" data-k="0x0320">
+            <h3><span class="bar"></span>Vector search that scales</h3>
+            <p>Exact cosine while a set is small; past a threshold it switches to an <b>HNSW graph</b> for sublinear approximate-nearest-neighbour search, so recall stays fast as memories accumulate. The graph is <b>checkpointed</b> — a restart reloads it instead of rebuilding.</p>
           </div>
           <div class="feat" data-k="0x0360">
             <h3><span class="bar"></span>A graph of context</h3>
