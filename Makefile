@@ -38,7 +38,7 @@ TEST_BIN  := $(patsubst tests/unit/%.c,$(BUILD)/tests/%,$(TEST_SRC))
 
 PYTHON ?= python3
 
-.PHONY: all clean test integration check
+.PHONY: all clean test integration check bench
 all: $(BIN)
 
 $(BIN): $(CORE_OBJ) $(CJSON_OBJ) $(MAIN_OBJ)
@@ -67,6 +67,18 @@ test: $(TEST_BIN)
 # Wire-protocol contract tests: drive the running server over TCP.
 integration: $(BIN)
 	$(PYTHON) tests/contract/test_wire_protocol.py $(BIN)
+
+# HNSW recall/latency benchmark (not part of `test` — too heavy for CI). Runs a
+# default config; pass args to the binary for other dims/sizes, e.g.
+#   ./build/bench/hnsw_bench 1024 50000 200
+# Add NATIVE=1 for vectorized (representative) latency numbers.
+$(BUILD)/bench/hnsw_bench: bench/hnsw_bench.c $(BUILD)/src/storage/hnsw.o \
+                          $(BUILD)/src/util/crc32.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(CFLAGS) $(CPPFLAGS) -o $@ $< \
+	    $(BUILD)/src/storage/hnsw.o $(BUILD)/src/util/crc32.o $(LDLIBS)
+bench: $(BUILD)/bench/hnsw_bench
+	$(BUILD)/bench/hnsw_bench
 
 # Run the full suite: C unit tests + protocol contract tests.
 check: test integration
