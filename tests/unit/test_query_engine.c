@@ -44,6 +44,25 @@ static MemoryRecord make_input(MemoryType type, const char *data) {
     return in;
 }
 
+/* Insert a semantic record with a 3-D embedding and one tag. Returns its id. */
+static uint64_t insert_vec_tag(AegisDB *db, float *emb, const char *tag) {
+    MemoryRecord in = make_input(MEM_SEMANTIC, "v");
+    in.embedding = emb; /* borrowed */
+    in.embedding_dim = 3;
+    const char *tags[] = {tag};
+    record_set_tags(&in, tags, 1);
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(db, &in, NULL, 0, &out));
+    uint64_t id = out.id;
+    in.data = NULL; /* borrowed literal */
+    in.data_len = 0;
+    in.embedding = NULL; /* borrowed */
+    in.embedding_dim = 0;
+    record_free(&in); /* frees the allocated tags */
+    record_free(&out);
+    return id;
+}
+
 static void test_insert_get_episodic(void) {
     MemoryRecord in = make_input(MEM_EPISODIC, "User likes coffee");
     const char *tags[] = {"user", "preference"};
@@ -222,6 +241,55 @@ static void test_search_top_k_selection(void) {
     free(recs);
 }
 
+/* A selective post-filter must not silently lose matches that sit beyond the
+ * initial vector over-fetch: the query is closest to a large 'common' cluster,
+ * but we filter for a few 'rare' records that are farther away. The first
+ * 4*top_k+32 candidates are all 'common', so without widening this returns 0;
+ * the widening loop keeps fetching until the 'rare' matches are found. */
+static void test_search_filtered_widening(void) {
+    float q[3] = {1.0f, 0.0f, 0.0f};
+    for (int i = 0; i < 60; i++) {
+        float v[3] = {1.0f, 0.001f * (float)(i + 1), 0.0f}; /* very near q */
+        insert_vec_tag(&g_db, v, "common");
+    }
+    uint64_t rare[3];
+    for (int i = 0; i < 3; i++) {
+        float v[3] = {1.0f, 0.5f + 0.02f * (float)i, 0.0f}; /* farther from q */
+        rare[i] = insert_vec_tag(&g_db, v, "rare");
+    }
+
+    SearchParams p = {0};
+    p.embedding = q;
+    p.embedding_dim = 3;
+    p.top_k = 3;
+    const char *tags[] = {"rare"};
+    p.tags = tags;
+    p.tag_count = 1;
+    p.match_all = 1;
+
+    MemoryRecord *recs = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &recs, &n));
+    TEST_ASSERT_EQUAL_size_t(3, n); /* found despite being past the over-fetch */
+    for (size_t i = 0; i < n; i++) {
+        int is_rare = 0;
+        for (int j = 0; j < 3; j++)
+            if (recs[i].id == rare[j]) is_rare = 1;
+        TEST_ASSERT_TRUE(is_rare);
+        record_free(&recs[i]);
+    }
+    free(recs);
+
+    /* a filter matching nothing terminates cleanly (no hang, empty result) */
+    const char *ghost[] = {"ghost"};
+    p.tags = ghost;
+    recs = NULL;
+    n = 99;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &recs, &n));
+    TEST_ASSERT_EQUAL_size_t(0, n);
+    free(recs);
+}
+
 static void test_working_memory_promote(void) {
     MemoryRecord in = make_input(MEM_WORKING, "scratch note");
     MemoryRecord out;
@@ -352,6 +420,7 @@ int main(void) {
     RUN_TEST(test_search_by_time_and_tags);
     RUN_TEST(test_semantic_search);
     RUN_TEST(test_search_top_k_selection);
+    RUN_TEST(test_search_filtered_widening);
     RUN_TEST(test_working_memory_promote);
     RUN_TEST(test_relate_and_traverse);
     RUN_TEST(test_agent_namespace_filter);

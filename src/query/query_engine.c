@@ -17,6 +17,10 @@
 
 #define MAX_TAGS 32     /* max tags per record (also enforced in validate_common) */
 #define MAX_TOP_K 1000  /* clamp untrusted top_k to bound work/allocations */
+#define SEARCH_FETCH_CAP 8192 /* upper bound on semantic over-fetch when widening
+                               * to satisfy a selective filter (bounds worst-case
+                               * work; a very selective filter may still yield
+                               * fewer than top_k — inherent to filtered ANN) */
 
 /* ----- phase gating (T055) --------------------------------------------- */
 
@@ -374,33 +378,33 @@ static void idx_sift_down(size_t *h, size_t n, size_t i, const Cand *c,
     }
 }
 
-aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
-                         MemoryRecord **out_records, size_t *out_n) {
-    aegis_status_t st = require_phase(db, p->embedding_dim ? 3 : 2);
-    if (st != AEGIS_OK) return st;
-    if (p->embedding_dim &&
-        p->embedding_dim != db->config.embedding_dimensions)
-        return AEGIS_ERR_INVALID_REQUEST;
-
-    size_t top_k = p->top_k ? p->top_k : 10;
-
-    pthread_rwlock_rdlock(&db->index_lock);
-
-    /* 1. candidate id set + optional similarity scores */
+/* Resolve a candidate id set and load the surviving records. For semantic
+ * queries the candidates are the top `fetch` by vector similarity; otherwise
+ * the complete matching set from the time/tag index. Offsets are snapshotted
+ * under index_lock, then records are read under log_lock (off the index lock)
+ * and post-filtered. *exhausted is set when the candidate source returned fewer
+ * than `fetch` (semantic) or is inherently complete (non-semantic) — i.e. there
+ * is nothing more to find by widening. Allocates *out_cands (record_free each,
+ * then free the array). 0/-1. */
+static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
+                                        size_t fetch, int semantic,
+                                        Cand **out_cands, size_t *out_m,
+                                        int *exhausted) {
+    *out_cands = NULL;
+    *out_m = 0;
+    *exhausted = 1;
     uint64_t *ids = NULL;
     float *scores = NULL;
     size_t nids = 0;
-    int semantic = 0;
 
-    if (p->embedding_dim) {
-        semantic = 1;
-        /* over-fetch so post-filters still leave enough results */
-        size_t fetch = top_k * 4 + 32;
+    pthread_rwlock_rdlock(&db->index_lock);
+    if (semantic) {
         if (semantic_index_search(db->sem, p->embedding, p->embedding_dim, fetch,
                                   &ids, &scores, &nids) != 0) {
             pthread_rwlock_unlock(&db->index_lock);
             return AEGIS_ERR_INTERNAL;
         }
+        *exhausted = (nids < fetch); /* fewer returned than asked -> saw them all */
     } else if (p->has_time) {
         if (time_index_range(db->time, p->start_time, p->end_time, 0, &ids,
                              &nids) != 0) {
@@ -421,8 +425,8 @@ aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
         }
     }
 
-    /* 2. resolve each candidate id -> log offset while still under the index
-     * lock, snapshotting (offset, similarity) so the disk reads can run off it. */
+    /* resolve id -> log offset under the index lock, snapshotting (offset,
+     * similarity) so the disk reads can run off it */
     SearchSnap *snap = malloc((nids ? nids : 1) * sizeof(SearchSnap));
     if (!snap) {
         free(ids);
@@ -443,8 +447,8 @@ aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
     free(ids);
     free(scores);
 
-    /* 3. load + decode + post-filter off the index lock; disk I/O holds only
-     * log_lock, so concurrent writers are not blocked by it. */
+    /* load + decode + post-filter off the index lock; disk I/O holds only
+     * log_lock, so concurrent writers are not blocked by it */
     Cand *cands = malloc((sn ? sn : 1) * sizeof(Cand));
     if (!cands) {
         pthread_rwlock_unlock(&db->log_lock);
@@ -477,8 +481,49 @@ aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
     }
     pthread_rwlock_unlock(&db->log_lock);
     free(snap);
+    *out_cands = cands;
+    *out_m = m;
+    return AEGIS_OK;
+}
 
-    /* 3. order + truncate */
+aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
+                         MemoryRecord **out_records, size_t *out_n) {
+    aegis_status_t st = require_phase(db, p->embedding_dim ? 3 : 2);
+    if (st != AEGIS_OK) return st;
+    if (p->embedding_dim &&
+        p->embedding_dim != db->config.embedding_dimensions)
+        return AEGIS_ERR_INVALID_REQUEST;
+
+    size_t top_k = p->top_k ? p->top_k : 10;
+    int semantic = p->embedding_dim ? 1 : 0;
+
+    Cand *cands = NULL;
+    size_t m = 0;
+    if (semantic) {
+        /* Over-fetch, then widen if a selective post-filter leaves < top_k:
+         * the global vector index returns the nearest regardless of filter, so
+         * a selective filter (e.g. a small namespace) can drop them all. Re-query
+         * with a growing fetch until enough survive, the index is exhausted, or
+         * the cap is hit. */
+        size_t fetch = top_k * 4 + 32;
+        for (;;) {
+            int exhausted = 0;
+            st = gather_candidates(db, p, fetch, 1, &cands, &m, &exhausted);
+            if (st != AEGIS_OK) return st;
+            if (m >= top_k || exhausted || fetch >= SEARCH_FETCH_CAP) break;
+            for (size_t i = 0; i < m; i++) record_free(&cands[i].rec);
+            free(cands);
+            cands = NULL;
+            m = 0;
+            fetch = fetch * 4 < SEARCH_FETCH_CAP ? fetch * 4 : SEARCH_FETCH_CAP;
+        }
+    } else {
+        int exhausted = 0;
+        st = gather_candidates(db, p, 0, 0, &cands, &m, &exhausted);
+        if (st != AEGIS_OK) return st;
+    }
+
+    /* order + truncate */
     int (*cmp)(const void *, const void *) =
         semantic ? cmp_score_desc : cmp_created_asc;
     size_t keep = (top_k < m) ? top_k : m;
