@@ -49,6 +49,11 @@ int hnsw_search(const Hnsw *h, const float *query, size_t dim, size_t top_k,
 /* Number of live (non-tombstoned) vectors. */
 size_t hnsw_count(const Hnsw *h);
 
+/* Total nodes including tombstoned ones (>= hnsw_count). Diagnostic: the graph
+ * compacts itself once tombstones reach half the array, so this stays within ~2x
+ * the live count under churn. */
+size_t hnsw_total_nodes(const Hnsw *h);
+
 /* Invoke `cb(id, vec, ctx)` for each live vector (vec is the stored copy, length
  * = the index dim). Stops early and returns cb's value if it returns nonzero;
  * otherwise returns 0. Used to repopulate a caller-side store after a load. */

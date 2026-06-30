@@ -468,6 +468,33 @@ static int node_create(Hnsw *h, uint64_t id, const float *vec, int level,
     return 0;
 }
 
+/* forward declarations for the tombstone-compaction rebuild */
+static Hnsw *hnsw_alloc(size_t dim, size_t M, size_t ef_construction,
+                        size_t ef_search, uint64_t rng);
+static void hnsw_free_contents(Hnsw *h);
+#define HNSW_REBUILD_MIN 1024 /* don't compact graphs smaller than this */
+
+/* When tombstoned nodes reach half the array, rebuild the graph from the live
+ * nodes so their vectors + link arrays are reclaimed and search stops wading
+ * through dead nodes. Amortized O(log n) per delete/replace. Best-effort: on
+ * allocation failure the original (un-compacted) graph is kept. */
+static int maybe_rebuild(Hnsw *h) {
+    if (h->n < HNSW_REBUILD_MIN || h->live == 0 || h->n < 2 * h->live) return 0;
+    Hnsw *t = hnsw_alloc(h->dim, h->M, h->ef_construction, h->ef_search, h->rng);
+    if (!t) return -1;
+    for (size_t i = 0; i < h->n; i++) {
+        if (h->nodes[i].deleted) continue;
+        if (hnsw_add(t, h->nodes[i].id, h->nodes[i].vec, h->dim) != 0) {
+            hnsw_free(t);
+            return -1;
+        }
+    }
+    hnsw_free_contents(h);
+    *h = *t;  /* adopt the compacted graph's storage */
+    free(t);  /* free only the temporary shell */
+    return 0;
+}
+
 int hnsw_add(Hnsw *h, uint64_t id, const float *vec, size_t dim) {
     if (dim != h->dim) return -1;
 
@@ -526,6 +553,7 @@ int hnsw_add(Hnsw *h, uint64_t id, const float *vec, size_t dim) {
         h->max_layer = level;
         h->entry = cur;
     }
+    (void)maybe_rebuild(h); /* compact if a replace pushed tombstones over half */
     return 0;
 }
 
@@ -535,6 +563,7 @@ void hnsw_remove(Hnsw *h, uint64_t id) {
     h->nodes[node].deleted = 1;
     h->live--;
     map_del(h, id);
+    (void)maybe_rebuild(h);
 }
 
 int hnsw_search(const Hnsw *h, const float *query, size_t dim, size_t top_k,
@@ -634,8 +663,7 @@ Hnsw *hnsw_create(size_t dim, const HnswParams *params) {
     return hnsw_alloc(dim, M, efc, efs, seed);
 }
 
-void hnsw_free(Hnsw *h) {
-    if (!h) return;
+static void hnsw_free_contents(Hnsw *h) {
     for (size_t i = 0; i < h->n; i++) {
         Node *nd = &h->nodes[i];
         free(nd->vec);
@@ -647,8 +675,15 @@ void hnsw_free(Hnsw *h) {
     free(h->map);
     free(h->scratch_cand);
     free(h->scratch_sel);
+}
+
+void hnsw_free(Hnsw *h) {
+    if (!h) return;
+    hnsw_free_contents(h);
     free(h);
 }
+
+size_t hnsw_total_nodes(const Hnsw *h) { return h ? h->n : 0; }
 
 /* --------------------------------------------------------- persistence ----
  * A node index is stable across save/load (nodes are written in array order,
