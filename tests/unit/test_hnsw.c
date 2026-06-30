@@ -268,6 +268,47 @@ static void test_hnsw_save_load(void) {
     free(vecs);
 }
 
+/* Under heavy replace/delete churn, tombstones must not accumulate without
+ * bound: the graph compacts itself, keeping total nodes close to the live
+ * count, while search stays correct. */
+static void test_hnsw_tombstone_rebuild(void) {
+    const size_t N = 2000;
+    g_rng = 0x7ACEULL;
+    float *vecs = malloc(N * DIM * sizeof(float));
+    for (size_t i = 0; i < N; i++) rand_vec(&vecs[i * DIM]);
+
+    Hnsw *h = hnsw_create(DIM, NULL);
+    for (size_t i = 0; i < N; i++) hnsw_add(h, i, &vecs[i * DIM], DIM);
+    TEST_ASSERT_EQUAL_size_t(N, hnsw_total_nodes(h)); /* no tombstones yet */
+
+    /* Replace every id once with a fresh vector: each replace tombstones the old
+     * node, so without compaction total nodes would reach 2N. */
+    for (size_t i = 0; i < N; i++) {
+        rand_vec(&vecs[i * DIM]);
+        hnsw_add(h, i, &vecs[i * DIM], DIM);
+    }
+    TEST_ASSERT_EQUAL_size_t(N, hnsw_count(h));          /* still N live */
+    TEST_ASSERT_TRUE(hnsw_total_nodes(h) < 2 * N);       /* compaction happened */
+    TEST_ASSERT_EQUAL_size_t(hnsw_count(h), hnsw_total_nodes(h)); /* no tombstones left */
+
+    /* search still returns the current vectors */
+    size_t hits = 0;
+    for (size_t i = 0; i < N; i += 50) {
+        uint64_t *ids = NULL;
+        float *sc = NULL;
+        size_t n = 0;
+        TEST_ASSERT_EQUAL_INT(0,
+            hnsw_search(h, &vecs[i * DIM], DIM, 1, 64, &ids, &sc, &n));
+        if (n == 1 && ids[0] == i) hits++;
+        free(ids);
+        free(sc);
+    }
+    TEST_ASSERT_TRUE(hits >= 38); /* 40 probes; allow a couple of ANN misses */
+
+    hnsw_free(h);
+    free(vecs);
+}
+
 static void test_hnsw_empty(void) {
     Hnsw *h = hnsw_create(DIM, NULL);
     float q[DIM] = {1.0f};
@@ -287,5 +328,6 @@ int main(void) {
     RUN_TEST(test_hnsw_update);
     RUN_TEST(test_hnsw_reproducible);
     RUN_TEST(test_hnsw_save_load);
+    RUN_TEST(test_hnsw_tombstone_rebuild);
     return UNITY_END();
 }
