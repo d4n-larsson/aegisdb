@@ -40,6 +40,17 @@ static void test_accepts_valid(void) {
     config_free(&cfg);
 }
 
+/* Compaction runs on a timer by default; --compact-sec overrides, 0 disables. */
+static void test_compact_sec(void) {
+    Config cfg;
+    config_defaults(&cfg);
+    TEST_ASSERT_EQUAL_UINT(300, cfg.compact_sec); /* enabled by default */
+    char *argv[] = {"aegisdb", "--compact-sec", "0"};
+    TEST_ASSERT_EQUAL_INT(0, config_parse_args(&cfg, 3, argv));
+    TEST_ASSERT_EQUAL_UINT(0, cfg.compact_sec);
+    config_free(&cfg);
+}
+
 /* --workers remains a back-compat alias for --io-threads. */
 static void test_workers_alias(void) {
     Config cfg;
@@ -56,6 +67,7 @@ int main(void) {
     RUN_TEST(test_rejects_out_of_int_range_workers);
     RUN_TEST(test_rejects_overflow_max_payload);
     RUN_TEST(test_accepts_valid);
+    RUN_TEST(test_compact_sec);
     RUN_TEST(test_workers_alias);
     return UNITY_END();
 }

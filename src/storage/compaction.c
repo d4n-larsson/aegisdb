@@ -211,6 +211,22 @@ struct Compactor {
     atomic_int stop; /* relaxed: pthread_join sets up the shutdown happens-before */
 };
 
+/* Compaction rewrites the whole live log, so only run it once a meaningful
+ * fraction of the log is dead (tombstones + superseded versions). Counting hash
+ * tombstones is a cheap proxy under the read lock. Threshold: >= 25% dead. */
+static int compaction_worthwhile(AegisDB *db) {
+    pthread_rwlock_rdlock(&db->index_lock);
+    size_t live = 0, dead = 0;
+    const HashIndex *h = db->hash;
+    for (size_t i = 0; i < h->cap; i++) {
+        if (!h->buckets[i].used) continue;
+        if (h->buckets[i].deleted) dead++;
+        else live++;
+    }
+    pthread_rwlock_unlock(&db->index_lock);
+    return dead > 0 && dead * 4 >= (live + dead);
+}
+
 static void *maint_loop(void *arg) {
     Compactor *c = arg;
     unsigned elapsed = 0;
@@ -246,7 +262,8 @@ static void *maint_loop(void *arg) {
             else
                 LOG_WARN("checkpoint: failed to persist index");
         }
-        if (c->compact_sec && (elapsed % c->compact_sec) == 0)
+        if (c->compact_sec && (elapsed % c->compact_sec) == 0 &&
+            compaction_worthwhile(c->db))
             compaction_run_once(c->db);
     }
     return NULL;
