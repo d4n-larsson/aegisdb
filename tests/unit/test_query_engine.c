@@ -381,6 +381,58 @@ static void test_search_recency_decay(void) {
     free(r);
 }
 
+/* Insert an episodic record with one tag and an optional namespace. */
+static uint64_t insert_tag_ns(AegisDB *db, const char *tag, const char *ns) {
+    MemoryRecord in = make_input(MEM_EPISODIC, "c");
+    const char *tags[] = {tag};
+    record_set_tags(&in, tags, 1);
+    if (ns) in.agent_id = strdup(ns);
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(db, &in, NULL, 0, &out));
+    uint64_t id = out.id;
+    in.data = NULL;
+    in.data_len = 0;
+    record_free(&in);
+    record_free(&out);
+    return id;
+}
+
+/* qe_count returns the number of live records matching the filters, and is
+ * namespace-scoped when agent_id is set. */
+static void test_count(void) {
+    insert_tag_ns(&g_db, "x", NULL);
+    insert_tag_ns(&g_db, "x", NULL);
+    insert_tag_ns(&g_db, "y", NULL);
+    uint64_t owned = insert_tag_ns(&g_db, "x", "tenant-A");
+
+    SearchParams p = {0};
+    size_t n = 0;
+
+    const char *x[] = {"x"};
+    p.tags = x;
+    p.tag_count = 1;
+    p.match_all = 1;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_count(&g_db, &p, &n));
+    TEST_ASSERT_EQUAL_size_t(3, n); /* two global + tenant-A's */
+
+    /* namespace-scoped: only tenant-A's "x" record */
+    p.agent_id = "tenant-A";
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_count(&g_db, &p, &n));
+    TEST_ASSERT_EQUAL_size_t(1, n);
+
+    /* deleting the owned record drops the scoped count to 0 */
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_delete(&g_db, owned, "tenant-A"));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_count(&g_db, &p, &n));
+    TEST_ASSERT_EQUAL_size_t(0, n);
+
+    /* a tag matching nothing counts 0 */
+    const char *z[] = {"z"};
+    p.agent_id = NULL;
+    p.tags = z;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_count(&g_db, &p, &n));
+    TEST_ASSERT_EQUAL_size_t(0, n);
+}
+
 static void test_working_memory_promote(void) {
     MemoryRecord in = make_input(MEM_WORKING, "scratch note");
     MemoryRecord out;
@@ -514,6 +566,7 @@ int main(void) {
     RUN_TEST(test_search_filtered_widening);
     RUN_TEST(test_search_offset_and_min_score);
     RUN_TEST(test_search_recency_decay);
+    RUN_TEST(test_count);
     RUN_TEST(test_working_memory_promote);
     RUN_TEST(test_relate_and_traverse);
     RUN_TEST(test_agent_namespace_filter);
