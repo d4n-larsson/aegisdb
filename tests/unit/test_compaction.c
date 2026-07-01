@@ -141,10 +141,56 @@ static void test_compaction_concurrent_with_writes(void) {
     }
 }
 
+/* The dead-fraction gate (#63): compaction is worthwhile only once >=25% of the
+ * hash entries are tombstones, so a lightly-churned log is not rewritten. */
+static void test_compaction_gate_threshold(void) {
+    uint64_t ids[12];
+    for (int i = 0; i < 12; i++) {
+        char b[16];
+        snprintf(b, sizeof(b), "g-%d", i);
+        ids[i] = insert_ep(&g_db, b);
+    }
+    TEST_ASSERT_FALSE(compaction_worthwhile(&g_db)); /* 0 dead */
+
+    qe_delete(&g_db, ids[0], NULL);
+    qe_delete(&g_db, ids[1], NULL);
+    TEST_ASSERT_FALSE(compaction_worthwhile(&g_db)); /* 2/12 dead (< 25%) */
+
+    qe_delete(&g_db, ids[2], NULL);
+    TEST_ASSERT_TRUE(compaction_worthwhile(&g_db)); /* 3/12 == 25% -> worthwhile */
+}
+
+/* The scheduled maintenance path (compaction_start with a compact cadence)
+ * compacts once the gate is satisfied — exercises the thread -> worthwhile ->
+ * run_once wiring that nothing else covers. */
+static void test_compaction_scheduled_trigger(void) {
+    for (int i = 0; i < 12; i++) {
+        char b[16];
+        snprintf(b, sizeof(b), "s-%d", i);
+        uint64_t id = insert_ep(&g_db, b);
+        if (i < 5) qe_delete(&g_db, id, NULL); /* 5/12 dead (> 25%) */
+    }
+    log_fsync(&g_db.log);
+    uint64_t before = (uint64_t)g_db.log.size;
+
+    Compactor *c = compaction_start(&g_db, 0, 1); /* compact check every 1s */
+    TEST_ASSERT_NOT_NULL(c);
+    /* poll up to ~15s (generous for slow/ASan runs) for the log to shrink */
+    uint64_t after = before;
+    for (int i = 0; i < 300 && after >= before; i++) {
+        usleep(50000); /* 50ms */
+        after = (uint64_t)g_db.log.size;
+    }
+    compaction_stop(c);
+    TEST_ASSERT_TRUE(after < before); /* scheduled compaction reclaimed the dead */
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_compaction_preserves_live_drops_deleted);
     RUN_TEST(test_compacted_log_recovers);
     RUN_TEST(test_compaction_concurrent_with_writes);
+    RUN_TEST(test_compaction_gate_threshold);
+    RUN_TEST(test_compaction_scheduled_trigger);
     return UNITY_END();
 }

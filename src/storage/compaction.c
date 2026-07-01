@@ -214,7 +214,7 @@ struct Compactor {
 /* Compaction rewrites the whole live log, so only run it once a meaningful
  * fraction of the log is dead (tombstones + superseded versions). Counting hash
  * tombstones is a cheap proxy under the read lock. Threshold: >= 25% dead. */
-static int compaction_worthwhile(AegisDB *db) {
+int compaction_worthwhile(AegisDB *db) {
     pthread_rwlock_rdlock(&db->index_lock);
     size_t live = 0, dead = 0;
     const HashIndex *h = db->hash;
