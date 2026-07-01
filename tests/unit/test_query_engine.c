@@ -290,6 +290,62 @@ static void test_search_filtered_widening(void) {
     free(recs);
 }
 
+/* offset pages the ranked result set; min_score gates on cosine similarity. */
+static void test_search_offset_and_min_score(void) {
+    /* five vectors at increasing angle from the query -> strictly decreasing
+     * similarity, so their rank order (by similarity) is ids[0..4]. */
+    float q[3] = {1.0f, 0.0f, 0.0f};
+    float ys[5] = {0.0f, 0.2f, 0.5f, 1.0f, 3.0f};
+    uint64_t ids[5];
+    for (int i = 0; i < 5; i++) {
+        float v[3] = {1.0f, ys[i], 0.0f};
+        ids[i] = insert_vec_tag(&g_db, v, "s");
+    }
+
+    SearchParams p = {0};
+    p.embedding = q;
+    p.embedding_dim = 3;
+    p.top_k = 2;
+
+    /* page 1 (offset 0): the two nearest, in order */
+    MemoryRecord *r = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &r, &n));
+    TEST_ASSERT_EQUAL_size_t(2, n);
+    TEST_ASSERT_EQUAL_UINT64(ids[0], r[0].id);
+    TEST_ASSERT_EQUAL_UINT64(ids[1], r[1].id);
+    for (size_t i = 0; i < n; i++) record_free(&r[i]);
+    free(r);
+
+    /* page 2 (offset 2): the next two */
+    p.offset = 2;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &r, &n));
+    TEST_ASSERT_EQUAL_size_t(2, n);
+    TEST_ASSERT_EQUAL_UINT64(ids[2], r[0].id);
+    TEST_ASSERT_EQUAL_UINT64(ids[3], r[1].id);
+    for (size_t i = 0; i < n; i++) record_free(&r[i]);
+    free(r);
+
+    /* offset past the end -> empty, clean */
+    p.offset = 99;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &r, &n));
+    TEST_ASSERT_EQUAL_size_t(0, n);
+    free(r);
+
+    /* min_score: only the near-aligned vectors clear a high cosine floor. */
+    p.offset = 0;
+    p.top_k = 10;
+    p.has_min_score = 1;
+    p.min_score = 0.95f; /* ids[0] (sim 1.0) and ids[1] (~0.98) qualify; rest not */
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &r, &n));
+    TEST_ASSERT_TRUE(n >= 1 && n <= 2);
+    for (size_t i = 0; i < n; i++) {
+        TEST_ASSERT_TRUE(r[i].id == ids[0] || r[i].id == ids[1]);
+        record_free(&r[i]);
+    }
+    free(r);
+}
+
 static void test_working_memory_promote(void) {
     MemoryRecord in = make_input(MEM_WORKING, "scratch note");
     MemoryRecord out;
@@ -421,6 +477,7 @@ int main(void) {
     RUN_TEST(test_semantic_search);
     RUN_TEST(test_search_top_k_selection);
     RUN_TEST(test_search_filtered_widening);
+    RUN_TEST(test_search_offset_and_min_score);
     RUN_TEST(test_working_memory_promote);
     RUN_TEST(test_relate_and_traverse);
     RUN_TEST(test_agent_namespace_filter);

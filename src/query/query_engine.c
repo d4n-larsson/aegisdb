@@ -21,6 +21,7 @@
                                * to satisfy a selective filter (bounds worst-case
                                * work; a very selective filter may still yield
                                * fewer than top_k — inherent to filtered ANN) */
+#define MAX_OFFSET 100000 /* clamp pagination offset to bound ranking work/allocs */
 
 /* ----- phase gating (T055) --------------------------------------------- */
 
@@ -457,6 +458,9 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
     }
     size_t m = 0;
     for (size_t i = 0; i < sn; i++) {
+        /* min_score gates on the raw cosine similarity, before the log read */
+        if (semantic && p->has_min_score && snap[i].score < p->min_score)
+            continue;
         uint8_t *buf = NULL;
         size_t len = 0;
         if (log_read(&db->log, snap[i].off, &buf, &len) != 0) continue;
@@ -496,21 +500,25 @@ aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
 
     size_t top_k = p->top_k ? p->top_k : 10;
     int semantic = p->embedding_dim ? 1 : 0;
+    size_t offset = p->offset < MAX_OFFSET ? p->offset : MAX_OFFSET;
+    /* rank enough to page past `offset` and still fill top_k */
+    size_t want = offset + top_k;
 
     Cand *cands = NULL;
     size_t m = 0;
     if (semantic) {
-        /* Over-fetch, then widen if a selective post-filter leaves < top_k:
-         * the global vector index returns the nearest regardless of filter, so
-         * a selective filter (e.g. a small namespace) can drop them all. Re-query
-         * with a growing fetch until enough survive, the index is exhausted, or
-         * the cap is hit. */
-        size_t fetch = top_k * 4 + 32;
+        /* Over-fetch, then widen if a selective post-filter (or min_score, or a
+         * page offset) leaves < want: the global vector index returns the
+         * nearest regardless of filter, so a selective filter (e.g. a small
+         * namespace) can drop them all. Re-query with a growing fetch until
+         * enough survive, the index is exhausted, or the cap is hit. */
+        size_t fetch = want * 4 + 32;
+        if (fetch > SEARCH_FETCH_CAP) fetch = SEARCH_FETCH_CAP;
         for (;;) {
             int exhausted = 0;
             st = gather_candidates(db, p, fetch, 1, &cands, &m, &exhausted);
             if (st != AEGIS_OK) return st;
-            if (m >= top_k || exhausted || fetch >= SEARCH_FETCH_CAP) break;
+            if (m >= want || exhausted || fetch >= SEARCH_FETCH_CAP) break;
             for (size_t i = 0; i < m; i++) record_free(&cands[i].rec);
             free(cands);
             cands = NULL;
@@ -523,75 +531,78 @@ aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
         if (st != AEGIS_OK) return st;
     }
 
-    /* order + truncate */
+    /* Rank the best `sel_n` (= offset + top_k, capped at m) into `ranked`
+     * (sorted best-first), then page: return the slice [offset, sel_n) and free
+     * the paged-over head. */
     int (*cmp)(const void *, const void *) =
         semantic ? cmp_score_desc : cmp_created_asc;
-    size_t keep = (top_k < m) ? top_k : m;
+    size_t sel_n = (want < m) ? want : m;
+    Cand *ranked; /* length sel_n, sorted; owns .rec for [0, sel_n) */
 
-    if (keep >= m) {
-        /* returning everything: a single full sort is simplest */
+    if (sel_n >= m) {
+        /* ranking everything: a single full sort is simplest */
         qsort(cands, m, sizeof(Cand), cmp);
-        MemoryRecord *res = malloc((m ? m : 1) * sizeof(MemoryRecord));
-        if (!res) {
+        ranked = cands; /* sel_n == m */
+    } else {
+        /* Select the sel_n best in O(m log sel_n) via a bounded index heap, then
+         * sort those and free the records that did not make the cut. */
+        size_t *heap = malloc(sel_n * sizeof(*heap));
+        char *sel = calloc(m, 1);
+        Cand *top = malloc(sel_n * sizeof(Cand));
+        if (!heap || !sel || !top) {
             for (size_t i = 0; i < m; i++) record_free(&cands[i].rec);
             free(cands);
+            free(heap);
+            free(sel);
+            free(top);
             return AEGIS_ERR_INTERNAL;
         }
-        for (size_t i = 0; i < m; i++) res[i] = cands[i].rec;
-        free(cands);
-        *out_records = res;
-        *out_n = m;
-        return AEGIS_OK;
-    }
-
-    /* Select the keep best in O(m log keep) via a bounded index heap, then sort
-     * only those keep and free the records that did not make the cut. */
-    size_t *heap = malloc(keep * sizeof(*heap));
-    char *sel = calloc(m, 1);
-    MemoryRecord *res = malloc(keep * sizeof(MemoryRecord));
-    Cand *top = malloc(keep * sizeof(Cand));
-    if (!heap || !sel || !res || !top) {
-        for (size_t i = 0; i < m; i++) record_free(&cands[i].rec);
-        free(cands);
+        size_t hn = 0;
+        for (size_t i = 0; i < m; i++) {
+            if (hn < sel_n) {
+                /* push: sift the new leaf up toward the (worst-ranked) root */
+                size_t j = hn++;
+                heap[j] = i;
+                while (j > 0) {
+                    size_t pa = (j - 1) / 2;
+                    if (cmp(&cands[heap[j]], &cands[heap[pa]]) <= 0) break;
+                    size_t t = heap[j];
+                    heap[j] = heap[pa];
+                    heap[pa] = t;
+                    j = pa;
+                }
+            } else if (cmp(&cands[i], &cands[heap[0]]) < 0) {
+                heap[0] = i; /* better than the worst kept: evict the root */
+                idx_sift_down(heap, hn, 0, cands, cmp);
+            }
+        }
+        for (size_t t = 0; t < sel_n; t++) {
+            sel[heap[t]] = 1;
+            top[t] = cands[heap[t]];
+        }
+        qsort(top, sel_n, sizeof(Cand), cmp);
+        for (size_t i = 0; i < m; i++)
+            if (!sel[i]) record_free(&cands[i].rec);
         free(heap);
         free(sel);
-        free(res);
-        free(top);
+        free(cands);
+        ranked = top;
+    }
+
+    /* page: keep [offset, sel_n), free the skipped head */
+    size_t start = offset < sel_n ? offset : sel_n;
+    size_t rn = sel_n - start;
+    MemoryRecord *res = malloc((rn ? rn : 1) * sizeof(MemoryRecord));
+    if (!res) {
+        for (size_t i = 0; i < sel_n; i++) record_free(&ranked[i].rec);
+        free(ranked);
         return AEGIS_ERR_INTERNAL;
     }
-    size_t hn = 0;
-    for (size_t i = 0; i < m; i++) {
-        if (hn < keep) {
-            /* push: sift the new leaf up toward the (worst-ranked) root */
-            size_t j = hn++;
-            heap[j] = i;
-            while (j > 0) {
-                size_t pa = (j - 1) / 2;
-                if (cmp(&cands[heap[j]], &cands[heap[pa]]) <= 0) break;
-                size_t t = heap[j];
-                heap[j] = heap[pa];
-                heap[pa] = t;
-                j = pa;
-            }
-        } else if (cmp(&cands[i], &cands[heap[0]]) < 0) {
-            heap[0] = i; /* better than the worst kept: evict the root */
-            idx_sift_down(heap, hn, 0, cands, cmp);
-        }
-    }
-    for (size_t t = 0; t < keep; t++) {
-        sel[heap[t]] = 1;
-        top[t] = cands[heap[t]];
-    }
-    qsort(top, keep, sizeof(Cand), cmp);
-    for (size_t t = 0; t < keep; t++) res[t] = top[t].rec;
-    for (size_t i = 0; i < m; i++)
-        if (!sel[i]) record_free(&cands[i].rec);
-    free(top);
-    free(heap);
-    free(sel);
-    free(cands);
+    for (size_t i = 0; i < start; i++) record_free(&ranked[i].rec);
+    for (size_t i = start; i < sel_n; i++) res[i - start] = ranked[i].rec;
+    free(ranked);
     *out_records = res;
-    *out_n = keep;
+    *out_n = rn;
     return AEGIS_OK;
 }
 
@@ -995,6 +1006,13 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req, const char *ns) {
     p.match_all = (strcmp(match, "any") != 0);
     if (jr_u64(req, "top_k", &v) == 0)
         p.top_k = v > MAX_TOP_K ? MAX_TOP_K : (size_t)v; /* bound work/allocs */
+    if (jr_u64(req, "offset", &v) == 0)
+        p.offset = v > MAX_OFFSET ? MAX_OFFSET : (size_t)v; /* pagination */
+    double ms;
+    if (jr_f64(req, "min_score", &ms) == 0) {
+        p.has_min_score = 1;
+        p.min_score = (float)ms;
+    }
 
     const char **tags = NULL;
     size_t tn = 0;

@@ -288,6 +288,8 @@ when **both** `start_time` and `end_time` are present.
 | `type` | string | Filter by memory type |
 | `agent_id` | string | Namespace filter |
 | `top_k` | integer | Max results; default 10 |
+| `offset` | integer | Skip this many top-ranked results (pagination); default 0 |
+| `min_score` | number | Semantic only: drop matches below this cosine similarity ([-1, 1]) |
 
 **Response (success)**:
 

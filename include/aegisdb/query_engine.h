@@ -62,6 +62,9 @@ typedef struct {
     MemoryType type;
     const char *agent_id;
     size_t top_k;
+    size_t offset;      /* skip this many top-ranked results (pagination) */
+    int has_min_score;  /* semantic only: drop matches below min_score */
+    float min_score;    /* cosine-similarity floor in [-1, 1] */
 } SearchParams;
 
 /* Search. Allocates *out_records (array of MemoryRecord; record_free each then
