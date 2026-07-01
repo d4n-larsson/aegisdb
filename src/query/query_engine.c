@@ -618,6 +618,61 @@ aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
     return AEGIS_OK;
 }
 
+/* Count live records matching the filters (type/tags/time/agent_id). Ignores
+ * any embedding — count is over the filter predicate, not vector ranking. */
+aegis_status_t qe_count(AegisDB *db, const SearchParams *p, size_t *out_count) {
+    aegis_status_t st = require_phase(db, 2);
+    if (st != AEGIS_OK) return st;
+    Cand *cands = NULL;
+    size_t m = 0;
+    int exhausted = 0;
+    st = gather_candidates(db, p, 0, 0, &cands, &m, &exhausted);
+    if (st != AEGIS_OK) return st;
+    for (size_t i = 0; i < m; i++) record_free(&cands[i].rec);
+    free(cands);
+    *out_count = m;
+    return AEGIS_OK;
+}
+
+/* Delete every live record matching the filters, scoped to `ns` when set.
+ * Requires at least one positive filter (type/tags/time) so an unfiltered
+ * "delete everything" is not possible by omission. Returns the count deleted. */
+aegis_status_t qe_delete_by_query(AegisDB *db, const SearchParams *p,
+                                  const char *ns, size_t *out_deleted) {
+    aegis_status_t st = require_phase(db, 1);
+    if (st != AEGIS_OK) return st;
+    if (!p->has_type && !p->tag_count && !p->has_time)
+        return AEGIS_ERR_INVALID_REQUEST; /* refuse an unfiltered bulk delete */
+
+    Cand *cands = NULL;
+    size_t m = 0;
+    int exhausted = 0;
+    st = gather_candidates(db, p, 0, 0, &cands, &m, &exhausted);
+    if (st != AEGIS_OK) return st;
+
+    /* snapshot the matching ids, then release the loaded records — qe_delete
+     * re-loads and re-validates each under the write lock (namespace included),
+     * so a racing change just yields NOT_FOUND for that id and is skipped. */
+    uint64_t *ids = malloc((m ? m : 1) * sizeof(uint64_t));
+    if (!ids) {
+        for (size_t i = 0; i < m; i++) record_free(&cands[i].rec);
+        free(cands);
+        return AEGIS_ERR_INTERNAL;
+    }
+    for (size_t i = 0; i < m; i++) {
+        ids[i] = cands[i].rec.id;
+        record_free(&cands[i].rec);
+    }
+    free(cands);
+
+    size_t deleted = 0;
+    for (size_t i = 0; i < m; i++)
+        if (qe_delete(db, ids[i], ns) == AEGIS_OK) deleted++;
+    free(ids);
+    *out_deleted = deleted;
+    return AEGIS_OK;
+}
+
 aegis_status_t qe_promote(AegisDB *db, const char *session_id,
                           uint64_t working_id, MemoryType to_type,
                           const char *ns, MemoryRecord *out) {
@@ -913,21 +968,75 @@ static cJSON *handle_stats(AegisDB *db) {
     return o;
 }
 
+static int parse_filters(const cJSON *req, const char *ns, SearchParams *p,
+                         const char ***out_tags);
+
+#define MAX_BATCH 1000 /* max records per batch insert (bounds work/allocs) */
+
+/* Build one input record from `spec`, pin it to `ns` when set. 0/-1 via *err. */
+static int build_pinned(AegisDB *db, const cJSON *spec, const char *ns,
+                        MemoryRecord *in, aegis_status_t *err) {
+    if (build_input_record(db, spec, in, err) != 0) return -1;
+    if (ns) { /* a namespaced token writes only into its own tenant */
+        free(in->agent_id);
+        in->agent_id = strdup(ns);
+        if (!in->agent_id) {
+            *err = AEGIS_ERR_INTERNAL;
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* Insert `records`: [ {record}, ... ] in one request. Validates every element
+ * first, so a malformed element rejects the whole batch before anything is
+ * written; then inserts all. Returns {ok, count, records:[...]}. */
+static cJSON *handle_insert_batch(AegisDB *db, const cJSON *arr, const char *ns) {
+    int n = cJSON_GetArraySize(arr);
+    if (n < 1 || n > MAX_BATCH) return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+
+    MemoryRecord *ins = calloc((size_t)n, sizeof(MemoryRecord));
+    if (!ins) return json_error_status(AEGIS_ERR_INTERNAL);
+    for (int i = 0; i < n; i++) {
+        aegis_status_t err;
+        if (build_pinned(db, cJSON_GetArrayItem(arr, i), ns, &ins[i], &err) != 0) {
+            record_free(&ins[i]);
+            for (int j = 0; j < i; j++) record_free(&ins[j]);
+            free(ins);
+            return json_error_status(err); /* nothing written yet */
+        }
+    }
+
+    cJSON *o = json_ok();
+    cJSON *out_arr = cJSON_AddArrayToObject(o, "records");
+    size_t ok = 0;
+    for (int i = 0; i < n; i++) {
+        const cJSON *spec = cJSON_GetArrayItem(arr, i);
+        const char *session = jr_str(spec, "session_id", NULL);
+        uint64_t ttl = 0;
+        jr_u64(spec, "ttl_ms", &ttl);
+        MemoryRecord out;
+        if (qe_insert(db, &ins[i], session, ttl, &out) == AEGIS_OK) {
+            cJSON_AddItemToArray(out_arr, json_record(&out));
+            record_free(&out);
+            ok++;
+        }
+        record_free(&ins[i]);
+    }
+    free(ins);
+    cJSON_AddNumberToObject(o, "count", (double)ok);
+    return o;
+}
+
 static cJSON *handle_insert(AegisDB *db, const cJSON *req, const char *ns) {
+    cJSON *arr = cJSON_GetObjectItemCaseSensitive(req, "records");
+    if (cJSON_IsArray(arr)) return handle_insert_batch(db, arr, ns);
+
     MemoryRecord in;
     aegis_status_t err;
-    if (build_input_record(db, req, &in, &err) != 0) {
+    if (build_pinned(db, req, ns, &in, &err) != 0) {
         record_free(&in);
         return json_error_status(err);
-    }
-    /* A namespaced token writes only into its own tenant: pin agent_id. */
-    if (ns) {
-        free(in.agent_id);
-        in.agent_id = strdup(ns);
-        if (!in.agent_id) {
-            record_free(&in);
-            return json_error_status(AEGIS_ERR_INTERNAL);
-        }
     }
     const char *session = jr_str(req, "session_id", NULL);
     uint64_t ttl = 0;
@@ -993,13 +1102,62 @@ static cJSON *handle_update(AegisDB *db, const cJSON *req, const char *ns) {
 
 static cJSON *handle_delete(AegisDB *db, const cJSON *req, const char *ns) {
     uint64_t id;
-    if (jr_u64(req, "id", &id) != 0)
+    if (jr_u64(req, "id", &id) == 0) {
+        aegis_status_t st = qe_delete(db, id, ns);
+        if (st != AEGIS_OK) return json_error_status(st);
+        cJSON *o = json_ok();
+        cJSON_AddNumberToObject(o, "id", (double)id);
+        cJSON_AddBoolToObject(o, "deleted", 1);
+        return o;
+    }
+    /* no id: delete every record matching the filters (requires >=1 filter) */
+    SearchParams p;
+    const char **tags = NULL;
+    if (parse_filters(req, ns, &p, &tags) != 0)
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
-    aegis_status_t st = qe_delete(db, id, ns);
+    size_t deleted = 0;
+    aegis_status_t st = qe_delete_by_query(db, &p, ns, &deleted);
+    free(tags);
     if (st != AEGIS_OK) return json_error_status(st);
     cJSON *o = json_ok();
-    cJSON_AddNumberToObject(o, "id", (double)id);
-    cJSON_AddBoolToObject(o, "deleted", 1);
+    cJSON_AddNumberToObject(o, "deleted", (double)deleted);
+    return o;
+}
+
+/* Parse the shared filter fields (type/tags/time/agent_id/match) into `p` for
+ * count and delete-by-query. On success *out_tags is the allocated tag array
+ * (free it after use, even when tag_count is 0). Returns 0/-1. */
+static int parse_filters(const cJSON *req, const char *ns, SearchParams *p,
+                         const char ***out_tags) {
+    memset(p, 0, sizeof(*p));
+    if (jr_u64(req, "start_time", &p->start_time) == 0 &&
+        jr_u64(req, "end_time", &p->end_time) == 0)
+        p->has_time = 1;
+    const char *type = jr_str(req, "type", NULL);
+    if (type && memory_type_from_string(type, &p->type) == 0) p->has_type = 1;
+    p->agent_id = ns ? ns : jr_str(req, "agent_id", NULL);
+    const char *match = jr_str(req, "match", "all");
+    p->match_all = (strcmp(match, "any") != 0);
+    const char **tags = NULL;
+    size_t tn = 0;
+    if (jr_str_array(req, "tags", &tags, &tn, MAX_TAGS) != 0) return -1;
+    p->tags = tags;
+    p->tag_count = tn;
+    *out_tags = tags;
+    return 0;
+}
+
+static cJSON *handle_count(AegisDB *db, const cJSON *req, const char *ns) {
+    SearchParams p;
+    const char **tags = NULL;
+    if (parse_filters(req, ns, &p, &tags) != 0)
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    size_t count = 0;
+    aegis_status_t st = qe_count(db, &p, &count);
+    free(tags);
+    if (st != AEGIS_OK) return json_error_status(st);
+    cJSON *o = json_ok();
+    cJSON_AddNumberToObject(o, "count", (double)count);
     return o;
 }
 
@@ -1216,6 +1374,7 @@ cJSON *query_engine_dispatch(AegisDB *db, const cJSON *req) {
     if (strcmp(op, "update") == 0) return handle_update(db, req, ctx.ns);
     if (strcmp(op, "delete") == 0) return handle_delete(db, req, ctx.ns);
     if (strcmp(op, "search") == 0) return handle_search(db, req, ctx.ns);
+    if (strcmp(op, "count") == 0) return handle_count(db, req, ctx.ns);
     if (strcmp(op, "promote") == 0) return handle_promote(db, req, ctx.ns);
     if (strcmp(op, "relate") == 0) return handle_relate(db, req, ctx.ns);
     if (strcmp(op, "traverse") == 0) return handle_traverse(db, req, ctx.ns);

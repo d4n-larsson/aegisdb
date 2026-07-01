@@ -73,6 +73,17 @@ typedef struct {
 aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
                          MemoryRecord **out_records, size_t *out_n);
 
+/* Count live records matching the filters (type/tags/time/agent_id); ignores
+ * any embedding. Returns the count in *out_count. */
+aegis_status_t qe_count(AegisDB *db, const SearchParams *p, size_t *out_count);
+
+/* Delete all live records matching the filters, scoped to `ns` when non-NULL.
+ * Requires at least one positive filter (type/tags/time) — refuses an
+ * unfiltered bulk delete with INVALID_REQUEST. Returns the count in
+ * *out_deleted. */
+aegis_status_t qe_delete_by_query(AegisDB *db, const SearchParams *p,
+                                  const char *ns, size_t *out_deleted);
+
 /* Promote a working record to a persisted one. When `ns` is non-NULL the new
  * record is pinned to that namespace (agent_id). */
 aegis_status_t qe_promote(AegisDB *db, const char *session_id,
