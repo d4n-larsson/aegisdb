@@ -360,6 +360,10 @@
             <h3><span class="bar"></span>Vector search that scales</h3>
             <p>Exact cosine while a set is small; past a threshold it switches to an <b>HNSW graph</b> for sublinear approximate-nearest-neighbour search, so recall stays fast as memories accumulate. The graph is <b>checkpointed</b> — a restart reloads it instead of rebuilding.</p>
           </div>
+          <div class="feat se" data-k="0x0340">
+            <h3><span class="bar"></span>Ranked like memory</h3>
+            <p>Recall ranks by similarity, importance, and confidence — and, when you ask, an <b>opt-in recency decay</b> so a fresh memory outranks a stale one of equal similarity. Page results, or set a <b>minimum similarity</b> to gate on relevance.</p>
+          </div>
           <div class="feat" data-k="0x0360">
             <h3><span class="bar"></span>A graph of context</h3>
             <p>Link memories with directed edges and walk them breadth-first to <b>pull in what's related</b> to what you just recalled.</p>
@@ -403,7 +407,8 @@
 <span class="c"># recall it by tag</span>
 {<span class="key">"operation"</span>:<span class="op">"search"</span>, <span class="key">"tags"</span>:[<span class="s">"user"</span>], <span class="key">"top_k"</span>:5}
 <span class="ar">→</span> {<span class="key">"ok"</span>:true, <span class="key">"total"</span>:1, <span class="key">"records"</span>:[ … ]}</pre>
-        <p class="opsline">operations &nbsp;·&nbsp; <b>ping insert get update delete search promote relate traverse stats</b></p>
+        <p class="opsline">operations &nbsp;·&nbsp; <b>ping insert get update delete search count promote relate traverse stats</b></p>
+        <p class="opsline"><b>insert</b> takes a batch of records in one call; <b>delete</b> and <b>count</b> work by id or by filter (tags / type / time range).</p>
         <p class="opsline"><b>stats</b> reports durability lag, live &amp; tombstone counts, log size, and per-index sizes — for monitoring and capacity planning.</p>
       </div>
     </section>
