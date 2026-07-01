@@ -7,6 +7,7 @@
 #include "aegisdb/query_engine.h"
 
 #include <ctype.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -22,6 +23,7 @@
                                * work; a very selective filter may still yield
                                * fewer than top_k — inherent to filtered ANN) */
 #define MAX_OFFSET 100000 /* clamp pagination offset to bound ranking work/allocs */
+#define MIN_HALF_LIFE_MS 1000 /* floor recency half-life at 1s (avoid absurd decay) */
 
 /* ----- phase gating (T055) --------------------------------------------- */
 
@@ -456,6 +458,8 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
         free(snap);
         return AEGIS_ERR_INTERNAL;
     }
+    /* clock for recency decay, sampled once so all candidates rank consistently */
+    uint64_t now = (semantic && p->half_life_ms) ? db_now_ms() : 0;
     size_t m = 0;
     for (size_t i = 0; i < sn; i++) {
         /* min_score gates on the raw cosine similarity, before the log read */
@@ -474,10 +478,18 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
         }
         cands[m].rec = r;
         if (semantic) {
-            /* T038: re-rank by importance * confidence * similarity */
+            /* T038: re-rank by importance * confidence * similarity, then (#69)
+             * an optional exponential recency decay by age since `updated`. */
             float sim = snap[i].score;
             float w = r.importance * r.confidence;
-            cands[m].score = (w > 0 ? w : 1.0f) * sim;
+            float score = (w > 0 ? w : 1.0f) * sim;
+            if (p->half_life_ms) {
+                double age = now > r.updated ? (double)(now - r.updated) : 0.0;
+                /* 0.5^(age/half_life) == exp(-ln2 * age/half_life) */
+                score *= (float)exp(-0.6931471805599453 * age /
+                                    (double)p->half_life_ms);
+            }
+            cands[m].score = score;
         } else {
             cands[m].score = 0;
         }
@@ -1013,6 +1025,8 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req, const char *ns) {
         p.has_min_score = 1;
         p.min_score = (float)ms;
     }
+    if (jr_u64(req, "half_life_ms", &v) == 0 && v > 0)
+        p.half_life_ms = v < MIN_HALF_LIFE_MS ? MIN_HALF_LIFE_MS : v; /* 0/absent = off */
 
     const char **tags = NULL;
     size_t tn = 0;

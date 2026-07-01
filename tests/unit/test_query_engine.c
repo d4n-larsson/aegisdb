@@ -346,6 +346,41 @@ static void test_search_offset_and_min_score(void) {
     free(r);
 }
 
+/* Recency decay: two records identical in direction and importance, separated
+ * in age by a real interval. Without decay their scores tie (ordering
+ * unspecified); with a short half_life the fresher one must rank first, since
+ * recency is then the only differentiator. */
+static void test_search_recency_decay(void) {
+    float v[3] = {1.0f, 0.0f, 0.0f}; /* both aligned with the query, same imp */
+    uint64_t old_id = insert_vec_tag(&g_db, v, "d");
+    usleep(800000); /* 0.8s so `updated` differs meaningfully vs a ~1s half-life */
+    uint64_t new_id = insert_vec_tag(&g_db, v, "d");
+
+    SearchParams p = {0};
+    float q[3] = {1.0f, 0.0f, 0.0f};
+    p.embedding = q;
+    p.embedding_dim = 3;
+    p.top_k = 2;
+
+    /* both come back regardless (no decay yet) */
+    MemoryRecord *r = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &r, &n));
+    TEST_ASSERT_EQUAL_size_t(2, n);
+    for (size_t i = 0; i < n; i++) record_free(&r[i]);
+    free(r);
+
+    /* with a 1s half-life, the ~0.8s-older record decays to ~0.57 of the fresh
+     * one, so the fresh record ranks first */
+    p.half_life_ms = 1000;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &r, &n));
+    TEST_ASSERT_EQUAL_size_t(2, n);
+    TEST_ASSERT_EQUAL_UINT64(new_id, r[0].id);
+    TEST_ASSERT_EQUAL_UINT64(old_id, r[1].id);
+    for (size_t i = 0; i < n; i++) record_free(&r[i]);
+    free(r);
+}
+
 static void test_working_memory_promote(void) {
     MemoryRecord in = make_input(MEM_WORKING, "scratch note");
     MemoryRecord out;
@@ -478,6 +513,7 @@ int main(void) {
     RUN_TEST(test_search_top_k_selection);
     RUN_TEST(test_search_filtered_widening);
     RUN_TEST(test_search_offset_and_min_score);
+    RUN_TEST(test_search_recency_decay);
     RUN_TEST(test_working_memory_promote);
     RUN_TEST(test_relate_and_traverse);
     RUN_TEST(test_agent_namespace_filter);
