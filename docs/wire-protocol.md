@@ -163,6 +163,16 @@ A `MemoryRecord` also carries `agent_id`, `embedding`, and `relationships` (an
 array of `{ "from_id", "to_id", "kind" }`) when those are set. `relationships`
 is populated by `relate` and returned by `get`, `search`, and `traverse`.
 
+**Batch insert**: supply a `records` array (each element a record body as above,
+up to 1000) instead of a single record. Every element is validated first, so a
+malformed element rejects the whole batch before anything is written; the
+response returns the inserted records and a count:
+
+```json
+{ "operation": "insert", "records": [ {…}, {…} ] }
+→ { "ok": true, "count": 2, "records": [ {…}, {…} ] }
+```
+
 ---
 
 ### `get`
@@ -247,6 +257,29 @@ or `traverse`. Works for both episodic and semantic records.
 
 **Errors**: `NOT_FOUND` if `id` is unknown or already deleted (delete is
 idempotent in effect — a second call reports `NOT_FOUND`).
+
+**Delete by query**: omit `id` and supply filters (`tags`/`type`/`start_time`
++`end_time`) to delete every matching record; at least one filter is required
+(an unfiltered delete is refused with `INVALID_REQUEST`). A namespaced token
+only deletes its own records. The response reports the count:
+
+```json
+{ "operation": "delete", "tags": ["scratch"], "match": "any" }
+→ { "ok": true, "deleted": 7 }
+```
+
+---
+
+### `count`
+
+Count live records matching the filters (`tags`/`type`/`start_time`+`end_time`/
+`agent_id`, same semantics as `search`), without returning the records. A
+namespaced token counts only its own.
+
+```json
+{ "operation": "count", "tags": ["user"], "match": "all" }
+→ { "ok": true, "count": 42 }
+```
 
 ---
 

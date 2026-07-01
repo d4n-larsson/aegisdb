@@ -445,6 +445,46 @@ def test_cli(binary, port):
         check(r.returncode == 1, "client without a token -> exit 1")
 
 
+def test_bulk_ops(binary, port):
+    print("[bulk ops: batch insert, count, delete-by-query]")
+    with Server(binary, port, phase=4) as srv:
+        # batch insert: one request, several records
+        r = srv.req({"operation": "insert", "records": [
+            {"type": "episodic", "tags": ["bulk", "a"], "data": "one"},
+            {"type": "episodic", "tags": ["bulk", "b"], "data": "two"},
+            {"type": "episodic", "tags": ["bulk", "a"], "data": "three"},
+        ]})
+        check(r.get("ok") is True and r.get("count") == 3
+              and len(r.get("records", [])) == 3, "batch insert -> 3 records")
+
+        # a malformed element rejects the whole batch (nothing written)
+        r = srv.req({"operation": "insert", "records": [
+            {"type": "episodic", "data": "ok"},
+            {"type": "episodic"},  # missing data
+        ]})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "batch with a bad element -> INVALID_REQUEST")
+
+        # count by filter
+        r = srv.req({"operation": "count", "tags": ["bulk"]})
+        check(r.get("ok") is True and r.get("count") == 3,
+              "count tag=bulk -> 3 (batch write landed, bad batch did not)")
+        r = srv.req({"operation": "count", "tags": ["a"]})
+        check(r.get("ok") is True and r.get("count") == 2, "count tag=a -> 2")
+
+        # delete-by-query requires at least one filter
+        r = srv.req({"operation": "delete"})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "unfiltered delete-by-query -> INVALID_REQUEST")
+
+        # delete the 'a' subset, leaving the 'b' one
+        r = srv.req({"operation": "delete", "tags": ["a"]})
+        check(r.get("ok") is True and r.get("deleted") == 2,
+              "delete tag=a -> deleted 2")
+        r = srv.req({"operation": "count", "tags": ["bulk"]})
+        check(r.get("ok") is True and r.get("count") == 1, "count bulk -> 1 remains")
+
+
 def test_search_limits(binary, port):
     print("[search input limits]")
     with Server(binary, port, phase=4) as srv:  # default --embedding-dim 384
@@ -556,6 +596,7 @@ def main():
     test_cli(binary, 19477)
     test_search_limits(binary, 19478)
     test_concurrency(binary, 19479)
+    test_bulk_ops(binary, 19480)
 
     print()
     if FAILURES:
