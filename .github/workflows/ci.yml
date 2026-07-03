@@ -34,7 +34,7 @@ jobs:
       matrix:
         cc: [gcc, clang]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build and run unit + contract tests
         env:
           CC: ${{ matrix.cc }}
@@ -44,7 +44,7 @@ jobs:
     name: ASan + UBSan (make check)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Sanitize both the unit tests and the live server the contract suite
       # drives. halt_on_error surfaces the first UBSan hit; leaks are fatal.
       - name: Build and test under -fsanitize=address,undefined
@@ -59,7 +59,7 @@ jobs:
     name: TSan (contract suite vs live server)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # The contract suite launches the server binary and drives it over many
       # concurrent connections (see test_concurrency), so a TSan-built server
       # exercises the event loop + locking under real contention. The contract
