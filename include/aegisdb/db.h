@@ -3,6 +3,7 @@
 #define AEGISDB_DB_H
 
 #include <pthread.h>
+#include <stdatomic.h>
 
 #include "aegisdb/config.h"
 #include "aegisdb/hash_index.h"
@@ -11,6 +12,25 @@
 #include "aegisdb/tag_index.h"
 #include "aegisdb/time_index.h"
 #include "aegisdb/working_buffer.h"
+
+/* Per-operation index for the metrics counters. Order defines the JSON keys in
+ * the stats `metrics.by_op` object (see query_engine.c). */
+typedef enum {
+    MOP_PING = 0, MOP_INSERT, MOP_GET, MOP_UPDATE, MOP_DELETE, MOP_SEARCH,
+    MOP_COUNT, MOP_PROMOTE, MOP_RELATE, MOP_TRAVERSE, MOP_STATS,
+    MOP_OTHER, /* unknown / missing operation */
+    MOP__N
+} MetricOp;
+
+/* Monotonic operational counters, incremented per request from the io-threads;
+ * lock-free atomics. Exposed via the stats op for external scraping. */
+typedef struct {
+    atomic_uint_fast64_t requests;        /* all dispatched requests */
+    atomic_uint_fast64_t errors;          /* responses with ok:false */
+    atomic_uint_fast64_t unauthorized;    /* auth rejections (subset of errors) */
+    atomic_uint_fast64_t dispatch_micros; /* cumulative in-dispatch time (µs) */
+    atomic_uint_fast64_t by_op[MOP__N];   /* per-operation request count */
+} Metrics;
 
 typedef struct {
     Config config;
@@ -23,6 +43,7 @@ typedef struct {
     WorkingStore *working; /* volatile sessions (Phase 4) */
 
     uint64_t started_ms;     /* server start time (epoch ms) for uptime stats */
+    Metrics metrics;         /* operational counters (see stats op) */
     uint64_t next_id;        /* monotonic id allocator for persisted records */
     pthread_mutex_t id_lock; /* guards next_id */
     pthread_rwlock_t index_lock; /* guards the in-memory indexes (T051) */

@@ -10,6 +10,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "aegisdb/json_request.h"
 #include "aegisdb/json_response.h"
@@ -965,6 +966,28 @@ static cJSON *handle_stats(AegisDB *db) {
     pthread_mutex_lock(&db->id_lock);
     cJSON_AddNumberToObject(o, "next_id", (double)db->next_id);
     pthread_mutex_unlock(&db->id_lock);
+
+    /* Monotonic operational counters, for scraping (rates = successive diffs). */
+    static const char *const op_names[MOP__N] = {
+        "ping", "insert", "get", "update", "delete", "search",
+        "count", "promote", "relate", "traverse", "stats", "other"};
+    Metrics *mt = &db->metrics;
+    cJSON *m = cJSON_AddObjectToObject(o, "metrics");
+    if (m) {
+        cJSON_AddNumberToObject(m, "requests",
+            (double)atomic_load_explicit(&mt->requests, memory_order_relaxed));
+        cJSON_AddNumberToObject(m, "errors",
+            (double)atomic_load_explicit(&mt->errors, memory_order_relaxed));
+        cJSON_AddNumberToObject(m, "unauthorized",
+            (double)atomic_load_explicit(&mt->unauthorized, memory_order_relaxed));
+        cJSON_AddNumberToObject(m, "dispatch_micros",
+            (double)atomic_load_explicit(&mt->dispatch_micros, memory_order_relaxed));
+        cJSON *bo = cJSON_AddObjectToObject(m, "by_op");
+        if (bo)
+            for (int i = 0; i < MOP__N; i++)
+                cJSON_AddNumberToObject(bo, op_names[i],
+                    (double)atomic_load_explicit(&mt->by_op[i], memory_order_relaxed));
+    }
     return o;
 }
 
@@ -1341,7 +1364,7 @@ static int is_write_op(const char *op) {
            strcmp(op, "relate") == 0;
 }
 
-cJSON *query_engine_dispatch(AegisDB *db, const cJSON *req) {
+static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
     const char *op = jr_str(req, "operation", NULL);
     if (!op) {
         LOG_DEBUG("dispatch: request with no \"operation\" field");
@@ -1381,4 +1404,57 @@ cJSON *query_engine_dispatch(AegisDB *db, const cJSON *req) {
 
     LOG_WARN("dispatch: unknown operation \"%s\"", op);
     return json_error("INVALID_REQUEST", "unknown operation");
+}
+
+static MetricOp metric_op(const char *op) {
+    if (!op) return MOP_OTHER;
+    if (!strcmp(op, "ping")) return MOP_PING;
+    if (!strcmp(op, "insert")) return MOP_INSERT;
+    if (!strcmp(op, "get")) return MOP_GET;
+    if (!strcmp(op, "update")) return MOP_UPDATE;
+    if (!strcmp(op, "delete")) return MOP_DELETE;
+    if (!strcmp(op, "search")) return MOP_SEARCH;
+    if (!strcmp(op, "count")) return MOP_COUNT;
+    if (!strcmp(op, "promote")) return MOP_PROMOTE;
+    if (!strcmp(op, "relate")) return MOP_RELATE;
+    if (!strcmp(op, "traverse")) return MOP_TRAVERSE;
+    if (!strcmp(op, "stats")) return MOP_STATS;
+    return MOP_OTHER;
+}
+
+static uint64_t monotonic_micros(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
+/* True if `resp` is an error response, and if so its error code (or NULL). */
+static int resp_is_error(const cJSON *resp, const char **code) {
+    const cJSON *ok = cJSON_GetObjectItemCaseSensitive(resp, "ok");
+    if (!ok || !cJSON_IsFalse(ok)) return 0;
+    const cJSON *err = cJSON_GetObjectItemCaseSensitive(resp, "error");
+    const cJSON *c = err ? cJSON_GetObjectItemCaseSensitive(err, "code") : NULL;
+    if (code) *code = (c && cJSON_IsString(c)) ? c->valuestring : NULL;
+    return 1;
+}
+
+/* Public entry: dispatch and record operational metrics (all lock-free atomic,
+ * memory_order_relaxed — counters need eventual correctness, not ordering). */
+cJSON *query_engine_dispatch(AegisDB *db, const cJSON *req) {
+    uint64_t t0 = monotonic_micros();
+    cJSON *resp = dispatch_inner(db, req);
+    uint64_t elapsed = monotonic_micros() - t0;
+
+    Metrics *m = &db->metrics;
+    atomic_fetch_add_explicit(&m->requests, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&m->by_op[metric_op(jr_str(req, "operation", NULL))],
+                              1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&m->dispatch_micros, elapsed, memory_order_relaxed);
+    const char *code = NULL;
+    if (resp && resp_is_error(resp, &code)) {
+        atomic_fetch_add_explicit(&m->errors, 1, memory_order_relaxed);
+        if (code && strcmp(code, "UNAUTHORIZED") == 0)
+            atomic_fetch_add_explicit(&m->unauthorized, 1, memory_order_relaxed);
+    }
+    return resp;
 }
