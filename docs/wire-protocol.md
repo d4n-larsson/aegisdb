@@ -494,6 +494,22 @@ authentication when enabled (unlike `ping`). Available at every phase.
 | `log_flush_pending` | `true` if writes have not yet been `fsync`'d — the current durability lag |
 | `indexes` | Per-index entry counts (`semantic` is the brute-force vector count; watch it for scale) |
 | `next_id` | The id the next persisted insert will receive |
+| `metrics` | Monotonic operational counters since startup (below) |
+
+The `metrics` object holds cumulative counters — scrapers compute rates from
+successive differences:
+
+| Field | Meaning |
+|-------|---------|
+| `requests` | Total requests dispatched |
+| `errors` | Responses with `ok: false` |
+| `unauthorized` | Auth rejections (a subset of `errors`) |
+| `dispatch_micros` | Cumulative in-dispatch time in µs (avg latency = `dispatch_micros / requests`) |
+| `by_op` | Per-operation request counts (`insert`, `search`, …, `other`) |
+
+`stats` is admin-only (a namespaced token gets `FORBIDDEN`), so metrics are
+server-wide. AegisDB has no HTTP endpoint by design — a sidecar can poll `stats`
+and translate to Prometheus, the same way TLS is terminated by a proxy.
 
 ---
 

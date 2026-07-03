@@ -186,6 +186,24 @@ def test_stats(binary, port):
         r = srv.req({"operation": "stats", "request_id": "stat-rid"})
         check(r.get("request_id") == "stat-rid", "stats echoes request_id")
 
+        # operational metrics: monotonic counters + per-op breakdown
+        m = srv.req({"operation": "stats"}).get("metrics", {})
+        check(isinstance(m, dict)
+              and {"requests", "errors", "unauthorized", "dispatch_micros",
+                   "by_op"} <= set(m),
+              "stats reports metrics object")
+        req_before = m["requests"]
+        searches_before = m["by_op"]["search"]
+        errs_before = m["errors"]
+
+        srv.req({"operation": "search", "tags": ["s"], "top_k": 5})
+        srv.req({"operation": "bogus_op"})  # -> error
+        m2 = srv.req({"operation": "stats"}).get("metrics", {})
+        check(m2["requests"] >= req_before + 3, "requests counter advances")
+        check(m2["by_op"]["search"] == searches_before + 1,
+              "by_op.search counts the search")
+        check(m2["errors"] >= errs_before + 1, "errors counter catches bogus op")
+
 
 def test_delete(binary, port):
     print("[phase 4: delete]")
