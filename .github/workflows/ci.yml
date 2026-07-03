@@ -1,0 +1,81 @@
+name: CI
+
+# Builds and tests the C server on every push/PR: the plain build under gcc and
+# clang, an AddressSanitizer/UBSan build (unit + wire-protocol contract, incl.
+# leak detection), and a ThreadSanitizer run of the contract suite against a
+# live server (the concurrency lives in the server, not the unit tests).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'tests/**'
+      - 'third_party/**'
+      - 'Makefile'
+      - 'CMakeLists.txt'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build + test (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run unit + contract tests
+        env:
+          CC: ${{ matrix.cc }}
+        run: make check
+
+  asan:
+    name: ASan + UBSan (make check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Sanitize both the unit tests and the live server the contract suite
+      # drives. halt_on_error surfaces the first UBSan hit; leaks are fatal.
+      - name: Build and test under -fsanitize=address,undefined
+        env:
+          CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra -Wno-unused-parameter"
+          LDFLAGS: "-fsanitize=address,undefined"
+          ASAN_OPTIONS: "detect_leaks=1:abort_on_error=1"
+          UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
+        run: make check
+
+  tsan:
+    name: TSan (contract suite vs live server)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The contract suite launches the server binary and drives it over many
+      # concurrent connections (see test_concurrency), so a TSan-built server
+      # exercises the event loop + locking under real contention. The contract
+      # runner sends server output to /dev/null, so route TSan reports to files
+      # via log_path and fail if any appear. setarch -R disables ASLR, which
+      # TSan requires on recent kernels.
+      - name: Build server + run contract suite under ThreadSanitizer
+        env:
+          CFLAGS: "-O1 -g -fsanitize=thread -fno-omit-frame-pointer -Wall -Wextra -Wno-unused-parameter"
+          LDFLAGS: "-fsanitize=thread"
+          TSAN_OPTIONS: "halt_on_error=0:log_path=${{ runner.temp }}/tsan"
+        run: |
+          setarch "$(uname -m)" -R make integration
+          if ls "${{ runner.temp }}"/tsan.* >/dev/null 2>&1; then
+            echo "::error::ThreadSanitizer reported data races:"
+            cat "${{ runner.temp }}"/tsan.*
+            exit 1
+          fi
+          echo "TSan: no races detected"

@@ -10,7 +10,9 @@ CFLAGS  ?= -O2 -g -Wall -Wextra -Wno-unused-parameter
 GIT_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
 VERSION ?= $(or $(GIT_VERSION),0.0.0-dev)
 CPPFLAGS:= -Iinclude -Ithird_party/cjson -D_GNU_SOURCE -DAEGIS_VERSION_STRING='"$(VERSION)"'
-LDFLAGS :=
+# `?=` so a sanitizer/CI build can pass LDFLAGS via the environment (the server
+# link rule uses only LDFLAGS, unlike the test rule which also uses CFLAGS).
+LDFLAGS ?=
 LDLIBS  := -lpthread -lm
 
 # Opt-in host-CPU tuning (`make NATIVE=1`): -O3 + -march=native auto-vectorizes
