@@ -18,8 +18,8 @@ static void tmp_path(char *buf, size_t n, const char *tag) {
 static void test_put_get(void) {
     HashIndex *h = hash_index_create();
     TEST_ASSERT_NOT_NULL(h);
-    TEST_ASSERT_EQUAL_INT(0, hash_index_put(h, 1, 0, 100, 1, 0));
-    TEST_ASSERT_EQUAL_INT(0, hash_index_put(h, 2, 108, 50, 2, 0));
+    TEST_ASSERT_EQUAL_INT(0, hash_index_put(h, 1, 0, 100, 1, 0, 0));
+    TEST_ASSERT_EQUAL_INT(0, hash_index_put(h, 2, 108, 50, 2, 0, 0));
 
     const HashEntry *e = hash_index_get(h, 1);
     TEST_ASSERT_NOT_NULL(e);
@@ -38,8 +38,8 @@ static void test_put_get(void) {
 
 static void test_update_overwrites(void) {
     HashIndex *h = hash_index_create();
-    hash_index_put(h, 5, 0, 10, 1, 0);
-    hash_index_put(h, 5, 200, 20, 2, 0); /* same id -> latest location wins */
+    hash_index_put(h, 5, 0, 10, 1, 0, 0);
+    hash_index_put(h, 5, 200, 20, 2, 0, 0); /* same id -> latest location wins */
     const HashEntry *e = hash_index_get(h, 5);
     TEST_ASSERT_NOT_NULL(e);
     TEST_ASSERT_EQUAL_UINT64(200, e->offset);
@@ -52,7 +52,7 @@ static void test_update_overwrites(void) {
 static void test_many_entries(void) {
     HashIndex *h = hash_index_create();
     for (uint64_t i = 1; i <= 1000; i++)
-        TEST_ASSERT_EQUAL_INT(0, hash_index_put(h, i, i * 8, 4, 1, 0));
+        TEST_ASSERT_EQUAL_INT(0, hash_index_put(h, i, i * 8, 4, 1, 0, 0));
     TEST_ASSERT_EQUAL_size_t(1000, hash_index_count(h));
     for (uint64_t i = 1; i <= 1000; i++) {
         const HashEntry *e = hash_index_get(h, i);
@@ -67,8 +67,8 @@ static void test_save_load_roundtrip(void) {
     tmp_path(path, sizeof(path), "hashidx");
 
     HashIndex *h = hash_index_create();
-    hash_index_put(h, 10, 1000, 5, 1, 0);
-    hash_index_put(h, 20, 2000, 6, 2, 1); /* tombstoned entry */
+    hash_index_put(h, 10, 1000, 5, 1, 0, 0);
+    hash_index_put(h, 20, 2000, 6, 2, 1, 0); /* tombstoned entry */
     TEST_ASSERT_EQUAL_INT(0, hash_index_save(h, path, 4096, 21));
     hash_index_free(h);
 
@@ -93,8 +93,8 @@ static void test_load_rejects_corrupt(void) {
     tmp_path(path, sizeof(path), "hashidx_bad");
 
     HashIndex *h = hash_index_create();
-    hash_index_put(h, 1, 16, 4, 0, 0);
-    hash_index_put(h, 2, 36, 4, 0, 0);
+    hash_index_put(h, 1, 16, 4, 0, 0, 0);
+    hash_index_put(h, 2, 36, 4, 0, 0, 0);
     TEST_ASSERT_EQUAL_INT(0, hash_index_save(h, path, 64, 3));
     hash_index_free(h);
 
@@ -121,7 +121,7 @@ static void test_load_rejects_corrupt_header(void) {
     tmp_path(path, sizeof(path), "hashidx_badhdr");
 
     HashIndex *h = hash_index_create();
-    hash_index_put(h, 1, 16, 4, 0, 0);
+    hash_index_put(h, 1, 16, 4, 0, 0, 0);
     TEST_ASSERT_EQUAL_INT(0, hash_index_save(h, path, 4096, 7));
     hash_index_free(h);
 

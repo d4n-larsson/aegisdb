@@ -84,6 +84,11 @@ aegis_status_t qe_count(AegisDB *db, const SearchParams *p, size_t *out_count);
 aegis_status_t qe_delete_by_query(AegisDB *db, const SearchParams *p,
                                   const char *ns, size_t *out_deleted);
 
+/* Tombstone every live record whose TTL horizon has passed (expires_at != 0 &&
+ * now >= expires_at). Called by the maintenance thread; returns the count
+ * swept. */
+size_t qe_sweep_expired(AegisDB *db, uint64_t now);
+
 /* Promote a working record to a persisted one. When `ns` is non-NULL the new
  * record is pinned to that namespace (agent_id). */
 aegis_status_t qe_promote(AegisDB *db, const char *session_id,

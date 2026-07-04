@@ -72,7 +72,7 @@ static aegis_status_t append_and_hash(AegisDB *db, const MemoryRecord *rec) {
     free(buf);
     if (rv != 0) return AEGIS_ERR_INTERNAL;
     if (hash_index_put(db->hash, rec->id, off, (uint32_t)len, (uint8_t)rec->type,
-                       (uint8_t)(rec->deleted ? 1 : 0)) != 0)
+                       (uint8_t)(rec->deleted ? 1 : 0), rec->expires_at) != 0)
         return AEGIS_ERR_INTERNAL;
     return AEGIS_OK;
 }
@@ -124,6 +124,12 @@ static int ns_denies(const char *ns, const MemoryRecord *r) {
     return ns && (!r->agent_id || strcmp(r->agent_id, ns) != 0);
 }
 
+/* A TTL'd record past its horizon is archived: hidden from recall (get/search/
+ * traverse) until the expiry sweep tombstones it. */
+static int record_expired(const MemoryRecord *r, uint64_t now) {
+    return r->expires_at != 0 && now >= r->expires_at;
+}
+
 /* ----- core operations -------------------------------------------------- */
 
 aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
@@ -165,7 +171,10 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
     rec->created = now;
     rec->updated = now; /* episodic: updated == created */
     rec->deleted = 0;
-    rec->expires_at = 0;
+    /* Opt-in TTL (#73): a positive ttl_ms archives the record after the horizon
+     * — hidden from recall immediately, reclaimed by the expiry sweep. 0 (the
+     * default) means never, preserving the durable/audit-log behaviour. */
+    rec->expires_at = ttl_ms ? now + ttl_ms : 0;
 
     pthread_rwlock_wrlock(&db->index_lock);
     st = append_and_hash(db, rec);
@@ -194,7 +203,7 @@ aegis_status_t qe_get(AegisDB *db, uint64_t id, const char *agent_filter,
                       MemoryRecord *out) {
     aegis_status_t st = load_record_ro(db, id, out);
     if (st != AEGIS_OK) return st;
-    if (out->deleted) {
+    if (out->deleted || record_expired(out, db_now_ms())) {
         record_free(out);
         return AEGIS_ERR_NOT_FOUND;
     }
@@ -459,8 +468,9 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
         free(snap);
         return AEGIS_ERR_INTERNAL;
     }
-    /* clock for recency decay, sampled once so all candidates rank consistently */
-    uint64_t now = (semantic && p->half_life_ms) ? db_now_ms() : 0;
+    /* clock sampled once so expiry + recency decay rank all candidates
+     * consistently within this query */
+    uint64_t now = db_now_ms();
     size_t m = 0;
     for (size_t i = 0; i < sn; i++) {
         /* min_score gates on the raw cosine similarity, before the log read */
@@ -473,7 +483,7 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
         int dec = record_decode(buf, len, &r);
         free(buf);
         if (dec != 0) continue;
-        if (!passes_filters(&r, p)) {
+        if (record_expired(&r, now) || !passes_filters(&r, p)) {
             record_free(&r);
             continue;
         }
@@ -674,6 +684,37 @@ aegis_status_t qe_delete_by_query(AegisDB *db, const SearchParams *p,
     return AEGIS_OK;
 }
 
+size_t qe_sweep_expired(AegisDB *db, uint64_t now) {
+    /* Collect expired live ids from an in-memory hash scan (no record reads —
+     * expires_at lives in the HashEntry), then tombstone each so compaction can
+     * reclaim the log. Snapshot-then-delete: qe_delete takes the write lock and
+     * re-validates, so a racing change just skips that id. */
+    pthread_rwlock_rdlock(&db->index_lock);
+    const HashIndex *h = db->hash;
+    uint64_t *ids = NULL;
+    size_t n = 0, cap = 0;
+    for (size_t i = 0; i < h->cap; i++) {
+        const HashEntry *e = &h->buckets[i];
+        if (!e->used || e->deleted || e->expires_at == 0 || now < e->expires_at)
+            continue;
+        if (n == cap) {
+            size_t nc = cap ? cap * 2 : 16;
+            uint64_t *g = realloc(ids, nc * sizeof(uint64_t));
+            if (!g) break; /* best-effort: sweep what we gathered */
+            ids = g;
+            cap = nc;
+        }
+        ids[n++] = e->id;
+    }
+    pthread_rwlock_unlock(&db->index_lock);
+
+    size_t swept = 0;
+    for (size_t i = 0; i < n; i++)
+        if (qe_delete(db, ids[i], NULL) == AEGIS_OK) swept++;
+    free(ids);
+    return swept;
+}
+
 aegis_status_t qe_promote(AegisDB *db, const char *session_id,
                           uint64_t working_id, MemoryType to_type,
                           const char *ns, MemoryRecord *out) {
@@ -754,6 +795,7 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
     aegis_status_t st = require_phase(db, 4);
     if (st != AEGIS_OK) return st;
     if (depth < 0) depth = 0;
+    uint64_t now = db_now_ms(); /* for expiry, sampled once for the whole walk */
 
     /* BFS over relationship edges */
     uint64_t *seen = NULL;
@@ -803,10 +845,10 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
             int dec = record_decode(buf, len, &r);
             free(buf);
             if (dec != 0) continue;
-            if (r.deleted ||
+            if (r.deleted || record_expired(&r, now) ||
                 (agent_filter && (!r.agent_id ||
                                   strcmp(r.agent_id, agent_filter) != 0))) {
-                /* a filtered node is skipped entirely, edges and all */
+                /* a filtered/expired node is skipped entirely, edges and all */
                 record_free(&r);
                 continue;
             }
