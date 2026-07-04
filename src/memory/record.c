@@ -4,7 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define RECORD_CODEC_VERSION 1
+/* v1: single embedding (dim + dim floats). v2 (#85): vec_count + dim +
+ * vec_count*dim floats. decode reads both; encode always writes v2. */
+#define RECORD_CODEC_VERSION 2
 #define NULL_LEN 0xFFFFFFFFu
 
 /* ----- record lifecycle ------------------------------------------------- */
@@ -91,12 +93,13 @@ MemoryRecord *record_clone(const MemoryRecord *src) {
     if (src->tag_count &&
         record_set_tags(r, (const char *const *)src->tags, src->tag_count))
         goto fail;
-    if (src->embedding_dim) {
-        r->embedding = malloc(src->embedding_dim * sizeof(float));
+    if (src->embedding_dim && src->vec_count) {
+        size_t n = src->vec_count * src->embedding_dim;
+        r->embedding = malloc(n * sizeof(float));
         if (!r->embedding) goto fail;
-        memcpy(r->embedding, src->embedding,
-               src->embedding_dim * sizeof(float));
+        memcpy(r->embedding, src->embedding, n * sizeof(float));
         r->embedding_dim = src->embedding_dim;
+        r->vec_count = src->vec_count;
     }
     for (size_t i = 0; i < src->rel_count; i++) {
         if (record_add_relationship(r, src->relationships[i].from_id,
@@ -186,8 +189,11 @@ int record_encode(const MemoryRecord *r, uint8_t **out, size_t *out_len) {
     for (size_t i = 0; i < r->tag_count; i++)
         put_lenstr(&b, r->tags[i], strlen(r->tags[i]));
 
+    /* v2: vec_count, dim, then vec_count*dim floats (contiguous vectors). */
+    put_u32(&b, (uint32_t)r->vec_count);
     put_u32(&b, (uint32_t)r->embedding_dim);
-    for (size_t i = 0; i < r->embedding_dim; i++) put_f32(&b, r->embedding[i]);
+    for (size_t i = 0; i < r->vec_count * r->embedding_dim; i++)
+        put_f32(&b, r->embedding[i]);
 
     put_u16(&b, (uint16_t)r->rel_count);
     for (size_t i = 0; i < r->rel_count; i++) {
@@ -267,7 +273,7 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
     record_init(out);
 
     uint8_t ver = get_u8(&c);
-    if (ver != RECORD_CODEC_VERSION) goto fail;
+    if (ver != 1 && ver != 2) goto fail; /* read v1 (single vec) and v2 */
     out->id = get_u64(&c);
     out->type = (MemoryType)get_u8(&c);
     out->created = get_u64(&c);
@@ -293,14 +299,20 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
         }
     }
 
+    /* v1: [dim][dim floats] (implicitly one vector). v2: [vec_count][dim]
+     * [vec_count*dim floats]. */
+    uint32_t vec_count = (ver >= 2) ? get_u32(&c) : 1;
     uint32_t dim = get_u32(&c);
     if (c.err) goto fail;
-    if (dim) {
-        if (c.off + (size_t)dim * 4 > c.len) goto fail;
-        out->embedding = malloc((size_t)dim * sizeof(float));
+    if (ver == 1 && dim == 0) vec_count = 0; /* v1 with no embedding */
+    size_t total = (size_t)vec_count * dim;
+    if (total) {
+        if (c.off + total * 4 > c.len) goto fail;
+        out->embedding = malloc(total * sizeof(float));
         if (!out->embedding) goto fail;
-        for (uint32_t i = 0; i < dim; i++) out->embedding[i] = get_f32(&c);
+        for (size_t i = 0; i < total; i++) out->embedding[i] = get_f32(&c);
         out->embedding_dim = dim;
+        out->vec_count = vec_count;
     }
 
     uint16_t rc = get_u16(&c);

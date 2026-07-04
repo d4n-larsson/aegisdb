@@ -63,6 +63,7 @@ static uint64_t insert_vec(AegisDB *db, const float *emb) {
     in.data_len = 1;
     in.embedding = (float *)emb;
     in.embedding_dim = 4;
+    in.vec_count = 1;
     MemoryRecord out;
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(db, &in, NULL, 0, &out));
     uint64_t id = out.id;

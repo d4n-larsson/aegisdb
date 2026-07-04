@@ -49,6 +49,7 @@ static uint64_t insert_vec_tag(AegisDB *db, float *emb, const char *tag) {
     MemoryRecord in = make_input(MEM_SEMANTIC, "v");
     in.embedding = emb; /* borrowed */
     in.embedding_dim = 3;
+    in.vec_count = 1;
     const char *tags[] = {tag};
     record_set_tags(&in, tags, 1);
     MemoryRecord out;
@@ -179,9 +180,11 @@ static void test_semantic_search(void) {
     MemoryRecord a = make_input(MEM_SEMANTIC, "a");
     a.embedding = v1;
     a.embedding_dim = 3;
+    a.vec_count = 1;
     MemoryRecord b = make_input(MEM_SEMANTIC, "b");
     b.embedding = v2;
     b.embedding_dim = 3;
+    b.vec_count = 1;
     MemoryRecord oa, ob;
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &a, NULL, 0, &oa));
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &b, NULL, 0, &ob));
@@ -218,6 +221,7 @@ static void test_search_top_k_selection(void) {
         MemoryRecord in = make_input(MEM_SEMANTIC, "v");
         in.embedding = v;
         in.embedding_dim = 3;
+    in.vec_count = 1;
         MemoryRecord out;
         TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &in, NULL, 0, &out));
         ids[i] = out.id;
@@ -513,6 +517,7 @@ static uint64_t insert_sem(AegisDB *db, float *emb, const char *tag, float imp) 
     MemoryRecord in = make_input(MEM_SEMANTIC, "s");
     in.embedding = emb; /* borrowed */
     in.embedding_dim = 3;
+    in.vec_count = 1;
     in.importance = imp;
     const char *tags[] = {tag};
     record_set_tags(&in, tags, 1);

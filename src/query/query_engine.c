@@ -24,6 +24,7 @@
                                * work; a very selective filter may still yield
                                * fewer than top_k — inherent to filtered ANN) */
 #define MAX_OFFSET 100000 /* clamp pagination offset to bound ranking work/allocs */
+#define MAX_VECS_PER_RECORD 64 /* cap embeddings per record (#85) */
 #define MIN_HALF_LIFE_MS 1000 /* floor recency half-life at 1s (avoid absurd decay) */
 
 /* ----- phase gating (T055) --------------------------------------------- */
@@ -1075,16 +1076,52 @@ static int build_input_record(AegisDB *db, const cJSON *req, MemoryRecord *in,
         return -1;
     }
     free(tags);
-    float *emb = NULL;
-    size_t en = 0;
-    if (jr_float_array(req, "embedding", &emb, &en,
-                       db->config.embedding_dimensions) != 0) {
-        *err = AEGIS_ERR_INVALID_REQUEST;
-        return -1;
-    }
-    if (en) {
-        in->embedding = emb;
-        in->embedding_dim = en;
+    /* Vectors: `embeddings` (array of equal-length arrays) for multi-vector, or
+     * `embedding` (a single array) for the common one-vector case (#85). All
+     * vectors must equal the server's embedding dimension. */
+    size_t dim = db->config.embedding_dimensions;
+    const cJSON *embs = cJSON_GetObjectItemCaseSensitive(req, "embeddings");
+    if (cJSON_IsArray(embs)) {
+        size_t vc = (size_t)cJSON_GetArraySize(embs);
+        if (vc == 0 || vc > MAX_VECS_PER_RECORD) {
+            *err = AEGIS_ERR_INVALID_REQUEST;
+            return -1;
+        }
+        float *buf = malloc(vc * dim * sizeof(float));
+        if (!buf) { *err = AEGIS_ERR_INTERNAL; return -1; }
+        size_t w = 0;
+        for (size_t v = 0; v < vc; v++) {
+            const cJSON *vec = cJSON_GetArrayItem(embs, (int)v);
+            if (!cJSON_IsArray(vec) || (size_t)cJSON_GetArraySize(vec) != dim) {
+                free(buf);
+                *err = AEGIS_ERR_INVALID_REQUEST;
+                return -1;
+            }
+            for (size_t i = 0; i < dim; i++) {
+                const cJSON *n = cJSON_GetArrayItem(vec, (int)i);
+                if (!cJSON_IsNumber(n)) {
+                    free(buf);
+                    *err = AEGIS_ERR_INVALID_REQUEST;
+                    return -1;
+                }
+                buf[w++] = (float)n->valuedouble;
+            }
+        }
+        in->embedding = buf;
+        in->embedding_dim = dim;
+        in->vec_count = vc;
+    } else {
+        float *emb = NULL;
+        size_t en = 0;
+        if (jr_float_array(req, "embedding", &emb, &en, dim) != 0) {
+            *err = AEGIS_ERR_INVALID_REQUEST;
+            return -1;
+        }
+        if (en) {
+            in->embedding = emb;
+            in->embedding_dim = en;
+            in->vec_count = 1;
+        }
     }
     *err = AEGIS_OK;
     return 0;

@@ -69,6 +69,7 @@ static void test_encode_decode_with_embedding_and_agent(void) {
     r.created = r.updated = 1000;
     r.agent_id = strdup("agent-001");
     r.embedding_dim = 4;
+    r.vec_count = 1;
     r.embedding = malloc(sizeof(float) * 4);
     for (size_t i = 0; i < 4; i++) r.embedding[i] = (float)(i + 1) * 0.25f;
     r.data = strdup("x");
@@ -164,6 +165,44 @@ static void test_clone_is_deep(void) {
     free(c);
 }
 
+/* A multi-vector record (#85) round-trips through encode/decode and clone:
+ * vec_count, dim, and all vec_count*dim floats are preserved. */
+static void test_multivector_roundtrip(void) {
+    MemoryRecord r;
+    record_init(&r);
+    r.id = 21;
+    r.type = MEM_SEMANTIC;
+    r.created = r.updated = 5;
+    r.data = strdup("m");
+    r.data_len = 1;
+    r.embedding_dim = 4;
+    r.vec_count = 3; /* three 4-D vectors, contiguous */
+    r.embedding = malloc(sizeof(float) * 12);
+    for (size_t i = 0; i < 12; i++) r.embedding[i] = (float)i * 0.5f;
+
+    uint8_t *buf = NULL;
+    size_t len = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&r, &buf, &len));
+    MemoryRecord d;
+    TEST_ASSERT_EQUAL_INT(0, record_decode(buf, len, &d));
+    TEST_ASSERT_EQUAL_size_t(4, d.embedding_dim);
+    TEST_ASSERT_EQUAL_size_t(3, d.vec_count);
+    for (size_t i = 0; i < 12; i++)
+        TEST_ASSERT_EQUAL_FLOAT((float)i * 0.5f, d.embedding[i]);
+    free(buf);
+    record_free(&d);
+
+    MemoryRecord *cl = record_clone(&r);
+    TEST_ASSERT_NOT_NULL(cl);
+    TEST_ASSERT_EQUAL_size_t(3, cl->vec_count);
+    TEST_ASSERT_EQUAL_size_t(4, cl->embedding_dim);
+    for (size_t i = 0; i < 12; i++)
+        TEST_ASSERT_EQUAL_FLOAT((float)i * 0.5f, cl->embedding[i]);
+    record_free(cl);
+    free(cl);
+    record_free(&r);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_init_defaults);
@@ -172,5 +211,6 @@ int main(void) {
     RUN_TEST(test_encode_decode_with_relationship);
     RUN_TEST(test_decode_rejects_truncated);
     RUN_TEST(test_clone_is_deep);
+    RUN_TEST(test_multivector_roundtrip);
     return UNITY_END();
 }

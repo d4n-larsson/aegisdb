@@ -21,10 +21,20 @@ cJSON *json_record(const MemoryRecord *r) {
     for (size_t i = 0; i < r->tag_count; i++)
         cJSON_AddItemToArray(tags, cJSON_CreateString(r->tags[i]));
 
-    if (r->embedding_dim) {
+    if (r->embedding_dim && r->vec_count == 1) {
         cJSON *emb = cJSON_AddArrayToObject(o, "embedding");
         for (size_t i = 0; i < r->embedding_dim; i++)
             cJSON_AddItemToArray(emb, cJSON_CreateNumber(r->embedding[i]));
+    } else if (r->embedding_dim && r->vec_count > 1) {
+        /* multi-vector: echo as an array of arrays (#85) */
+        cJSON *embs = cJSON_AddArrayToObject(o, "embeddings");
+        for (size_t v = 0; v < r->vec_count; v++) {
+            cJSON *vec = cJSON_CreateArray();
+            for (size_t i = 0; i < r->embedding_dim; i++)
+                cJSON_AddItemToArray(
+                    vec, cJSON_CreateNumber(r->embedding[v * r->embedding_dim + i]));
+            cJSON_AddItemToArray(embs, vec);
+        }
     }
 
     if (r->rel_count) {
