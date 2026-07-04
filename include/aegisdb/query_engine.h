@@ -89,6 +89,14 @@ aegis_status_t qe_delete_by_query(AegisDB *db, const SearchParams *p,
  * swept. */
 size_t qe_sweep_expired(AegisDB *db, uint64_t now);
 
+/* Merge near-duplicate semantic records (cosine >= min_similarity) within `ns`
+ * (all tenants when NULL): each cluster collapses to its most-recently-updated
+ * member, which absorbs the others' tags/relationships and the max
+ * importance/confidence; the rest are tombstoned. Reports the cluster and
+ * merged-away counts. Idempotent. */
+aegis_status_t qe_consolidate(AegisDB *db, const char *ns, float min_similarity,
+                              size_t *out_clusters, size_t *out_merged);
+
 /* Promote a working record to a persisted one. When `ns` is non-NULL the new
  * record is pinned to that namespace (agent_id). */
 aegis_status_t qe_promote(AegisDB *db, const char *session_id,
