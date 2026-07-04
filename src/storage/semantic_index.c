@@ -44,6 +44,7 @@ struct SemanticIndex {
     Hnsw *hnsw;          /* NULL until the live count crosses ann_threshold */
     size_t ann_threshold;
     size_t ef_search;    /* HNSW query beam width; 0 = the HNSW default */
+    int quantize;        /* store HNSW vectors as int8 (#75) */
 };
 
 #define MAP_INITIAL_CAP 128 /* power of two; covers the dense array's first growths */
@@ -105,12 +106,13 @@ static void map_delete_at(SemanticIndex *s, size_t i) {
 }
 
 SemanticIndex *semantic_index_create(size_t dim, size_t ann_threshold,
-                                     size_t ef_search) {
+                                     size_t ef_search, int quantize) {
     SemanticIndex *s = calloc(1, sizeof(*s));
     if (!s) return NULL;
     s->dim = dim;
     s->ann_threshold = ann_threshold ? ann_threshold : DEFAULT_ANN_THRESHOLD;
     s->ef_search = ef_search;
+    s->quantize = quantize;
     return s;
 }
 
@@ -156,7 +158,8 @@ void semantic_index_clear(SemanticIndex *s) {
  * crossing), then drop the dense array so the graph holds the only copy of each
  * vector; thereafter add/remove operate on the graph. Returns 0/-1. */
 static int build_hnsw(SemanticIndex *s) {
-    HnswParams p = {.ef_search = s->ef_search, .seed = 0x9E3779B97F4A7C15ULL};
+    HnswParams p = {.ef_search = s->ef_search, .seed = 0x9E3779B97F4A7C15ULL,
+                    .quantize = s->quantize};
     Hnsw *h = hnsw_create(s->dim, &p);
     if (!h) return -1;
     for (size_t i = 0; i < s->n; i++) {
@@ -374,6 +377,12 @@ int semantic_index_load(SemanticIndex *s, const char *path,
     if (s->hnsw || s->n != 0) return -1; /* must be a fresh index */
     Hnsw *g = hnsw_load(path, s->dim, out_covered_log_size);
     if (!g) return -1;
+    /* A checkpoint saved in a different quantization mode than we're configured
+     * for is rejected, so recovery rebuilds it in the configured mode. */
+    if (hnsw_is_quantized(g) != (s->quantize ? 1 : 0)) {
+        hnsw_free(g);
+        return -1;
+    }
     s->hnsw = g; /* the graph is authoritative; no dense array to rebuild */
     return 0;
 }

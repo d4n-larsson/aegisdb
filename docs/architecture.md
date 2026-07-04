@@ -112,20 +112,24 @@ rather than by the total size of the database.
 
 ## Indexes
 
-All indexes are in-memory, rebuilt from the log on startup, and guarded by a
-single `pthread_rwlock_t` (see [Concurrency](#concurrency)).
+All indexes are in-memory, rebuilt from the log on startup (the semantic graph
+also checkpoints to `memory.sem` to skip the rebuild), and guarded by a
+`pthread_rwlock_t` (see [Concurrency](#concurrency)).
 
 | Index | Purpose | Structure |
 |-------|---------|-----------|
 | Hash | `get` by id | Open-addressing hash map, id → log location; snapshotted to `memory.index` |
 | Time | `search` by time range | Sorted `(created, id)` array, range-scanned |
 | Tag | `search` by tags | Inverted index: tag → sorted id list; `all` intersects, `any` unions |
-| Semantic | `search` by embedding | Exact cosine top-K over stored float32 vectors (brute-force scan, no ANN) |
+| Semantic | `search` by embedding | Exact cosine scan while small; above `--ann-threshold` an HNSW graph for sublinear approximate top-K |
 
 Semantic results are ranked by cosine similarity weighted by
-`importance × confidence` (the weight falls back to `1.0` when both are unset).
-Embedding length must equal the server's `--embedding-dim` (default 384) or the
-request is rejected with `INVALID_REQUEST`.
+`importance × confidence` (the weight falls back to `1.0` when both are unset),
+with an optional per-query recency decay. Above the ANN threshold the vectors
+are held only by the HNSW graph, optionally int8-quantized (`--ann-quantize`,
+~4× less memory for a small recall cost). Embedding length must equal the
+server's `--embedding-dim` (default 384) or the request is rejected with
+`INVALID_REQUEST`.
 
 ## The record model
 
@@ -228,6 +232,5 @@ enabled. TLS is deliberately kept out of the binary — see Non-goals.
 ## Non-goals
 
 - No SQL, no relational joins — retrieval is by id, time, tag, vector, and graph.
-- No approximate nearest-neighbor index (HNSW/IVF/PQ); semantic search is exact.
 - No built-in replication or sharding; AegisDB is a single-node server.
 - No transport-level encryption; that is delegated to the surrounding channel.

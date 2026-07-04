@@ -137,7 +137,8 @@ int db_open(AegisDB *db, const Config *cfg) {
     db->time = time_index_create();
     db->tags = tag_index_create();
     db->sem = semantic_index_create(cfg->embedding_dimensions,
-                                    cfg->ann_threshold, cfg->ann_ef_search);
+                                    cfg->ann_threshold, cfg->ann_ef_search,
+                                    cfg->ann_quantize);
     db->working =
         working_store_create(cfg->working_capacity, cfg->default_ttl_ms);
     if (!db->hash || !db->time || !db->tags || !db->sem || !db->working) {

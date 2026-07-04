@@ -4,9 +4,10 @@
  * ground truth at production embedding dimensions, plus build and query time.
  * Not part of `make test` (too heavy for CI) — run via `make bench` or directly:
  *
- *   ./build/bench/hnsw_bench [dim N queries M ef_construction ef_search k]
+ *   ./build/bench/hnsw_bench [dim N queries M ef_construction ef_search k quantize]
  *
- * Defaults: dim=384 N=10000 queries=100 M=16 ef_construction=200 ef_search=50 k=10
+ * Defaults: dim=384 N=10000 queries=100 M=16 ef_construction=200 ef_search=50
+ * k=10 quantize=0. Set quantize=1 to measure int8 recall vs the float32 default.
  *
  * Vectors are CLUSTERED (a mixture of Gaussians around random centers), not
  * uniform random: real text embeddings live on a lower-dimensional clustered
@@ -69,9 +70,11 @@ int main(int argc, char **argv) {
     size_t efc = argc > 5 ? strtoul(argv[5], NULL, 10) : 200;
     size_t efs = argc > 6 ? strtoul(argv[6], NULL, 10) : 50;
     size_t K = argc > 7 ? strtoul(argv[7], NULL, 10) : 10;
+    int quantize = argc > 8 ? (int)strtoul(argv[8], NULL, 10) : 0;
 
-    printf("dim=%zu N=%zu Q=%zu M=%zu ef_construction=%zu ef_search=%zu k=%zu\n",
-           dim, N, Q, M, efc, efs, K);
+    printf("dim=%zu N=%zu Q=%zu M=%zu ef_construction=%zu ef_search=%zu k=%zu "
+           "quantize=%d\n",
+           dim, N, Q, M, efc, efs, K, quantize);
 
     /* Clustered data: ~100 vectors per cluster, each a center + small noise. */
     size_t C = N / 100 ? N / 100 : 1;
@@ -83,7 +86,8 @@ int main(int argc, char **argv) {
         for (size_t d = 0; d < dim; d++) vecs[i * dim + d] = c[d] + 0.15f * frand();
     }
 
-    HnswParams p = {.M = M, .ef_construction = efc, .ef_search = efs, .seed = 1};
+    HnswParams p = {.M = M, .ef_construction = efc, .ef_search = efs, .seed = 1,
+                    .quantize = quantize};
     Hnsw *h = hnsw_create(dim, &p);
 
     double t0 = now_s();
