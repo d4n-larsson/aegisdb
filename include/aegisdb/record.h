@@ -29,8 +29,12 @@ typedef struct {
     char **tags; /* owned array of owned strings */
     size_t tag_count;
 
+    /* Embeddings: `vec_count` vectors of `embedding_dim` floats each, stored
+     * contiguously (vector i at embedding + i*embedding_dim). vec_count is 0
+     * when there is no embedding, 1 for the common single-vector case (#85). */
     float *embedding; /* owned, may be NULL (Phase 3) */
     size_t embedding_dim;
+    size_t vec_count;
 
     Relationship *relationships; /* owned, may be NULL (Phase 4) */
     size_t rel_count;

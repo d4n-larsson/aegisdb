@@ -538,6 +538,33 @@ def test_consolidate(binary, port):
               "second consolidate is a no-op")
 
 
+def test_multivector(binary, port):
+    print("[multi-vector: embeddings array round-trip]")
+    with Server(binary, port, phase=4) as srv:  # --embedding-dim 384
+        dim = 384
+        v0 = [1.0] + [0.0] * (dim - 1)
+        v1 = [0.0, 1.0] + [0.0] * (dim - 2)
+        r = srv.req({"operation": "insert", "type": "semantic", "tags": ["mv"],
+                     "data": "doc", "embeddings": [v0, v1]})
+        check(r.get("ok") is True, "insert with embeddings ok")
+        rid = r["record"]["id"]
+        # the record echoes both vectors
+        r = srv.req({"operation": "get", "id": rid})
+        embs = r.get("record", {}).get("embeddings")
+        check(isinstance(embs, list) and len(embs) == 2 and len(embs[0]) == dim,
+              "get echoes both embeddings")
+        # searchable by the primary vector (PR1 indexes vector 0)
+        r = srv.req({"operation": "search", "embedding": v0, "top_k": 1})
+        check(r.get("ok") is True and r.get("records")
+              and r["records"][0]["id"] == rid,
+              "found by its primary vector")
+        # a vector of the wrong dimension is rejected
+        r = srv.req({"operation": "insert", "type": "semantic", "data": "bad",
+                     "embeddings": [[1.0, 2.0, 3.0]]})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "wrong-dimension embedding rejected")
+
+
 def test_search_limits(binary, port):
     print("[search input limits]")
     with Server(binary, port, phase=4) as srv:  # default --embedding-dim 384
@@ -651,6 +678,7 @@ def main():
     test_concurrency(binary, 19479)
     test_bulk_ops(binary, 19480)
     test_consolidate(binary, 19481)
+    test_multivector(binary, 19482)
 
     print()
     if FAILURES:
