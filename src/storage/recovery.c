@@ -27,7 +27,7 @@ static int scan_cb(uint64_t offset, const uint8_t *payload, size_t len,
         return 0; /* skip undecodable frame, keep scanning */
     if (r.id > sc->max_id) sc->max_id = r.id;
     hash_index_put(sc->db->hash, r.id, offset, (uint32_t)len, (uint8_t)r.type,
-                   (uint8_t)(r.deleted ? 1 : 0));
+                   (uint8_t)(r.deleted ? 1 : 0), r.expires_at);
     record_free(&r);
     return 0;
 }

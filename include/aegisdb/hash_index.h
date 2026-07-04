@@ -9,11 +9,13 @@
 
 typedef struct {
     uint64_t id;
-    uint64_t offset; /* frame start offset in the log */
-    uint32_t length; /* payload length */
-    uint8_t type;    /* MemoryType */
-    uint8_t deleted; /* tombstone */
-    uint8_t used;    /* slot occupied */
+    uint64_t offset;      /* frame start offset in the log */
+    uint64_t expires_at;  /* epoch ms TTL horizon; 0 = never (kept here so the
+                           * expiry sweep is an in-memory scan, no record reads) */
+    uint32_t length;      /* payload length */
+    uint8_t type;         /* MemoryType */
+    uint8_t deleted;      /* tombstone */
+    uint8_t used;         /* slot occupied */
 } HashEntry;
 
 typedef struct {
@@ -25,9 +27,10 @@ typedef struct {
 HashIndex *hash_index_create(void);
 void hash_index_free(HashIndex *h);
 
-/* Insert or update the location for `id`. Returns 0/-1. */
+/* Insert or update the location for `id`. `expires_at` is the TTL horizon in
+ * epoch ms (0 = never). Returns 0/-1. */
 int hash_index_put(HashIndex *h, uint64_t id, uint64_t offset, uint32_t length,
-                   uint8_t type, uint8_t deleted);
+                   uint8_t type, uint8_t deleted, uint64_t expires_at);
 
 /* Lookup. Returns a pointer to the live entry or NULL if absent. */
 const HashEntry *hash_index_get(const HashIndex *h, uint64_t id);

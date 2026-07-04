@@ -10,9 +10,9 @@
 
 #include "aegisdb/crc32.h"
 
-#define IDX_VERSION 3u
+#define IDX_VERSION 4u
 #define IDX_HDR 36   /* "AIDX"(4) ver(4) count(8) covered(8) next_id(8) crc(4) */
-#define IDX_ENTRY 22 /* id(8) offset(8) length(4) type(1) deleted(1) */
+#define IDX_ENTRY 30 /* id(8) offset(8) length(4) type(1) deleted(1) expires_at(8) */
 
 static int write_all(int fd, const uint8_t *buf, size_t n) {
     size_t put = 0;
@@ -98,7 +98,7 @@ static int rehash(HashIndex *h, size_t newcap) {
 }
 
 int hash_index_put(HashIndex *h, uint64_t id, uint64_t offset, uint32_t length,
-                   uint8_t type, uint8_t deleted) {
+                   uint8_t type, uint8_t deleted, uint64_t expires_at) {
     if ((double)(h->count + 1) > (double)h->cap * MAX_LOAD) {
         if (rehash(h, h->cap * 2) != 0) return -1;
     }
@@ -112,6 +112,7 @@ int hash_index_put(HashIndex *h, uint64_t id, uint64_t offset, uint32_t length,
     e->length = length;
     e->type = type;
     e->deleted = deleted;
+    e->expires_at = expires_at;
     return 0;
 }
 
@@ -144,6 +145,7 @@ uint8_t *hash_index_serialize(const HashIndex *h, uint64_t covered_log_size,
         memcpy(p + 16, &e->length, 4);
         p[20] = e->type;
         p[21] = e->deleted;
+        memcpy(p + 22, &e->expires_at, 8);
         p += IDX_ENTRY;
         written++;
     }
@@ -240,12 +242,13 @@ int hash_index_load(HashIndex *h, const char *path,
 
     for (uint64_t i = 0; i < cnt; i++) {
         const uint8_t *r = buf + i * IDX_ENTRY;
-        uint64_t id, offset;
+        uint64_t id, offset, expires_at;
         uint32_t length;
         memcpy(&id, r, 8);
         memcpy(&offset, r + 8, 8);
         memcpy(&length, r + 16, 4);
-        hash_index_put(h, id, offset, length, r[20], r[21]);
+        memcpy(&expires_at, r + 22, 8);
+        hash_index_put(h, id, offset, length, r[20], r[21], expires_at);
     }
     free(buf);
     if (out_covered_log_size) *out_covered_log_size = covered;

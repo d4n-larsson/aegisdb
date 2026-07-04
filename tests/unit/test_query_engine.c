@@ -433,6 +433,81 @@ static void test_count(void) {
     TEST_ASSERT_EQUAL_size_t(0, n);
 }
 
+/* A TTL'd episodic/semantic record is recallable before its horizon and reads
+ * back as not-found after it (lazy filter), for get and search alike. */
+static void test_ttl_lazy_expiry(void) {
+    MemoryRecord in = make_input(MEM_EPISODIC, "ephemeral");
+    const char *tags[] = {"tmp"};
+    record_set_tags(&in, tags, 1);
+    MemoryRecord out;
+    /* 50ms TTL */
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &in, NULL, 50, &out));
+    uint64_t id = out.id;
+    in.data = NULL;
+    in.data_len = 0;
+    record_free(&in);
+    record_free(&out);
+
+    /* before expiry: gettable and searchable */
+    MemoryRecord got;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_get(&g_db, id, NULL, &got));
+    record_free(&got);
+
+    usleep(80000); /* 80ms > 50ms TTL */
+
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_get(&g_db, id, NULL, &got));
+
+    SearchParams p = {0};
+    const char *q[] = {"tmp"};
+    p.tags = q;
+    p.tag_count = 1;
+    p.match_all = 1;
+    p.top_k = 10;
+    MemoryRecord *recs = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &recs, &n));
+    TEST_ASSERT_EQUAL_size_t(0, n); /* expired record not returned */
+    free(recs);
+
+    /* a record with no TTL is unaffected */
+    MemoryRecord in2 = make_input(MEM_EPISODIC, "permanent");
+    MemoryRecord out2;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &in2, NULL, 0, &out2));
+    uint64_t id2 = out2.id;
+    in2.data = NULL;
+    in2.data_len = 0;
+    record_free(&in2);
+    record_free(&out2);
+    usleep(80000);
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_get(&g_db, id2, NULL, &got)); /* still there */
+    record_free(&got);
+}
+
+/* The expiry sweep tombstones expired records: after it runs, count drops and
+ * the record is gone (not merely hidden). */
+static void test_ttl_sweep_tombstones(void) {
+    MemoryRecord in = make_input(MEM_EPISODIC, "sweepable");
+    const char *tags[] = {"sw"};
+    record_set_tags(&in, tags, 1);
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &in, NULL, 10, &out));
+    uint64_t id = out.id;
+    in.data = NULL;
+    in.data_len = 0;
+    record_free(&in);
+    record_free(&out);
+
+    usleep(30000); /* past the 10ms TTL */
+    size_t swept = qe_sweep_expired(&g_db, db_now_ms());
+    TEST_ASSERT_TRUE(swept >= 1);
+
+    /* a second sweep finds nothing new (already tombstoned) */
+    TEST_ASSERT_EQUAL_size_t(0, qe_sweep_expired(&g_db, db_now_ms()));
+
+    MemoryRecord got;
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_get(&g_db, id, NULL, &got));
+}
+
 static void test_working_memory_promote(void) {
     MemoryRecord in = make_input(MEM_WORKING, "scratch note");
     MemoryRecord out;
@@ -567,6 +642,8 @@ int main(void) {
     RUN_TEST(test_search_offset_and_min_score);
     RUN_TEST(test_search_recency_decay);
     RUN_TEST(test_count);
+    RUN_TEST(test_ttl_lazy_expiry);
+    RUN_TEST(test_ttl_sweep_tombstones);
     RUN_TEST(test_working_memory_promote);
     RUN_TEST(test_relate_and_traverse);
     RUN_TEST(test_agent_namespace_filter);

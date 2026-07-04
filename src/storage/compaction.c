@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "aegisdb/logging.h"
+#include "aegisdb/query_engine.h"
 #include "aegisdb/record.h"
 
 typedef struct {
@@ -17,6 +18,7 @@ typedef struct {
     uint32_t length;
     uint8_t type;
     uint8_t deleted;
+    uint64_t expires_at;
 } NewLoc;
 
 /* Append one location entry to a growing array. Returns 0/-1. */
@@ -57,7 +59,8 @@ int compaction_run_once(AegisDB *db) {
     for (size_t i = 0; i < h->cap; i++) {
         const HashEntry *e = &h->buckets[i];
         if (!e->used || e->deleted) continue;
-        snap[snap_n++] = (NewLoc){e->id, e->offset, e->length, e->type, 0};
+        snap[snap_n++] =
+            (NewLoc){e->id, e->offset, e->length, e->type, 0, e->expires_at};
     }
     uint64_t snap_end = (uint64_t)db->log.size;
     pthread_rwlock_unlock(&db->index_lock);
@@ -85,7 +88,8 @@ int compaction_run_once(AegisDB *db) {
         }
         free(buf);
         if (locs_push(&locs, &nloc, &locs_cap,
-                      (NewLoc){snap[i].id, off, (uint32_t)len, snap[i].type, 0}))
+                      (NewLoc){snap[i].id, off, (uint32_t)len, snap[i].type, 0,
+                               snap[i].expires_at}))
             failed = 1;
     }
     free(snap);
@@ -124,7 +128,7 @@ int compaction_run_once(AegisDB *db) {
         }
         if (locs_push(&locs, &nloc, &locs_cap,
                       (NewLoc){r.id, off, (uint32_t)len, (uint8_t)r.type,
-                               (uint8_t)(r.deleted ? 1 : 0)}))
+                               (uint8_t)(r.deleted ? 1 : 0), r.expires_at}))
             failed = 1;
         record_free(&r);
         free(buf);
@@ -179,7 +183,7 @@ int compaction_run_once(AegisDB *db) {
     }
     for (size_t i = 0; i < nloc; i++)
         hash_index_put(nh, locs[i].id, locs[i].offset, locs[i].length,
-                       locs[i].type, locs[i].deleted);
+                       locs[i].type, locs[i].deleted, locs[i].expires_at);
     hash_index_free(db->hash);
     db->hash = nh;
     pthread_rwlock_unlock(&db->log_lock);
@@ -248,10 +252,17 @@ static void *maint_loop(void *arg) {
             }
         }
         if (c->sweep_sec && (elapsed % c->sweep_sec) == 0) {
-            size_t swept = working_store_sweep(c->db->working, db_now_ms());
+            uint64_t now = db_now_ms();
+            size_t swept = working_store_sweep(c->db->working, now);
             if (swept)
                 LOG_DEBUG("sweep: evicted %zu expired working-memory record(s)",
                           swept);
+            /* Archive TTL'd episodic/semantic records past their horizon (#73):
+             * tombstone them so recall stays correct and compaction reclaims. */
+            size_t expired = qe_sweep_expired(c->db, now);
+            if (expired)
+                LOG_DEBUG("sweep: archived %zu expired persisted record(s)",
+                          expired);
         }
         /* Periodically checkpoint the index so a crash recovers by replaying
          * only the log written since the last checkpoint, not the whole log. */

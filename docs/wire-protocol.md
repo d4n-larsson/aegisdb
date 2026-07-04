@@ -139,7 +139,7 @@ is what you later pass to `promote` as `working_id`.
 | `embedding` | number[] | No | Length must equal the server's `--embedding-dim` (default 384) or the request is rejected with `INVALID_REQUEST` |
 | `agent_id` | string | No | Namespace the record to an agent; scopes `get`/`search`/`traverse` |
 | `session_id` | string | Working only | Required to create working memory |
-| `ttl_ms` | integer | Working only | Expiry for working memory |
+| `ttl_ms` | integer | No | Time-to-live in ms. For episodic/semantic, an opt-in TTL: the record is archived (hidden from recall, then reclaimed) once `created + ttl_ms` passes; omit or `0` = never expires. For working memory, its buffer expiry. |
 
 **Response (success)**:
 
