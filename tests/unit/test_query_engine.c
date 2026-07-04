@@ -508,6 +508,70 @@ static void test_ttl_sweep_tombstones(void) {
     TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_get(&g_db, id, NULL, &got));
 }
 
+/* Insert a semantic record with an embedding, one tag, and an importance. */
+static uint64_t insert_sem(AegisDB *db, float *emb, const char *tag, float imp) {
+    MemoryRecord in = make_input(MEM_SEMANTIC, "s");
+    in.embedding = emb; /* borrowed */
+    in.embedding_dim = 3;
+    in.importance = imp;
+    const char *tags[] = {tag};
+    record_set_tags(&in, tags, 1);
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(db, &in, NULL, 0, &out));
+    uint64_t id = out.id;
+    in.data = NULL; in.data_len = 0;
+    in.embedding = NULL; in.embedding_dim = 0;
+    record_free(&in);
+    record_free(&out);
+    return id;
+}
+
+/* consolidate merges near-duplicate semantic records into one survivor, leaves
+ * a distinct record alone, unions tags, and is idempotent. */
+static void test_consolidate(void) {
+    /* three near-identical vectors (a cluster) + one clearly different */
+    float d0[3] = {1.0f, 0.0f, 0.0f};
+    float d1[3] = {0.999f, 0.001f, 0.0f};
+    float d2[3] = {0.998f, 0.002f, 0.0f};
+    float other[3] = {0.0f, 1.0f, 0.0f};
+    uint64_t a = insert_sem(&g_db, d0, "x", 0.2f);
+    uint64_t b = insert_sem(&g_db, d1, "y", 0.9f); /* higher importance */
+    uint64_t c = insert_sem(&g_db, d2, "z", 0.5f);
+    uint64_t o = insert_sem(&g_db, other, "w", 0.5f);
+
+    size_t clusters = 0, merged = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_consolidate(&g_db, NULL, 0.95f, &clusters, &merged));
+    TEST_ASSERT_EQUAL_size_t(1, clusters); /* the {a,b,c} cluster */
+    TEST_ASSERT_EQUAL_size_t(2, merged);   /* two of three tombstoned */
+
+    /* exactly one of the cluster survives; the distinct record is untouched */
+    MemoryRecord r;
+    int alive = 0;
+    uint64_t survivor = 0;
+    uint64_t ids[3] = {a, b, c};
+    for (int i = 0; i < 3; i++)
+        if (qe_get(&g_db, ids[i], NULL, &r) == AEGIS_OK) {
+            alive++;
+            survivor = ids[i];
+            /* survivor absorbed all three tags + the max importance */
+            TEST_ASSERT_EQUAL_size_t(3, r.tag_count);
+            TEST_ASSERT_TRUE(r.importance >= 0.9f - 1e-6f);
+            record_free(&r);
+        }
+    TEST_ASSERT_EQUAL_INT(1, alive);
+    TEST_ASSERT_EQUAL_UINT64(c, survivor); /* newest updated among a,b,c */
+    (void)b;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_get(&g_db, o, NULL, &r)); /* distinct: kept */
+    record_free(&r);
+
+    /* idempotent: a second pass finds nothing to merge */
+    clusters = merged = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_consolidate(&g_db, NULL, 0.95f, &clusters, &merged));
+    TEST_ASSERT_EQUAL_size_t(0, merged);
+}
+
 static void test_working_memory_promote(void) {
     MemoryRecord in = make_input(MEM_WORKING, "scratch note");
     MemoryRecord out;
@@ -644,6 +708,7 @@ int main(void) {
     RUN_TEST(test_count);
     RUN_TEST(test_ttl_lazy_expiry);
     RUN_TEST(test_ttl_sweep_tombstones);
+    RUN_TEST(test_consolidate);
     RUN_TEST(test_working_memory_promote);
     RUN_TEST(test_relate_and_traverse);
     RUN_TEST(test_agent_namespace_filter);

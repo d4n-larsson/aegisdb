@@ -283,6 +283,27 @@ namespaced token counts only its own.
 
 ---
 
+### `consolidate`
+
+Merge near-duplicate **semantic** memories. Records whose embeddings are within
+`min_similarity` cosine of each other (default `0.95`) collapse into a single
+survivor — the most-recently-updated member — which absorbs the others' tags
+and relationships and the max importance/confidence; the rest are tombstoned.
+Requires `rw` scope; a namespaced token consolidates only its own tenant.
+Episodic memory (the immutable log) is never touched. Idempotent.
+
+```json
+{ "operation": "consolidate", "min_similarity": 0.95 }
+→ { "ok": true, "clusters": 12, "merged": 34 }
+```
+
+`clusters` is the number of duplicate groups collapsed; `merged` is how many
+records were tombstoned. There is no LLM summarization — this is mechanical
+dedup only. Use a conservative threshold: too low merges genuinely distinct
+memories.
+
+---
+
 ### `search`
 
 Unified search with mutually combinable filters. The time filter activates only

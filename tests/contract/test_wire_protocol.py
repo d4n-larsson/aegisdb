@@ -503,6 +503,41 @@ def test_bulk_ops(binary, port):
         check(r.get("ok") is True and r.get("count") == 1, "count bulk -> 1 remains")
 
 
+def test_consolidate(binary, port):
+    print("[consolidate: merge near-duplicate semantic memories]")
+    with Server(binary, port, phase=4) as srv:
+        # three near-identical vectors + one distinct
+        def ins(vec, tag):
+            r = srv.req({"operation": "insert", "type": "semantic",
+                         "tags": [tag], "data": "d", "embedding": vec})
+            return r["record"]["id"]
+        dim = 384
+        base = [1.0] + [0.0] * (dim - 1)
+        near1 = [0.999, 0.001] + [0.0] * (dim - 2)
+        near2 = [0.998, 0.002] + [0.0] * (dim - 2)
+        far = [0.0, 1.0] + [0.0] * (dim - 2)
+        ins(base, "a"); ins(near1, "b"); ins(near2, "c")
+        distinct = ins(far, "z")
+
+        r = srv.req({"operation": "consolidate", "min_similarity": 0.95})
+        check(r.get("ok") is True and r.get("clusters") == 1 and r.get("merged") == 2,
+              "consolidate merges the 3-vector cluster (2 merged away)")
+
+        # the distinct record survives
+        r = srv.req({"operation": "get", "id": distinct})
+        check(r.get("ok") is True, "distinct record left untouched")
+
+        # a count of the near-dup tags shows only the survivor remains
+        n = srv.req({"operation": "count", "tags": ["a", "b", "c"], "match": "any"})
+        check(n.get("ok") is True and n.get("count") == 1,
+              "one survivor carries the merged cluster")
+
+        # idempotent
+        r = srv.req({"operation": "consolidate", "min_similarity": 0.95})
+        check(r.get("ok") is True and r.get("merged") == 0,
+              "second consolidate is a no-op")
+
+
 def test_search_limits(binary, port):
     print("[search input limits]")
     with Server(binary, port, phase=4) as srv:  # default --embedding-dim 384
@@ -615,6 +650,7 @@ def main():
     test_search_limits(binary, 19478)
     test_concurrency(binary, 19479)
     test_bulk_ops(binary, 19480)
+    test_consolidate(binary, 19481)
 
     print()
     if FAILURES:

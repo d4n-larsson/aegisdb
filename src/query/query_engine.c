@@ -715,6 +715,140 @@ size_t qe_sweep_expired(AegisDB *db, uint64_t now) {
     return swept;
 }
 
+#define CONSOLIDATE_CAP 256 /* max cluster members merged per pass (bounds work) */
+
+/* Merge one near-duplicate cluster (the records in `recs`, all semantic, same
+ * namespace, mutually >= min_similarity): keep the most-recently-updated as the
+ * survivor, union the losers' tags into it, take the max importance/confidence,
+ * migrate the losers' relationships onto it, and tombstone the losers. Returns
+ * the number of records merged away (losers deleted). */
+static size_t merge_cluster(AegisDB *db, MemoryRecord *recs, size_t n,
+                            const char *ns) {
+    /* survivor = latest updated (tie -> greatest id) */
+    size_t sv = 0;
+    for (size_t i = 1; i < n; i++)
+        if (recs[i].updated > recs[sv].updated ||
+            (recs[i].updated == recs[sv].updated && recs[i].id > recs[sv].id))
+            sv = i;
+    uint64_t survivor = recs[sv].id;
+
+    /* union of all tags + max importance/confidence across the cluster */
+    const char **utags = NULL;
+    size_t un = 0, ucap = 0;
+    float imp = 0, conf = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (recs[i].importance > imp) imp = recs[i].importance;
+        if (recs[i].confidence > conf) conf = recs[i].confidence;
+        for (size_t t = 0; t < recs[i].tag_count; t++) {
+            int seen = 0;
+            for (size_t u = 0; u < un; u++)
+                if (strcmp(utags[u], recs[i].tags[t]) == 0) { seen = 1; break; }
+            if (seen) continue;
+            if (un == ucap) {
+                size_t nc = ucap ? ucap * 2 : 8;
+                const char **g = realloc(utags, nc * sizeof(*g));
+                if (!g) break; /* best-effort: keep the tags gathered so far */
+                utags = g;
+                ucap = nc;
+            }
+            utags[un++] = recs[i].tags[t];
+        }
+    }
+
+    /* migrate the losers' relationships onto the survivor */
+    for (size_t i = 0; i < n; i++) {
+        if (recs[i].id == survivor) continue;
+        for (size_t r = 0; r < recs[i].rel_count; r++)
+            qe_relate(db, survivor, recs[i].relationships[r].to_id,
+                      recs[i].relationships[r].kind, ns);
+    }
+
+    /* fold the merged tags + fields into the survivor */
+    UpdatePatch patch;
+    memset(&patch, 0, sizeof(patch));
+    patch.has_tags = 1;
+    patch.tags = utags;
+    patch.tag_count = un;
+    patch.has_importance = 1;
+    patch.importance = imp;
+    patch.has_confidence = 1;
+    patch.confidence = conf;
+    MemoryRecord upd;
+    if (qe_update(db, survivor, &patch, ns, &upd) == AEGIS_OK) record_free(&upd);
+    free(utags);
+
+    /* tombstone the losers */
+    size_t merged = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (recs[i].id == survivor) continue;
+        if (qe_delete(db, recs[i].id, ns) == AEGIS_OK) merged++;
+    }
+    return merged;
+}
+
+aegis_status_t qe_consolidate(AegisDB *db, const char *ns, float min_similarity,
+                              size_t *out_clusters, size_t *out_merged) {
+    aegis_status_t st = require_phase(db, 3); /* semantic search */
+    if (st != AEGIS_OK) return st;
+    *out_clusters = 0;
+    *out_merged = 0;
+
+    /* snapshot the live semantic ids (hash scan by type; no record reads) */
+    pthread_rwlock_rdlock(&db->index_lock);
+    const HashIndex *h = db->hash;
+    uint64_t *ids = NULL;
+    size_t n = 0, cap = 0;
+    for (size_t i = 0; i < h->cap; i++) {
+        const HashEntry *e = &h->buckets[i];
+        if (!e->used || e->deleted || e->type != MEM_SEMANTIC) continue;
+        if (n == cap) {
+            size_t nc = cap ? cap * 2 : 64;
+            uint64_t *g = realloc(ids, nc * sizeof(uint64_t));
+            if (!g) { free(ids); pthread_rwlock_unlock(&db->index_lock); return AEGIS_ERR_INTERNAL; }
+            ids = g;
+            cap = nc;
+        }
+        ids[n++] = e->id;
+    }
+    pthread_rwlock_unlock(&db->index_lock);
+
+    for (size_t i = 0; i < n; i++) {
+        /* Load the record for its embedding. A prior merge may have tombstoned
+         * it (it was a loser) — qe_get returns NOT_FOUND and we skip it, which
+         * is how cluster members self-exclude without an explicit visited set. */
+        MemoryRecord r;
+        if (qe_get(db, ids[i], ns, &r) != AEGIS_OK) continue;
+        if (r.embedding_dim == 0) { record_free(&r); continue; }
+
+        /* find this record's near-duplicates in its own namespace: a semantic
+         * search by its vector, gated at min_similarity (raw cosine) */
+        SearchParams p;
+        memset(&p, 0, sizeof(p));
+        p.embedding = r.embedding;
+        p.embedding_dim = r.embedding_dim;
+        p.agent_id = ns;
+        p.has_type = 1;
+        p.type = MEM_SEMANTIC;
+        p.has_min_score = 1;
+        p.min_score = min_similarity;
+        p.top_k = CONSOLIDATE_CAP;
+        MemoryRecord *recs = NULL;
+        size_t rn = 0;
+        aegis_status_t rc = qe_search(db, &p, &recs, &rn);
+        record_free(&r); /* after qe_search — p.embedding aliases r.embedding */
+        if (rc != AEGIS_OK) continue;
+
+        if (rn >= 2) { /* the record plus at least one duplicate */
+            *out_merged += merge_cluster(db, recs, rn, ns);
+            (*out_clusters)++;
+        }
+        for (size_t j = 0; j < rn; j++) record_free(&recs[j]);
+        free(recs);
+    }
+    free(ids);
+    return AEGIS_OK;
+}
+
 aegis_status_t qe_promote(AegisDB *db, const char *session_id,
                           uint64_t working_id, MemoryType to_type,
                           const char *ns, MemoryRecord *out) {
@@ -1226,6 +1360,22 @@ static cJSON *handle_count(AegisDB *db, const cJSON *req, const char *ns) {
     return o;
 }
 
+#define CONSOLIDATE_DEFAULT_MIN 0.95 /* conservative near-duplicate threshold */
+
+static cJSON *handle_consolidate(AegisDB *db, const cJSON *req, const char *ns) {
+    double ms;
+    float min_sim = (jr_f64(req, "min_similarity", &ms) == 0)
+                        ? (float)ms
+                        : (float)CONSOLIDATE_DEFAULT_MIN;
+    size_t clusters = 0, merged = 0;
+    aegis_status_t st = qe_consolidate(db, ns, min_sim, &clusters, &merged);
+    if (st != AEGIS_OK) return json_error_status(st);
+    cJSON *o = json_ok();
+    cJSON_AddNumberToObject(o, "clusters", (double)clusters);
+    cJSON_AddNumberToObject(o, "merged", (double)merged);
+    return o;
+}
+
 static cJSON *handle_search(AegisDB *db, const cJSON *req, const char *ns) {
     SearchParams p;
     memset(&p, 0, sizeof(p));
@@ -1403,7 +1553,7 @@ static aegis_status_t resolve_identity(AegisDB *db, const cJSON *req,
 static int is_write_op(const char *op) {
     return strcmp(op, "insert") == 0 || strcmp(op, "update") == 0 ||
            strcmp(op, "delete") == 0 || strcmp(op, "promote") == 0 ||
-           strcmp(op, "relate") == 0;
+           strcmp(op, "relate") == 0 || strcmp(op, "consolidate") == 0;
 }
 
 static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
@@ -1440,6 +1590,7 @@ static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
     if (strcmp(op, "delete") == 0) return handle_delete(db, req, ctx.ns);
     if (strcmp(op, "search") == 0) return handle_search(db, req, ctx.ns);
     if (strcmp(op, "count") == 0) return handle_count(db, req, ctx.ns);
+    if (strcmp(op, "consolidate") == 0) return handle_consolidate(db, req, ctx.ns);
     if (strcmp(op, "promote") == 0) return handle_promote(db, req, ctx.ns);
     if (strcmp(op, "relate") == 0) return handle_relate(db, req, ctx.ns);
     if (strcmp(op, "traverse") == 0) return handle_traverse(db, req, ctx.ns);
