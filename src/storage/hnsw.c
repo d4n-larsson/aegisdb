@@ -21,7 +21,7 @@
 #include "aegisdb/crc32.h"
 
 #define HNSW_FORMAT_MAGIC "AHNS"
-#define HNSW_FORMAT_VERSION 1u
+#define HNSW_FORMAT_VERSION 2u /* v2 adds the quantized flag + int8 vector layout */
 
 #define NPOS UINT32_MAX
 
@@ -38,8 +38,10 @@ static uint64_t xorshift(uint64_t *s) {
 /* ----------------------------------------------------------------- nodes -- */
 typedef struct {
     uint64_t id;
-    float *vec;
-    float norm;       /* precomputed L2 norm */
+    float *vec;       /* float mode: dim floats; quant mode: NULL */
+    int8_t *qvec;     /* quant mode: dim int8 (v[i] ~= qvec[i]*scale); else NULL */
+    float scale;      /* quant mode: dequant scale */
+    float norm;       /* precomputed L2 norm (of the stored representation) */
     int deleted;      /* tombstone: excluded from results, kept for connectivity */
     int top_layer;    /* highest layer this node belongs to */
     uint32_t **links; /* links[l] = neighbour node indices at layer l */
@@ -59,6 +61,7 @@ typedef struct {
 
 struct Hnsw {
     size_t dim, M, M0, ef_construction, ef_search;
+    int quantized;   /* store vectors as int8 (see #75) */
     double mL;       /* level-generation normalization = 1/ln(M) */
     uint64_t rng;
 
@@ -156,12 +159,38 @@ static float l2norm(const float *v, size_t dim) {
     return (float)sqrt(acc);
 }
 
+/* Dot product of a float query vector with node `nd`'s stored vector, handling
+ * either storage mode (float, or int8 dequantized via the node's scale). */
+static double node_dot_query(const Hnsw *h, const float *q, const Node *nd) {
+    double dot = 0;
+    if (h->quantized) {
+        const int8_t *v = nd->qvec;
+        for (size_t i = 0; i < h->dim; i++) dot += (double)q[i] * v[i];
+        return dot * nd->scale;
+    }
+    const float *v = nd->vec;
+    for (size_t i = 0; i < h->dim; i++) dot += (double)q[i] * v[i];
+    return dot;
+}
+
+/* Dot product of two stored node vectors. */
+static double node_dot_node(const Hnsw *h, const Node *a, const Node *b) {
+    double dot = 0;
+    if (h->quantized) {
+        const int8_t *va = a->qvec, *vb = b->qvec;
+        long acc = 0;
+        for (size_t i = 0; i < h->dim; i++) acc += (long)va[i] * vb[i];
+        return (double)acc * a->scale * b->scale;
+    }
+    const float *va = a->vec, *vb = b->vec;
+    for (size_t i = 0; i < h->dim; i++) dot += (double)va[i] * vb[i];
+    return dot;
+}
+
 /* 1 - cosine similarity, in [0, 2]; smaller is nearer. */
 static float dist_q(const Hnsw *h, const float *q, float qnorm, uint32_t node) {
     const Node *nd = &h->nodes[node];
-    double dot = 0;
-    const float *v = nd->vec;
-    for (size_t i = 0; i < h->dim; i++) dot += (double)q[i] * v[i];
+    double dot = node_dot_query(h, q, nd);
     float denom = qnorm * nd->norm;
     return denom > 0 ? 1.0f - (float)(dot / denom) : 1.0f;
 }
@@ -363,8 +392,7 @@ static int node_layer_cap(const Hnsw *h, int layer) {
 /* Cosine distance (1 - similarity) between two stored nodes. */
 static float dist_nn(const Hnsw *h, uint32_t a, uint32_t b) {
     const Node *na = &h->nodes[a], *nb = &h->nodes[b];
-    double dot = 0;
-    for (size_t i = 0; i < h->dim; i++) dot += (double)na->vec[i] * nb->vec[i];
+    double dot = node_dot_node(h, na, nb);
     float den = na->norm * nb->norm;
     return den > 0 ? 1.0f - (float)(dot / den) : 1.0f;
 }
@@ -427,7 +455,42 @@ static int rand_level(Hnsw *h) {
     return lvl < 0 ? 0 : lvl;
 }
 
-/* Allocate a fresh node (index returned via *out). Vector is copied. */
+/* Store `vec` into `nd` per the index mode: a float copy, or int8 quantized
+ * (symmetric, scale = max|v|/127) with the dequantized L2 norm. 0/-1. */
+static int store_vector(const Hnsw *h, Node *nd, const float *vec) {
+    if (!h->quantized) {
+        float *f = malloc(h->dim * sizeof(float));
+        if (!f) return -1;
+        memcpy(f, vec, h->dim * sizeof(float));
+        nd->vec = f;
+        nd->qvec = NULL;
+        nd->norm = l2norm(vec, h->dim);
+        return 0;
+    }
+    int8_t *q = malloc(h->dim ? h->dim : 1);
+    if (!q) return -1;
+    float maxa = 0;
+    for (size_t i = 0; i < h->dim; i++) {
+        float a = fabsf(vec[i]);
+        if (a > maxa) maxa = a;
+    }
+    float scale = maxa > 0 ? maxa / 127.0f : 1.0f; /* zero vector -> all-zero q */
+    double sq = 0;
+    for (size_t i = 0; i < h->dim; i++) {
+        long r = lroundf(vec[i] / scale);
+        if (r > 127) r = 127;
+        else if (r < -127) r = -127;
+        q[i] = (int8_t)r;
+        sq += (double)r * r;
+    }
+    nd->qvec = q;
+    nd->vec = NULL;
+    nd->scale = scale;
+    nd->norm = (float)(scale * sqrt(sq)); /* norm of the dequantized vector */
+    return 0;
+}
+
+/* Allocate a fresh node (index returned via *out). Vector is copied/quantized. */
 static int node_create(Hnsw *h, uint64_t id, const float *vec, int level,
                        uint32_t *out) {
     if (h->n == h->cap) {
@@ -440,15 +503,13 @@ static int node_create(Hnsw *h, uint64_t id, const float *vec, int level,
     Node *nd = &h->nodes[h->n];
     memset(nd, 0, sizeof(*nd));
     nd->id = id;
-    nd->vec = malloc(h->dim * sizeof(float));
-    if (!nd->vec) return -1;
-    memcpy(nd->vec, vec, h->dim * sizeof(float));
-    nd->norm = l2norm(vec, h->dim);
+    if (store_vector(h, nd, vec) != 0) return -1;
     nd->top_layer = level;
     nd->links = calloc((size_t)level + 1, sizeof(uint32_t *));
     nd->link_cnt = calloc((size_t)level + 1, sizeof(uint32_t));
     if (!nd->links || !nd->link_cnt) {
         free(nd->vec);
+        free(nd->qvec);
         free(nd->links);
         free(nd->link_cnt);
         return -1;
@@ -459,6 +520,7 @@ static int node_create(Hnsw *h, uint64_t id, const float *vec, int level,
         if (!nd->links[l]) {
             for (int k = 0; k < l; k++) free(nd->links[k]);
             free(nd->vec);
+            free(nd->qvec);
             free(nd->links);
             free(nd->link_cnt);
             return -1;
@@ -470,7 +532,7 @@ static int node_create(Hnsw *h, uint64_t id, const float *vec, int level,
 
 /* forward declarations for the tombstone-compaction rebuild */
 static Hnsw *hnsw_alloc(size_t dim, size_t M, size_t ef_construction,
-                        size_t ef_search, uint64_t rng);
+                        size_t ef_search, uint64_t rng, int quantize);
 static void hnsw_free_contents(Hnsw *h);
 #define HNSW_REBUILD_MIN 1024 /* don't compact graphs smaller than this */
 
@@ -480,7 +542,8 @@ static void hnsw_free_contents(Hnsw *h);
  * allocation failure the original (un-compacted) graph is kept. */
 static int maybe_rebuild(Hnsw *h) {
     if (h->n < HNSW_REBUILD_MIN || h->live == 0 || h->n < 2 * h->live) return 0;
-    Hnsw *t = hnsw_alloc(h->dim, h->M, h->ef_construction, h->ef_search, h->rng);
+    Hnsw *t = hnsw_alloc(h->dim, h->M, h->ef_construction, h->ef_search, h->rng,
+                         h->quantized);
     if (!t) return -1;
     for (size_t i = 0; i < h->n; i++) {
         if (h->nodes[i].deleted) continue;
@@ -511,8 +574,11 @@ int hnsw_add(Hnsw *h, uint64_t id, const float *vec, size_t dim) {
     if (map_put(h, id, cur) != 0) return -1;
     h->live++;
 
-    float qn = h->nodes[cur].norm;
-    const float *q = h->nodes[cur].vec;
+    /* Use the caller's float vector as the query for the insertion search — the
+     * stored node may be int8-quantized (no float copy), and this is exactly
+     * how a real query is scored against the graph. */
+    const float *q = vec;
+    float qn = l2norm(vec, h->dim);
 
     if (h->entry == NPOS) {
         h->entry = cur;
@@ -617,22 +683,41 @@ int hnsw_search(const Hnsw *h, const float *query, size_t dim, size_t top_k,
 }
 
 size_t hnsw_count(const Hnsw *h) { return h ? h->live : 0; }
+int hnsw_is_quantized(const Hnsw *h) { return h ? h->quantized : 0; }
 
 int hnsw_foreach_live(const Hnsw *h,
                       int (*cb)(uint64_t id, const float *vec, void *ctx),
                       void *ctx) {
+    /* In quant mode there is no float vector; dequantize into a reused temp so
+     * the callback still receives a float view. */
+    float *tmp = NULL;
+    if (h->quantized) {
+        tmp = malloc((h->dim ? h->dim : 1) * sizeof(float));
+        if (!tmp) return -1;
+    }
+    int rc = 0;
     for (size_t i = 0; i < h->n; i++) {
         if (h->nodes[i].deleted) continue;
-        int rc = cb(h->nodes[i].id, h->nodes[i].vec, ctx);
-        if (rc) return rc;
+        const float *v;
+        if (h->quantized) {
+            const int8_t *q = h->nodes[i].qvec;
+            float s = h->nodes[i].scale;
+            for (size_t d = 0; d < h->dim; d++) tmp[d] = (float)q[d] * s;
+            v = tmp;
+        } else {
+            v = h->nodes[i].vec;
+        }
+        rc = cb(h->nodes[i].id, v, ctx);
+        if (rc) break;
     }
-    return 0;
+    free(tmp);
+    return rc;
 }
 
 /* Allocate an empty index with the given (already-resolved) parameters and rng
  * state. Shared by hnsw_create and hnsw_load. */
 static Hnsw *hnsw_alloc(size_t dim, size_t M, size_t ef_construction,
-                        size_t ef_search, uint64_t rng) {
+                        size_t ef_search, uint64_t rng, int quantize) {
     Hnsw *h = calloc(1, sizeof(*h));
     if (!h) return NULL;
     h->dim = dim;
@@ -640,6 +725,7 @@ static Hnsw *hnsw_alloc(size_t dim, size_t M, size_t ef_construction,
     h->M0 = h->M * 2;
     h->ef_construction = ef_construction;
     h->ef_search = ef_search;
+    h->quantized = quantize;
     h->rng = rng;
     h->mL = 1.0 / log((double)h->M);
     h->entry = NPOS;
@@ -660,13 +746,15 @@ Hnsw *hnsw_create(size_t dim, const HnswParams *params) {
     size_t efc = (params && params->ef_construction) ? params->ef_construction : 200;
     size_t efs = (params && params->ef_search) ? params->ef_search : 50;
     uint64_t seed = (params && params->seed) ? params->seed : 0x9E3779B97F4A7C15ULL;
-    return hnsw_alloc(dim, M, efc, efs, seed);
+    int quantize = params ? params->quantize : 0;
+    return hnsw_alloc(dim, M, efc, efs, seed, quantize);
 }
 
 static void hnsw_free_contents(Hnsw *h) {
     for (size_t i = 0; i < h->n; i++) {
         Node *nd = &h->nodes[i];
         free(nd->vec);
+        free(nd->qvec);
         for (int l = 0; l <= nd->top_layer; l++) free(nd->links[l]);
         free(nd->links);
         free(nd->link_cnt);
@@ -726,6 +814,7 @@ int hnsw_save(const Hnsw *h, const char *path, uint64_t covered_log_size) {
     buf_u32(&b, (uint32_t)h->M);
     buf_u32(&b, (uint32_t)h->ef_construction);
     buf_u32(&b, (uint32_t)h->ef_search);
+    buf_u32(&b, (uint32_t)(h->quantized ? 1 : 0));
     buf_u64(&b, h->rng); /* live PRNG state: future inserts continue the stream */
     buf_u64(&b, (uint64_t)h->n);
     buf_u64(&b, (uint64_t)h->live);
@@ -739,7 +828,12 @@ int hnsw_save(const Hnsw *h, const char *path, uint64_t covered_log_size) {
         buf_u32(&b, flags);
         buf_u32(&b, (uint32_t)nd->top_layer);
         buf_put(&b, &nd->norm, sizeof(float));
-        buf_put(&b, nd->vec, h->dim * sizeof(float));
+        if (h->quantized) {
+            buf_put(&b, &nd->scale, sizeof(float));
+            buf_put(&b, nd->qvec, h->dim); /* dim int8 bytes */
+        } else {
+            buf_put(&b, nd->vec, h->dim * sizeof(float));
+        }
         for (int l = 0; l <= nd->top_layer; l++) {
             buf_u32(&b, nd->link_cnt[l]);
             buf_put(&b, nd->links[l], nd->link_cnt[l] * sizeof(uint32_t));
@@ -799,6 +893,7 @@ Hnsw *hnsw_load(const char *path, size_t expected_dim,
     size_t M = rd_u32(&r);
     size_t efc = rd_u32(&r);
     size_t efs = rd_u32(&r);
+    int quantized = (int)rd_u32(&r);
     uint64_t rng = rd_u64(&r);
     uint64_t ncount = rd_u64(&r);
     uint64_t live = rd_u64(&r);
@@ -807,7 +902,7 @@ Hnsw *hnsw_load(const char *path, size_t expected_dim,
     uint64_t covered = rd_u64(&r);
     if (r.err) { free(buf); return NULL; }
 
-    Hnsw *h = hnsw_alloc(dim, M, efc, efs, rng);
+    Hnsw *h = hnsw_alloc(dim, M, efc, efs, rng, quantized);
     if (!h) { free(buf); return NULL; }
     if (ncount > 0) {
         h->nodes = calloc((size_t)ncount, sizeof(Node));
@@ -821,13 +916,24 @@ Hnsw *hnsw_load(const char *path, size_t expected_dim,
         nd->deleted = (int)rd_u32(&r);
         nd->top_layer = (int)rd_u32(&r);
         if (r.err || nd->top_layer < 0) goto bad;
-        nd->vec = malloc(dim * sizeof(float));
         nd->links = calloc((size_t)nd->top_layer + 1, sizeof(uint32_t *));
         nd->link_cnt = calloc((size_t)nd->top_layer + 1, sizeof(uint32_t));
-        if (!nd->vec || !nd->links || !nd->link_cnt) goto bad;
+        if (!nd->links || !nd->link_cnt) goto bad;
+        if (h->quantized) {
+            nd->qvec = malloc(dim ? dim : 1);
+            if (!nd->qvec) goto bad;
+        } else {
+            nd->vec = malloc(dim * sizeof(float));
+            if (!nd->vec) goto bad;
+        }
         h->n = i + 1; /* keep the freeable prefix accurate for the error path */
         rd_get(&r, &nd->norm, sizeof(float));
-        rd_get(&r, nd->vec, dim * sizeof(float));
+        if (h->quantized) {
+            rd_get(&r, &nd->scale, sizeof(float));
+            rd_get(&r, nd->qvec, dim); /* dim int8 bytes */
+        } else {
+            rd_get(&r, nd->vec, dim * sizeof(float));
+        }
         for (int l = 0; l <= nd->top_layer; l++) {
             uint32_t cnt = rd_u32(&r);
             size_t cap = (size_t)node_layer_cap(h, l);

@@ -25,6 +25,8 @@ typedef struct {
     size_t ef_construction; /* candidate beam width while inserting */
     size_t ef_search;       /* default candidate beam width while querying */
     uint64_t seed;          /* PRNG seed for reproducible layer assignment */
+    int quantize;           /* 1: store vectors as int8 (~4x smaller, small
+                             * recall cost); 0 (default): float32 */
 } HnswParams;
 
 Hnsw *hnsw_create(size_t dim, const HnswParams *params);
@@ -48,6 +50,9 @@ int hnsw_search(const Hnsw *h, const float *query, size_t dim, size_t top_k,
 
 /* Number of live (non-tombstoned) vectors. */
 size_t hnsw_count(const Hnsw *h);
+
+/* 1 if this index stores int8-quantized vectors, else 0. */
+int hnsw_is_quantized(const Hnsw *h);
 
 /* Total nodes including tombstoned ones (>= hnsw_count). Diagnostic: the graph
  * compacts itself once tombstones reach half the array, so this stays within ~2x

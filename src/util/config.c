@@ -30,6 +30,7 @@ void config_defaults(Config *cfg) {
     cfg->embedding_dimensions = 384;
     cfg->ann_threshold = 0; /* 0 -> built-in default */
     cfg->ann_ef_search = 0; /* 0 -> HNSW built-in default */
+    cfg->ann_quantize = 0;  /* float32 vectors by default */
     cfg->working_capacity = 256;
     cfg->default_ttl_ms = 3600000; /* 1 hour */
     cfg->fsync_batch_size = 1000;
@@ -225,6 +226,8 @@ static void usage(const char *prog) {
             "                           higher = better recall, slower (default 50)\n"
             "  --ann-threshold <n>      live vectors before semantic search uses\n"
             "                           HNSW instead of an exact scan (default 10000)\n"
+            "  --ann-quantize           store HNSW vectors as int8 (~4x less memory,\n"
+            "                           small recall cost); default float32\n"
             "  --durability <mode>      sync|batch|interval (default interval)\n"
             "  --fsync-batch <n>        records between fsync in batch mode\n"
             "                           (default 1000)\n"
@@ -321,6 +324,8 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
                 fprintf(stderr, "%s: invalid ann-threshold '%s'\n", prog, val);
                 return -1;
             }
+        } else if (strcmp(a, "--ann-quantize") == 0) {
+            cfg->ann_quantize = 1; /* boolean flag: int8 HNSW vectors */
         } else if (strcmp(a, "--fsync-batch") == 0) {
             NEXT("--fsync-batch");
             if (parse_size(val, &cfg->fsync_batch_size)) {

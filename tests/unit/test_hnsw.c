@@ -309,6 +309,70 @@ static void test_hnsw_tombstone_rebuild(void) {
     free(vecs);
 }
 
+/* An int8-quantized index keeps high recall on clustered data and round-trips
+ * through save/load preserving the quantized mode + results. */
+static void test_hnsw_quantized(void) {
+    const size_t N = 1500, K = 10, Q = 40, C = 15;
+    g_rng = 0x515Eull;
+    float *centers = malloc(C * DIM * sizeof(float));
+    for (size_t i = 0; i < C * DIM; i++) centers[i] = frand();
+    float *vecs = malloc(N * DIM * sizeof(float));
+    for (size_t i = 0; i < N; i++)
+        for (size_t d = 0; d < DIM; d++)
+            vecs[i * DIM + d] = centers[(i % C) * DIM + d] + 0.1f * frand();
+
+    HnswParams p = {.M = 16, .ef_construction = 200, .ef_search = 100,
+                    .seed = 9, .quantize = 1};
+    Hnsw *h = hnsw_create(DIM, &p);
+    TEST_ASSERT_TRUE(hnsw_is_quantized(h));
+    for (size_t i = 0; i < N; i++)
+        TEST_ASSERT_EQUAL_INT(0, hnsw_add(h, i, &vecs[i * DIM], DIM));
+
+    size_t hits = 0;
+    uint64_t truth[16];
+    for (size_t qi = 0; qi < Q; qi++) {
+        const float *q = &vecs[(qi * 37 % N) * DIM]; /* query near real clusters */
+        brute_top_k(vecs, N, q, K, truth);
+        uint64_t *ids = NULL;
+        float *sc = NULL;
+        size_t n = 0;
+        TEST_ASSERT_EQUAL_INT(0, hnsw_search(h, q, DIM, K, 0, &ids, &sc, &n));
+        for (size_t i = 1; i < n; i++) TEST_ASSERT_TRUE(sc[i - 1] >= sc[i]);
+        for (size_t i = 0; i < n; i++)
+            for (size_t j = 0; j < K; j++)
+                if (ids[i] == truth[j]) { hits++; break; }
+        free(ids);
+        free(sc);
+    }
+    double recall = (double)hits / (double)(Q * K);
+    TEST_ASSERT_TRUE_MESSAGE(recall >= 0.90, "quantized recall@10 below 0.90");
+
+    /* save/load preserves quantized mode + identical query results */
+    char path[256];
+    snprintf(path, sizeof(path), "/tmp/aegis_hnswq_%d.bin", (int)getpid());
+    uint64_t cov = 0;
+    TEST_ASSERT_EQUAL_INT(0, hnsw_save(h, path, 42));
+    Hnsw *h2 = hnsw_load(path, DIM, &cov);
+    TEST_ASSERT_NOT_NULL(h2);
+    TEST_ASSERT_TRUE(hnsw_is_quantized(h2));
+    TEST_ASSERT_EQUAL_size_t(hnsw_count(h), hnsw_count(h2));
+    float qv[DIM];
+    for (int d = 0; d < DIM; d++) qv[d] = vecs[d];
+    uint64_t *a = NULL, *b = NULL;
+    float *sa = NULL, *sb = NULL;
+    size_t na = 0, nb = 0;
+    hnsw_search(h, qv, DIM, K, 0, &a, &sa, &na);
+    hnsw_search(h2, qv, DIM, K, 0, &b, &sb, &nb);
+    TEST_ASSERT_EQUAL_size_t(na, nb);
+    for (size_t i = 0; i < na; i++) TEST_ASSERT_EQUAL_UINT64(a[i], b[i]);
+    free(a); free(b); free(sa); free(sb);
+    unlink(path);
+    hnsw_free(h);
+    hnsw_free(h2);
+    free(vecs);
+    free(centers);
+}
+
 static void test_hnsw_empty(void) {
     Hnsw *h = hnsw_create(DIM, NULL);
     float q[DIM] = {1.0f};
@@ -328,6 +392,7 @@ int main(void) {
     RUN_TEST(test_hnsw_update);
     RUN_TEST(test_hnsw_reproducible);
     RUN_TEST(test_hnsw_save_load);
+    RUN_TEST(test_hnsw_quantized);
     RUN_TEST(test_hnsw_tombstone_rebuild);
     return UNITY_END();
 }
