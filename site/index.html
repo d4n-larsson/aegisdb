@@ -333,7 +333,7 @@
       <div class="col">
         <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0003</b>&nbsp;·&nbsp;type=semantic</p>
         <h2 class="title">A memory model shaped like memory.</h2>
-        <p class="lede">Three kinds of memory, each with the lifecycle it actually needs — not one generic store with a TTL bolted on.</p>
+        <p class="lede">Three kinds of memory, each with the lifecycle it actually needs — not one generic store with a TTL bolted on. Persisted memories are durable by default, and can be set to auto-archive after a deadline when you want them to fade.</p>
         <div class="legend">
           <span class="l-ep"><i></i><b>episodic</b> — immutable events</span>
           <span class="l-se"><i></i><b>semantic</b> — facts that update</span>
@@ -358,7 +358,7 @@
           </div>
           <div class="feat se" data-k="0x0320">
             <h3><span class="bar"></span>Vector search that scales</h3>
-            <p>Exact cosine while a set is small; past a threshold it switches to an <b>HNSW graph</b> for sublinear approximate-nearest-neighbour search, so recall stays fast as memories accumulate. The graph is <b>checkpointed</b> — a restart reloads it instead of rebuilding.</p>
+            <p>Exact cosine while a set is small; past a threshold it switches to an <b>HNSW graph</b> for sublinear approximate-nearest-neighbour search, so recall stays fast as memories accumulate. The graph is <b>checkpointed</b> — a restart reloads it instead of rebuilding — and vectors can be <b>int8-quantized</b> to cut its memory ~4×.</p>
           </div>
           <div class="feat se" data-k="0x0340">
             <h3><span class="bar"></span>Ranked like memory</h3>
