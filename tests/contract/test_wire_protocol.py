@@ -11,6 +11,7 @@ Usage:
 import hashlib
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -602,6 +603,55 @@ def test_snapshot_admin_only(binary, port):
         check(r.get("ok") is True, "admin token can snapshot")
 
 
+def test_restore(binary, port):
+    print("[backup: --restore installs a snapshot]")
+
+    def run_restore(snap, dest, extra=None):
+        args = [binary, "--restore", snap, "--data-dir", dest] + (extra or [])
+        return subprocess.run(args, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL).returncode
+
+    # produce a snapshot from a live server
+    with Server(binary, port, phase=4) as srv:
+        for i in range(4):
+            srv.req({"operation": "insert", "type": "episodic", "data": f"r{i}"})
+        snap = srv.req({"operation": "snapshot", "name": "snap"})["snapshot"]
+
+    # restore into a fresh (absent) data dir via the one-shot CLI mode
+    dest = tempfile.mkdtemp(prefix="aegis_restore_")
+    shutil.rmtree(dest)
+    check(run_restore(snap, dest) == 0, "restore into a fresh dir exits 0")
+    check(os.path.exists(os.path.join(dest, "memory.log")),
+          "restore installs memory.log")
+
+    # a server started on the restored dir sees every record
+    s2 = Server(binary, port + 1, phase=4)
+    s2.datadir = dest
+    with s2:
+        r = s2.req({"operation": "search", "top_k": 100})
+        check(r.get("ok") is True and r.get("total") == 4,
+              "restored server has all records")
+        r = s2.req({"operation": "insert", "type": "episodic", "data": "new"})
+        check(r["record"]["id"] == 5, "restored next_id floor prevents id reuse")
+
+    # refuses to clobber an existing database
+    check(run_restore(snap, dest) == 1, "restore refuses to overwrite a db")
+
+    # rejects an embedding-dim that does not match the snapshot
+    dest2 = tempfile.mkdtemp(prefix="aegis_restore_")
+    shutil.rmtree(dest2)
+    check(run_restore(snap, dest2, ["--embedding-dim", "128"]) == 1,
+          "restore rejects an embedding-dim mismatch")
+    check(not os.path.exists(os.path.join(dest2, "memory.log")),
+          "rejected restore leaves the target empty")
+
+    # a directory that is not a snapshot is rejected
+    notsnap = tempfile.mkdtemp(prefix="aegis_notsnap_")
+    dest3 = tempfile.mkdtemp(prefix="aegis_restore_")
+    shutil.rmtree(dest3)
+    check(run_restore(notsnap, dest3) == 1, "restore rejects a non-snapshot dir")
+
+
 def test_multivector(binary, port):
     print("[multi-vector: embeddings array round-trip]")
     with Server(binary, port, phase=4) as srv:  # --embedding-dim 384
@@ -745,6 +795,7 @@ def main():
     test_multivector(binary, 19482)
     test_snapshot(binary, 19483)
     test_snapshot_admin_only(binary, 19485)
+    test_restore(binary, 19486)
 
     print()
     if FAILURES:

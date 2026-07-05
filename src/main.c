@@ -11,6 +11,7 @@
 #include "aegisdb/db.h"
 #include "aegisdb/health.h"
 #include "aegisdb/logging.h"
+#include "aegisdb/restore.h"
 #include "aegisdb/sha256.h"
 #include "aegisdb/tcp_server.h"
 
@@ -52,6 +53,14 @@ int main(int argc, char **argv) {
         int hc = health_check(cfg.listen_port);
         config_free(&cfg);
         return hc == 0 ? 0 : 1;
+    }
+
+    /* One-shot: install a snapshot into --data-dir, then exit; a normal start
+     * afterwards recovers from it. */
+    if (cfg.restore_from) {
+        int rr = restore_run(&cfg);
+        config_free(&cfg);
+        return rr == 0 ? 0 : 1;
     }
 
     LOG_INFO("AegisDB %s starting (log level: %s)", AEGIS_VERSION_STRING,
