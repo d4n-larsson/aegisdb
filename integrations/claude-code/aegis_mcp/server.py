@@ -23,12 +23,11 @@ def build_tools(config=None) -> MemoryTools:
                          auth_token=config.auth_token)
     provider = make_provider(config)
 
-    # Local validation: a selected provider's dimension must match config.
-    if provider.available() and provider.dimension() != config.embedding_dimensions:
-        raise SystemExit(
-            f"embedding dimension mismatch: provider={provider.dimension()} "
-            f"config={config.embedding_dimensions}")
-
+    # NOTE: provider/config embedding-dimension validation is deferred to the
+    # first embed (MemoryTools._embeddings_usable), NOT done here. Reading a
+    # local provider's dimension forces a model load that can stall (e.g. a
+    # Hugging Face Hub check) and would block the MCP ``initialize`` handshake
+    # past the client's startup timeout. Startup must never force a model load.
     info = check_startup(client, config)
     for w in info["warnings"]:
         print(f"[aegis-mcp] warning: {w}", file=sys.stderr)
