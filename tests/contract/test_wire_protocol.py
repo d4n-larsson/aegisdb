@@ -538,6 +538,70 @@ def test_consolidate(binary, port):
               "second consolidate is a no-op")
 
 
+def test_snapshot(binary, port):
+    print("[backup: online snapshot + recover]")
+    with Server(binary, port, phase=4) as srv:
+        for i in range(3):
+            srv.req({"operation": "insert", "type": "episodic",
+                     "data": f"note {i}", "tags": ["backup"]})
+        # named snapshot reports where it landed and what it covers
+        r = srv.req({"operation": "snapshot", "name": "b1"})
+        check(r.get("ok") is True, "snapshot ok")
+        check(r.get("record_count") == 3, "snapshot counts live records")
+        check(isinstance(r.get("log_size"), int) and r["log_size"] > 0,
+              "snapshot reports covered log size")
+        check(r.get("next_id") == 4, "snapshot reports next_id high-water")
+        snap_dir = r["snapshot"]
+
+        # the snapshot dir is a self-contained, restorable data set
+        for f in ("memory.log", "metadata.db", "manifest.json"):
+            check(os.path.exists(os.path.join(snap_dir, f)),
+                  f"snapshot contains {f}")
+        with open(os.path.join(snap_dir, "manifest.json")) as fh:
+            man = json.load(fh)
+        check(man.get("log_size") == r["log_size"] and man.get("next_id") == 4,
+              "manifest matches the response")
+
+        # default (unnamed) snapshot works too
+        r = srv.req({"operation": "snapshot"})
+        check(r.get("ok") is True and r["snapshot"] != snap_dir,
+              "unnamed snapshot uses a generated name")
+
+        # a name with a path separator is rejected (no traversal)
+        r = srv.req({"operation": "snapshot", "name": "../evil"})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "traversal name rejected")
+
+    # recover: a fresh server pointed at the snapshot dir rebuilds from it
+    restore = Server(binary, port + 1, phase=4)
+    restore.datadir = snap_dir
+    with restore:
+        r = restore.req({"operation": "search", "top_k": 100})
+        check(r.get("ok") is True and r.get("total") == 3,
+              "recovered all records from the snapshot")
+        # next_id floor survives, so a new insert does not reuse an id
+        r = restore.req({"operation": "insert", "type": "episodic", "data": "new"})
+        check(r.get("ok") is True and r["record"]["id"] == 4,
+              "recovered next_id floor prevents id reuse")
+
+
+def test_snapshot_admin_only(binary, port):
+    print("[backup: snapshot is admin-only]")
+    lines = ["admintok", "acme_rw acme rw", "acme_ro acme ro"]
+    with Server(binary, port, phase=4, token_lines=lines) as srv:
+        r = srv.req({"operation": "snapshot", "name": "x", "token": "acme_rw"})
+        check(r.get("ok") is False and r["error"]["code"] == "FORBIDDEN",
+              "namespaced token cannot snapshot")
+        r = srv.req({"operation": "snapshot", "name": "x", "token": "acme_ro"})
+        check(r.get("ok") is False and r["error"]["code"] == "FORBIDDEN",
+              "read-only token cannot snapshot")
+        r = srv.req({"operation": "snapshot", "name": "x"})  # no token
+        check(r.get("ok") is False and r["error"]["code"] == "UNAUTHORIZED",
+              "unauthenticated snapshot rejected")
+        r = srv.req({"operation": "snapshot", "name": "x", "token": "admintok"})
+        check(r.get("ok") is True, "admin token can snapshot")
+
+
 def test_multivector(binary, port):
     print("[multi-vector: embeddings array round-trip]")
     with Server(binary, port, phase=4) as srv:  # --embedding-dim 384
@@ -679,6 +743,8 @@ def main():
     test_bulk_ops(binary, 19480)
     test_consolidate(binary, 19481)
     test_multivector(binary, 19482)
+    test_snapshot(binary, 19483)
+    test_snapshot_admin_only(binary, 19485)
 
     print()
     if FAILURES:

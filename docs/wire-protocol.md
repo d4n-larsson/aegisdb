@@ -535,6 +535,48 @@ and translate to Prometheus, the same way TLS is terminated by a proxy.
 
 ---
 
+### `snapshot`
+
+Take a consistent **online backup** without stopping the server. Admin-only (a
+namespaced or read-only token gets `FORBIDDEN`). Because the log is append-only,
+a snapshot is just its durable prefix plus a fresh `metadata.db` (the `next_id`
+floor) and a `manifest.json`; the derived index checkpoints are omitted and
+rebuilt on restore. An in-flight compaction cannot interfere, and concurrent
+writes simply land past the captured offset.
+
+**Request**:
+
+```json
+{ "operation": "snapshot", "name": "nightly-2026-07-05" }
+```
+
+`name` is optional (defaults to `snap-<epoch_ms>`) and must be a single path
+component — a value containing `/` or `..` returns `INVALID_REQUEST`.
+
+**Response**:
+
+```json
+{
+  "ok": true,
+  "snapshot": "./data/snapshots/nightly-2026-07-05",
+  "log_size": 2310544,
+  "record_count": 1042,
+  "next_id": 1060,
+  "created_ms": 1783236416709
+}
+```
+
+The snapshot directory (`<data-dir>/snapshots/<name>/`) is a self-contained,
+restorable data set: `memory.log`, `metadata.db`, and `manifest.json`.
+
+**Restore**: point a stopped server's `--data-dir` at a copy of the snapshot
+directory (or drop its `memory.log` + `metadata.db` into an empty data dir) and
+start it — recovery rebuilds every index from the log. Since a snapshot is a log
+prefix, truncating `memory.log` to an earlier frame boundary yields a
+point-in-time restore.
+
+---
+
 ## Phase gating (advanced)
 
 By default the server enables every operation (`--phase 4`). The `--phase <1-4>`

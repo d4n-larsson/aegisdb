@@ -79,4 +79,26 @@ int db_save_metadata(AegisDB *db);
  * Thread-safe. Returns 0/-1. */
 int db_checkpoint(AegisDB *db);
 
+/* Result of a successful db_snapshot(): where it landed and what it covers. */
+typedef struct {
+    char dir[1300];        /* the snapshot directory that was written */
+    uint64_t log_size;     /* durable log bytes captured (the covered offset) */
+    uint64_t next_id;      /* id high-water at snapshot time (restore floor) */
+    uint64_t created_ms;   /* wall-clock time the snapshot was taken */
+    size_t record_count;   /* live (non-tombstone) records at snapshot time */
+} DbSnapshotInfo;
+
+#define DB_SNAPSHOT_OK       0
+#define DB_SNAPSHOT_ERR     (-1) /* mkdir / copy / write failure */
+#define DB_SNAPSHOT_BADNAME (-2) /* name empty or contains a path separator */
+
+/* Write a consistent online snapshot under <data_dir>/snapshots/<name>/. The log
+ * is append-only, so a snapshot is the durable log prefix [0, log_size) plus a
+ * fresh metadata.db (the next_id floor) and a manifest.json; derived checkpoints
+ * are omitted (recovery rebuilds them). Captured under log_lock so an in-flight
+ * compaction cannot swap the log mid-copy; concurrent appends land past the
+ * captured offset and are simply not included. Fills *out on success. Returns
+ * DB_SNAPSHOT_OK, or a DB_SNAPSHOT_* error. Thread-safe. */
+int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out);
+
 #endif /* AEGISDB_DB_H */
