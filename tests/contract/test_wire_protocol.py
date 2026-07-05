@@ -553,11 +553,11 @@ def test_multivector(binary, port):
         embs = r.get("record", {}).get("embeddings")
         check(isinstance(embs, list) and len(embs) == 2 and len(embs[0]) == dim,
               "get echoes both embeddings")
-        # searchable by the primary vector (PR1 indexes vector 0)
-        r = srv.req({"operation": "search", "embedding": v0, "top_k": 1})
-        check(r.get("ok") is True and r.get("records")
-              and r["records"][0]["id"] == rid,
-              "found by its primary vector")
+        # best-of-N: found by EITHER of its vectors, returned once
+        for label, q in (("primary", v0), ("secondary", v1)):
+            r = srv.req({"operation": "search", "embedding": q, "top_k": 5})
+            hits = [rec["id"] for rec in r.get("records", []) if rec["id"] == rid]
+            check(len(hits) == 1, f"found once by its {label} vector")
         # a vector of the wrong dimension is rejected
         r = srv.req({"operation": "insert", "type": "semantic", "data": "bad",
                      "embeddings": [[1.0, 2.0, 3.0]]})

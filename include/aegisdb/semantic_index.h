@@ -22,13 +22,16 @@ SemanticIndex *semantic_index_create(size_t dim, size_t ann_threshold,
                                      size_t ef_search, int quantize);
 void semantic_index_free(SemanticIndex *s);
 
-/* Add or replace the vector for `id` (copied). dim must match. Returns 0/-1. */
-int semantic_index_add(SemanticIndex *s, uint64_t id, const float *vec,
-                       size_t dim);
+/* Add or replace the `vec_count` vectors for `id` (copied; vector i at
+ * vecs + i*dim). Any prior vectors for `id` are replaced. dim must match.
+ * Returns 0/-1. */
+int semantic_index_add(SemanticIndex *s, uint64_t id, const float *vecs,
+                       size_t vec_count, size_t dim);
 void semantic_index_remove(SemanticIndex *s, uint64_t id);
 
-/* Top-K by cosine similarity. Allocates *out_ids and *out_scores (free each).
- * Returns 0/-1. */
+/* Top-K record ids by cosine similarity. A multi-vector record is scored by its
+ * best-matching vector and returned once (best-of-N). Allocates *out_ids and
+ * *out_scores (free each). Returns 0/-1. */
 int semantic_index_search(const SemanticIndex *s, const float *query,
                           size_t dim, size_t top_k, uint64_t **out_ids,
                           float **out_scores, size_t *out_n);

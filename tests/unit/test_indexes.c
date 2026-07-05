@@ -101,9 +101,9 @@ static void test_semantic_topk_ordering(void) {
     float a[] = {1.0f, 0.0f, 0.0f};  /* id 1 */
     float b[] = {0.9f, 0.1f, 0.0f};  /* id 2 (close to query) */
     float c[] = {0.0f, 1.0f, 0.0f};  /* id 3 (orthogonal-ish) */
-    semantic_index_add(s, 1, a, dim);
-    semantic_index_add(s, 2, b, dim);
-    semantic_index_add(s, 3, c, dim);
+    semantic_index_add(s, 1, a, 1, dim);
+    semantic_index_add(s, 2, b, 1, dim);
+    semantic_index_add(s, 3, c, 1, dim);
 
     float query[] = {1.0f, 0.0f, 0.0f};
     uint64_t *ids = NULL;
@@ -128,8 +128,8 @@ static void test_semantic_remove_reclaims(void) {
     SemanticIndex *s = semantic_index_create(dim, 0, 0, 0);
     float v1[] = {1.0f, 0.0f};
     float v2[] = {0.0f, 1.0f};
-    semantic_index_add(s, 1, v1, dim);
-    semantic_index_add(s, 2, v2, dim);
+    semantic_index_add(s, 1, v1, 1, dim);
+    semantic_index_add(s, 2, v2, 1, dim);
     TEST_ASSERT_EQUAL_size_t(2, semantic_index_count(s));
 
     semantic_index_remove(s, 1);
@@ -149,7 +149,7 @@ static void test_semantic_remove_reclaims(void) {
 
     /* remove/re-add churn stays bounded (no dead-slot accumulation). */
     for (int i = 0; i < 100; i++) {
-        semantic_index_add(s, 1, v1, dim);
+        semantic_index_add(s, 1, v1, 1, dim);
         semantic_index_remove(s, 1);
     }
     TEST_ASSERT_EQUAL_size_t(1, semantic_index_count(s));
@@ -163,11 +163,11 @@ static void test_semantic_overwrite_in_place(void) {
     SemanticIndex *s = semantic_index_create(dim, 0, 0, 0);
     float along_x[] = {1.0f, 0.0f};
     float along_y[] = {0.0f, 1.0f};
-    semantic_index_add(s, 7, along_x, dim);
+    semantic_index_add(s, 7, along_x, 1, dim);
     TEST_ASSERT_EQUAL_size_t(1, semantic_index_count(s));
 
     /* overwrite id 7 to point along y */
-    semantic_index_add(s, 7, along_y, dim);
+    semantic_index_add(s, 7, along_y, 1, dim);
     TEST_ASSERT_EQUAL_size_t(1, semantic_index_count(s)); /* no new slot */
 
     float qy[] = {0.0f, 1.0f};
@@ -194,7 +194,7 @@ static void test_semantic_bulk_add_remove_consistency(void) {
     SemanticIndex *s = semantic_index_create(dim, 0, 0, 0);
     for (uint64_t id = 1; id <= N; id++) {
         float v[] = {(float)id};
-        TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, dim));
+        TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, 1, dim));
     }
     TEST_ASSERT_EQUAL_size_t((size_t)N, semantic_index_count(s));
 
@@ -242,7 +242,7 @@ static void test_semantic_topk_partial_selection(void) {
     for (uint64_t step = 0; step < N; step++) {
         uint64_t id = 1 + (step * 73 + 11) % N;
         float v[] = {1.0f, (float)(id - 1)};
-        semantic_index_add(s, id, v, dim);
+        semantic_index_add(s, id, v, 1, dim);
     }
     TEST_ASSERT_EQUAL_size_t((size_t)N, semantic_index_count(s));
 
@@ -272,7 +272,7 @@ static void test_semantic_hnsw_path(void) {
     SemanticIndex *s = semantic_index_create(dim, 16, 100, 0); /* HNSW once n>=16 */
     for (uint64_t id = 1; id <= N; id++) {
         float v[] = {1.0f, (float)(id - 1)};
-        TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, dim));
+        TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, 1, dim));
     }
     TEST_ASSERT_EQUAL_size_t((size_t)N, semantic_index_count(s));
 
@@ -300,13 +300,54 @@ static void test_semantic_hnsw_path(void) {
 
     /* overwrite id 2 to point away from q: it drops out, id 3 becomes nearest */
     float away[] = {0.0f, 1.0f};
-    TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, 2, away, dim));
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, 2, away, 1, dim));
     TEST_ASSERT_EQUAL_INT(0, semantic_index_search(s, q, dim, K, &ids, &sc, &n));
     TEST_ASSERT_EQUAL_UINT64(3, ids[0]);
     free(ids);
     free(sc);
     semantic_index_free(s);
 }
+
+/* Best-of-N (#85): a record with several vectors is matched by whichever is
+ * closest and returned once. `threshold` selects the exact (0=default high) or
+ * HNSW (small) path so both are exercised. */
+static void multivector_best_of_n(size_t threshold) {
+    const size_t dim = 3;
+    SemanticIndex *s = semantic_index_create(dim, threshold, 100, 0);
+    float axes[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    /* record 1 owns two vectors (x and y); record 2 owns z */
+    float r1[6] = {1, 0, 0, 0, 1, 0};
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, 1, r1, 2, dim));
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, 2, axes[2], 1, dim));
+
+    uint64_t *ids = NULL;
+    float *sc = NULL;
+    size_t n = 0;
+    /* query along y — record 1's *second* vector — must return record 1 once */
+    TEST_ASSERT_EQUAL_INT(
+        0, semantic_index_search(s, axes[1], dim, 5, &ids, &sc, &n));
+    int seen1 = 0, dup1 = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (ids[i] == 1) { if (seen1) dup1 = 1; seen1 = 1; }
+    }
+    TEST_ASSERT_TRUE(seen1);      /* found by its non-primary vector */
+    TEST_ASSERT_FALSE(dup1);      /* returned once, not per-vector */
+    TEST_ASSERT_EQUAL_UINT64(1, ids[0]); /* best match is record 1 (sim ~1) */
+    TEST_ASSERT_TRUE(sc[0] > 0.99f);
+    free(ids);
+    free(sc);
+
+    /* removing record 1 drops *both* its vectors */
+    semantic_index_remove(s, 1);
+    TEST_ASSERT_EQUAL_INT(
+        0, semantic_index_search(s, axes[1], dim, 5, &ids, &sc, &n));
+    for (size_t i = 0; i < n; i++) TEST_ASSERT_TRUE(ids[i] != 1);
+    free(ids);
+    free(sc);
+    semantic_index_free(s);
+}
+static void test_semantic_multivector_dense(void) { multivector_best_of_n(0); }
+static void test_semantic_multivector_hnsw(void) { multivector_best_of_n(2); }
 
 int main(void) {
     UNITY_BEGIN();
@@ -320,5 +361,7 @@ int main(void) {
     RUN_TEST(test_semantic_bulk_add_remove_consistency);
     RUN_TEST(test_semantic_topk_partial_selection);
     RUN_TEST(test_semantic_hnsw_path);
+    RUN_TEST(test_semantic_multivector_dense);
+    RUN_TEST(test_semantic_multivector_hnsw);
     return UNITY_END();
 }
