@@ -17,8 +17,12 @@ services:
       - "/data"
       - "--port"
       - "9470"
-      # - "--embedding-dim"
-      # - "1024"
+      - "--log-level"
+      - "debug"
+      # Pin the vector length to match the Claude Code MCP integration
+      # (AEGIS_EMBEDDING_MODE=local, all-MiniLM-L6-v2 => 384). Keep these in sync.
+      - "--embedding-dim"
+      - "384"
       # - "--auth-token-file"
       # - "/data/tokens.txt"
 

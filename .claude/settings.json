@@ -1,7 +1,7 @@
 {
   "hooks": {
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/integrations/claude-code/hooks/recall_hook.py\"" } ] }
+      { "hooks": [ { "type": "command", "command": "AEGIS_RECALL_TOP_K=3 python3 \"$CLAUDE_PROJECT_DIR/integrations/claude-code/hooks/recall_hook.py\"" } ] }
     ],
     "SessionEnd": [
       { "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/integrations/claude-code/hooks/capture_hook.py\"" } ] }

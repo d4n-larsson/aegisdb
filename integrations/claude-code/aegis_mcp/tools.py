@@ -9,6 +9,8 @@ configured namespace (FR-008), and never raises — backend failures become
 """
 from __future__ import annotations
 
+import sys
+
 from .client import AegisClient, AegisUnavailable
 from .embeddings import EmbeddingProvider, cosine
 from . import results
@@ -60,6 +62,31 @@ class MemoryTools:
         payload.setdefault("agent_id", self.config.namespace)
         return self.client.request(payload, read_timeout_ms=read_timeout_ms)
 
+    def _embeddings_usable(self) -> bool:
+        """Whether the provider can supply correctly-sized embeddings.
+
+        Validated once, lazily. The first call loads the model (for a local
+        provider) and checks its output dimension against the configured size.
+        This is done here rather than at server startup on purpose: loading a
+        local model to read its dimension can stall (e.g. a Hugging Face Hub
+        check), and blocking the MCP ``initialize`` handshake on it trips the
+        client's startup timeout. On a mismatch, embeddings are disabled (so
+        semantic search degrades) and a warning is logged, instead of silently
+        sending wrong-sized vectors the backend would reject.
+        """
+        cached = getattr(self, "_emb_usable", None)
+        if cached is not None:
+            return cached
+        usable = self.provider.available()
+        if usable and self.provider.dimension() != self.config.embedding_dimensions:
+            print(f"[aegis-mcp] embedding dimension mismatch: "
+                  f"provider={self.provider.dimension()} "
+                  f"config={self.config.embedding_dimensions}; disabling embeddings",
+                  file=sys.stderr)
+            usable = False
+        self._emb_usable = usable
+        return usable
+
     # ---- operations ------------------------------------------------------
 
     def save(self, text: str, tags=None, importance: float = 0.5,
@@ -75,7 +102,7 @@ class MemoryTools:
         }
         if semantic:
             payload["confidence"] = confidence
-        if self.provider.available():
+        if self._embeddings_usable():
             payload["embedding"] = self.provider.embed_document(text)
         try:
             resp = self._request(payload)
@@ -113,8 +140,9 @@ class MemoryTools:
             payload["end_time"] = end_time
 
         query_embedding = None
-        semantic = bool(query) and self.provider.available()
-        degraded = bool(query) and not self.provider.available()
+        usable = self._embeddings_usable()
+        semantic = bool(query) and usable
+        degraded = bool(query) and not usable
         if semantic:
             query_embedding = self.provider.embed_query(query)
             payload["embedding"] = query_embedding
@@ -149,7 +177,7 @@ class MemoryTools:
             payload["confidence"] = confidence
         if tags is not None:
             payload["tags"] = list(tags)
-        if text is not None and self.provider.available():
+        if text is not None and self._embeddings_usable():
             payload["embedding"] = self.provider.embed_document(text)
         try:
             resp = self._request(payload)
