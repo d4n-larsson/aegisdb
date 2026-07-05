@@ -8,6 +8,7 @@
 
 #include <ctype.h>
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -1204,6 +1205,32 @@ static cJSON *handle_stats(AegisDB *db) {
     return o;
 }
 
+/* Admin: write a consistent online snapshot (backup) of the log under
+ * <data_dir>/snapshots/<name>/. `name` defaults to snap-<epoch_ms>. Returns the
+ * snapshot location and what it covers. */
+static cJSON *handle_snapshot(AegisDB *db, const cJSON *req) {
+    const char *name = jr_str(req, "name", NULL);
+    char autobuf[40];
+    if (!name) {
+        snprintf(autobuf, sizeof(autobuf), "snap-%llu",
+                 (unsigned long long)db_now_ms());
+        name = autobuf;
+    }
+    DbSnapshotInfo info;
+    int rc = db_snapshot(db, name, &info);
+    if (rc == DB_SNAPSHOT_BADNAME)
+        return json_error("INVALID_REQUEST", "invalid snapshot name");
+    if (rc != DB_SNAPSHOT_OK) return json_error_status(AEGIS_ERR_INTERNAL);
+
+    cJSON *o = json_ok();
+    cJSON_AddStringToObject(o, "snapshot", info.dir);
+    cJSON_AddNumberToObject(o, "log_size", (double)info.log_size);
+    cJSON_AddNumberToObject(o, "record_count", (double)info.record_count);
+    cJSON_AddNumberToObject(o, "next_id", (double)info.next_id);
+    cJSON_AddNumberToObject(o, "created_ms", (double)info.created_ms);
+    return o;
+}
+
 static int parse_filters(const cJSON *req, const char *ns, SearchParams *p,
                          const char ***out_tags);
 
@@ -1620,6 +1647,11 @@ static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
         /* stats exposes server-wide counts; restrict to admin/global tokens. */
         if (ctx.ns) return json_error_status(AEGIS_ERR_FORBIDDEN);
         return handle_stats(db);
+    }
+    if (strcmp(op, "snapshot") == 0) {
+        /* backups expose the whole log; require an admin (unrestricted) token. */
+        if (ctx.ns || !ctx.can_write) return json_error_status(AEGIS_ERR_FORBIDDEN);
+        return handle_snapshot(db, req);
     }
     if (strcmp(op, "insert") == 0) return handle_insert(db, req, ctx.ns);
     if (strcmp(op, "get") == 0) return handle_get(db, req, ctx.ns);

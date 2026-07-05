@@ -82,6 +82,128 @@ int db_checkpoint(AegisDB *db) {
     return (rv == 0 && rv2 == 0) ? 0 : -1;
 }
 
+/* A snapshot name becomes a single path component under snapshots/, so it must
+ * be non-empty and free of separators or dot-traversal. */
+static int snapshot_name_ok(const char *name) {
+    if (!name || !*name) return 0;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return 0;
+    for (const char *p = name; *p; p++)
+        if (*p == '/' || *p == '\\') return 0;
+    return 1;
+}
+
+/* Copy the first `n` bytes of the open log fd to `dst_path`. pread leaves the fd
+ * offset untouched, so concurrent appends (which pwrite past `n`) are safe. */
+static int copy_log_prefix(int src_fd, const char *dst_path, uint64_t n) {
+    FILE *dst = fopen(dst_path, "wb");
+    if (!dst) return -1;
+    char buf[65536];
+    uint64_t done = 0;
+    int ok = 1;
+    while (done < n) {
+        size_t want = n - done < sizeof(buf) ? (size_t)(n - done) : sizeof(buf);
+        ssize_t got = pread(src_fd, buf, want, (off_t)done);
+        if (got <= 0) { ok = 0; break; } /* short read: log shrank unexpectedly */
+        if (fwrite(buf, 1, (size_t)got, dst) != (size_t)got) { ok = 0; break; }
+        done += (uint64_t)got;
+    }
+    if (fflush(dst) != 0) ok = 0;
+    if (fclose(dst) != 0) ok = 0;
+    if (!ok) unlink(dst_path);
+    return ok ? 0 : -1;
+}
+
+/* Write a standalone metadata.db carrying `nid` as the next_id floor (same
+ * AMETA format as db_save_metadata, but to an arbitrary path). */
+static int write_meta_file(const char *path, uint64_t nid) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    uint8_t buf[32] = {'A', 'M', 'E', 'T', 'A'};
+    uint32_t ver = 1;
+    memcpy(buf + 5, &ver, 4);
+    memcpy(buf + 9, &nid, 8);
+    int ok = (fwrite(buf, 1, sizeof(buf), f) == sizeof(buf));
+    if (fclose(f) != 0) ok = 0;
+    if (!ok) unlink(path);
+    return ok ? 0 : -1;
+}
+
+int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
+    if (!snapshot_name_ok(name)) return DB_SNAPSHOT_BADNAME;
+
+    char dir[1300];
+    snprintf(dir, sizeof(dir), "%s/snapshots/%s", db->config.data_dir, name);
+    if (mkdir_p(dir) != 0) {
+        LOG_ERROR("snapshot: cannot create %s", dir);
+        return DB_SNAPSHOT_ERR;
+    }
+
+    /* Flush pending appends so the durable prefix we copy is as complete as
+     * possible, then capture a consistent (offset, next_id, count) tuple. */
+    log_fsync(&db->log);
+
+    pthread_rwlock_rdlock(&db->index_lock);
+    size_t live = 0;
+    for (size_t i = 0; i < db->hash->cap; i++)
+        if (db->hash->buckets[i].used && !db->hash->buckets[i].deleted) live++;
+    pthread_mutex_lock(&db->id_lock);
+    uint64_t nid = db->next_id;
+    pthread_mutex_unlock(&db->id_lock);
+
+    /* log_lock (read) blocks only compaction's log swap; appends continue and
+     * land past `covered`, so [0, covered) is a stable, valid frame prefix. */
+    pthread_rwlock_rdlock(&db->log_lock);
+    uint64_t covered = (uint64_t)db->log.size;
+    int src_fd = db->log.fd;
+    char logpath[1400];
+    snprintf(logpath, sizeof(logpath), "%s/memory.log", dir);
+    int crc = copy_log_prefix(src_fd, logpath, covered);
+    pthread_rwlock_unlock(&db->log_lock);
+    pthread_rwlock_unlock(&db->index_lock);
+
+    if (crc != 0) {
+        LOG_ERROR("snapshot: log copy failed (%s)", logpath);
+        return DB_SNAPSHOT_ERR;
+    }
+
+    char metapath[1400];
+    snprintf(metapath, sizeof(metapath), "%s/metadata.db", dir);
+    if (write_meta_file(metapath, nid) != 0) {
+        LOG_ERROR("snapshot: metadata write failed (%s)", metapath);
+        return DB_SNAPSHOT_ERR;
+    }
+
+    uint64_t created = db_now_ms();
+    char manifest[1400], man[768];
+    int mn = snprintf(man, sizeof(man),
+                      "{\"format\":1,\"created_ms\":%llu,\"version\":\"%s\","
+                      "\"log_size\":%llu,\"record_count\":%zu,\"next_id\":%llu,"
+                      "\"embedding_dim\":%zu}\n",
+                      (unsigned long long)created, AEGIS_VERSION_STRING,
+                      (unsigned long long)covered, live,
+                      (unsigned long long)nid, db->config.embedding_dimensions);
+    snprintf(manifest, sizeof(manifest), "%s/manifest.json", dir);
+    FILE *mf = fopen(manifest, "wb");
+    if (!mf || mn < 0 || fwrite(man, 1, (size_t)mn, mf) != (size_t)mn) {
+        if (mf) fclose(mf);
+        unlink(manifest);
+        LOG_ERROR("snapshot: manifest write failed (%s)", manifest);
+        return DB_SNAPSHOT_ERR;
+    }
+    fclose(mf);
+
+    if (out) {
+        snprintf(out->dir, sizeof(out->dir), "%s", dir);
+        out->log_size = covered;
+        out->next_id = nid;
+        out->created_ms = created;
+        out->record_count = live;
+    }
+    LOG_INFO("snapshot: wrote %s (%llu log bytes, %zu records)", dir,
+             (unsigned long long)covered, live);
+    return DB_SNAPSHOT_OK;
+}
+
 /* Read the persisted next_id from metadata.db, or 0 if absent/unreadable. It is
  * a high-water mark used as a floor at recovery so next_id can't regress. */
 static uint64_t load_metadata_next_id(const char *path) {
