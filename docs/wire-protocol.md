@@ -569,11 +569,20 @@ component — a value containing `/` or `..` returns `INVALID_REQUEST`.
 The snapshot directory (`<data-dir>/snapshots/<name>/`) is a self-contained,
 restorable data set: `memory.log`, `metadata.db`, and `manifest.json`.
 
-**Restore**: point a stopped server's `--data-dir` at a copy of the snapshot
-directory (or drop its `memory.log` + `metadata.db` into an empty data dir) and
-start it — recovery rebuilds every index from the log. Since a snapshot is a log
-prefix, truncating `memory.log` to an earlier frame boundary yields a
-point-in-time restore.
+**Restore** with the one-shot `--restore` mode — it validates the manifest
+(format and `embedding-dim` must match), refuses to overwrite an existing
+database, and installs the log + metadata into an empty data dir:
+
+```sh
+# server must be stopped (or restore into a different, empty --data-dir)
+aegisdb --restore /backups/nightly-2026-07-05 --data-dir ./data --embedding-dim 1024
+aegisdb --data-dir ./data --embedding-dim 1024   # start; recovery rebuilds indexes
+```
+
+`--embedding-dim` must match the value the snapshot was taken with (recorded in
+the manifest); a mismatch is rejected. Since a snapshot is a log prefix,
+truncating its `memory.log` to an earlier frame boundary before restoring yields
+a point-in-time restore.
 
 ---
 

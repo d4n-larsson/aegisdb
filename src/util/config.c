@@ -249,6 +249,9 @@ static void usage(const char *prog) {
             "  --log-level <level>      error|warn|info|debug (default info,\n"
             "                           or $AEGISDB_LOG_LEVEL)\n"
             "  --health-check           probe a local server (--port) and exit\n"
+            "  --restore <dir>          install the snapshot at <dir> into\n"
+            "                           --data-dir and exit (data-dir must be\n"
+            "                           empty); the next start recovers from it\n"
             "  --help                   show this help\n"
             "\n"
             "  With no --auth-token/--auth-token-file the server runs WITHOUT\n"
@@ -276,6 +279,9 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
         } else if (strcmp(a, "--hash-token") == 0) {
             NEXT("--hash-token");
             cfg->hash_token = val; /* borrows argv; printed and exits in main */
+        } else if (strcmp(a, "--restore") == 0) {
+            NEXT("--restore");
+            cfg->restore_from = val; /* borrows argv; handled and exits in main */
         } else if (strcmp(a, "--data-dir") == 0) {
             NEXT("--data-dir");
             strncpy(cfg->data_dir, val, sizeof(cfg->data_dir) - 1);

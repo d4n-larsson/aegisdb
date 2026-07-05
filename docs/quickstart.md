@@ -163,6 +163,29 @@ The log is the source of truth — indexes rebuild from it on startup.
 3. Restart it with the same `--data-dir`.
 4. `get` each id — every record returns intact.
 
+## Back up and restore
+
+The log is append-only, so a backup is a consistent copy of its durable prefix.
+Take one online, without stopping the server, via the admin-only `snapshot` op:
+
+```sh
+echo '{"operation":"snapshot","name":"nightly","token":"<admin-token>"}' \
+  | nc -q1 localhost 9470
+# -> writes ./data/snapshots/nightly/ (memory.log, metadata.db, manifest.json)
+```
+
+Restore it into an **empty** data dir with the one-shot `--restore` mode, then
+start the server normally — recovery rebuilds every index from the log:
+
+```sh
+aegisdb --restore ./data/snapshots/nightly --data-dir ./restored --embedding-dim 1024
+aegisdb --data-dir ./restored --embedding-dim 1024
+```
+
+`--embedding-dim` must match the snapshot (recorded in its `manifest.json`);
+`--restore` refuses to overwrite an existing database. See the
+[wire-protocol reference](wire-protocol.md#snapshot) for the full contract.
+
 ## Where to next
 
 - [Wire protocol reference](wire-protocol.md) — every operation, field, and error code.
