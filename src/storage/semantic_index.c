@@ -21,6 +21,18 @@
 
 #define DEFAULT_ANN_THRESHOLD 10000 /* live vectors above which HNSW kicks in */
 
+/* Multi-vector (#85): a record's N vectors are stored as N separate entries
+ * keyed by a synthetic id `record << MV_SLOT_BITS | slot`, so the dense map and
+ * HNSW (both keyed by an opaque uint64) stay 1:1 per vector. Search maps the
+ * synthetic ids back to record ids and returns each record once (best-of-N).
+ * MV_SLOT_BITS caps a record at 64 vectors (matches the wire cap). */
+#define MV_SLOT_BITS 6
+#define MV_SLOT_MASK ((1u << MV_SLOT_BITS) - 1u)
+static uint64_t mv_syn(uint64_t rec, size_t slot) {
+    return (rec << MV_SLOT_BITS) | (uint64_t)slot;
+}
+static uint64_t mv_rec(uint64_t syn) { return syn >> MV_SLOT_BITS; }
+
 typedef struct {
     uint64_t id;
     float *vec;
@@ -34,6 +46,14 @@ typedef struct {
     int used;
 } MapSlot;
 
+/* record id -> number of vectors it currently has (so remove/replace know how
+ * many synthetic slots to drop). Open addressing with backward-shift deletion. */
+typedef struct {
+    uint64_t rec;
+    uint32_t count;
+    int used;
+} RCount;
+
 struct SemanticIndex {
     size_t dim;
     SemEntry *e;
@@ -41,6 +61,8 @@ struct SemanticIndex {
     size_t cap;
     MapSlot *map; /* id -> dense slot; power-of-two capacity, NULL until first add */
     size_t mcap;
+    RCount *rc;   /* record -> vec_count; power-of-two capacity */
+    size_t rccap, rcn;
     Hnsw *hnsw;          /* NULL until the live count crosses ann_threshold */
     size_t ann_threshold;
     size_t ef_search;    /* HNSW query beam width; 0 = the HNSW default */
@@ -105,6 +127,63 @@ static void map_delete_at(SemanticIndex *s, size_t i) {
     }
 }
 
+/* ----- record -> vec_count map (rc) ------------------------------------- */
+static size_t rc_probe(const RCount *m, size_t cap, uint64_t rec) {
+    size_t mask = cap - 1, i = (size_t)mix64(rec) & mask;
+    while (m[i].used && m[i].rec != rec) i = (i + 1) & mask;
+    return i;
+}
+static int rc_grow(SemanticIndex *s, size_t newcap) {
+    RCount *nm = calloc(newcap, sizeof(RCount));
+    if (!nm) return -1;
+    size_t mask = newcap - 1;
+    for (size_t i = 0; i < s->rccap; i++) {
+        if (!s->rc[i].used) continue;
+        size_t j = (size_t)mix64(s->rc[i].rec) & mask;
+        while (nm[j].used) j = (j + 1) & mask;
+        nm[j] = s->rc[i];
+    }
+    free(s->rc);
+    s->rc = nm;
+    s->rccap = newcap;
+    return 0;
+}
+static uint32_t rc_get(const SemanticIndex *s, uint64_t rec) {
+    if (s->rccap == 0) return 0;
+    size_t i = rc_probe(s->rc, s->rccap, rec);
+    return s->rc[i].used ? s->rc[i].count : 0;
+}
+static int rc_set(SemanticIndex *s, uint64_t rec, uint32_t count) {
+    if (s->rccap == 0 && rc_grow(s, 64) != 0) return -1;
+    size_t i = rc_probe(s->rc, s->rccap, rec);
+    if (!s->rc[i].used) {
+        if ((s->rcn + 1) * 10 > s->rccap * 7) {
+            if (rc_grow(s, s->rccap * 2) != 0) return -1;
+            i = rc_probe(s->rc, s->rccap, rec);
+        }
+        s->rc[i].used = 1;
+        s->rc[i].rec = rec;
+        s->rcn++;
+    }
+    s->rc[i].count = count;
+    return 0;
+}
+static void rc_del(SemanticIndex *s, uint64_t rec) {
+    if (s->rccap == 0) return;
+    size_t mask = s->rccap - 1;
+    size_t i = rc_probe(s->rc, s->rccap, rec);
+    if (!s->rc[i].used) return;
+    s->rc[i].used = 0;
+    s->rcn--;
+    for (size_t j = (i + 1) & mask; s->rc[j].used; j = (j + 1) & mask) {
+        size_t home = (size_t)mix64(s->rc[j].rec) & mask;
+        if (i <= j ? (i < home && home <= j) : (i < home || home <= j)) continue;
+        s->rc[i] = s->rc[j];
+        s->rc[j].used = 0;
+        i = j;
+    }
+}
+
 SemanticIndex *semantic_index_create(size_t dim, size_t ann_threshold,
                                      size_t ef_search, int quantize) {
     SemanticIndex *s = calloc(1, sizeof(*s));
@@ -150,6 +229,9 @@ void semantic_index_clear(SemanticIndex *s) {
     free(s->map);
     s->map = NULL;
     s->mcap = 0;
+    free(s->rc);
+    s->rc = NULL;
+    s->rccap = s->rcn = 0;
     hnsw_free(s->hnsw);
     s->hnsw = NULL;
 }
@@ -232,26 +314,10 @@ static int dense_put(SemanticIndex *s, uint64_t id, const float *vec,
     return 1;
 }
 
-int semantic_index_add(SemanticIndex *s, uint64_t id, const float *vec,
-                       size_t dim) {
-    if (dim != s->dim) return -1;
-    /* Above the threshold the graph is authoritative (dense array is gone). */
-    if (s->hnsw) return hnsw_add(s->hnsw, id, vec, dim) == 0 ? 0 : -1;
-
-    int rv = dense_put(s, id, vec, dim);
-    if (rv < 0) return -1;
-    if (rv == 1 && s->n >= s->ann_threshold)
-        return build_hnsw(s); /* crossed the threshold: build graph, drop dense */
-    return 0;
-}
-
-void semantic_index_remove(SemanticIndex *s, uint64_t id) {
-    if (s->hnsw) {
-        hnsw_remove(s->hnsw, id);
-        return;
-    }
+/* Remove one synthetic-id vector from the dense array (caller ensures no HNSW). */
+static void dense_remove(SemanticIndex *s, uint64_t synid) {
     if (s->mcap == 0) return;
-    size_t j = map_probe(s->map, s->mcap, id);
+    size_t j = map_probe(s->map, s->mcap, synid);
     if (!s->map[j].used) return;
     size_t idx = s->map[j].idx;
     map_delete_at(s, j);
@@ -266,6 +332,41 @@ void semantic_index_remove(SemanticIndex *s, uint64_t id) {
         s->map[mj].idx = idx;
     }
     s->n--;
+}
+
+/* Add/remove one vector by synthetic id, routing to the graph or dense array. */
+static int vec_add(SemanticIndex *s, uint64_t synid, const float *vec) {
+    if (s->hnsw) return hnsw_add(s->hnsw, synid, vec, s->dim) == 0 ? 0 : -1;
+    return dense_put(s, synid, vec, s->dim) < 0 ? -1 : 0;
+}
+static void vec_remove(SemanticIndex *s, uint64_t synid) {
+    if (s->hnsw)
+        hnsw_remove(s->hnsw, synid);
+    else
+        dense_remove(s, synid);
+}
+
+int semantic_index_add(SemanticIndex *s, uint64_t id, const float *vecs,
+                       size_t vec_count, size_t dim) {
+    if (dim != s->dim || vec_count == 0 || vec_count > (MV_SLOT_MASK + 1u))
+        return -1;
+    /* replace: drop the record's existing vectors (its prior slots) */
+    uint32_t old = rc_get(s, id);
+    for (uint32_t slot = 0; slot < old; slot++) vec_remove(s, mv_syn(id, slot));
+
+    for (size_t slot = 0; slot < vec_count; slot++)
+        if (vec_add(s, mv_syn(id, slot), vecs + slot * dim) != 0) return -1;
+    if (rc_set(s, id, (uint32_t)vec_count) != 0) return -1;
+
+    /* crossed the threshold: build the graph from the dense array, drop dense */
+    if (!s->hnsw && s->n >= s->ann_threshold) return build_hnsw(s);
+    return 0;
+}
+
+void semantic_index_remove(SemanticIndex *s, uint64_t id) {
+    uint32_t old = rc_get(s, id);
+    for (uint32_t slot = 0; slot < old; slot++) vec_remove(s, mv_syn(id, slot));
+    rc_del(s, id);
 }
 
 typedef struct {
@@ -296,68 +397,129 @@ static void scored_sift_down(Scored *a, size_t n, size_t i) {
     }
 }
 
-int semantic_index_search(const SemanticIndex *s, const float *query,
-                          size_t dim, size_t top_k, uint64_t **out_ids,
-                          float **out_scores, size_t *out_n) {
-    if (dim != s->dim) return -1;
-    /* Above the threshold the graph is authoritative; the dense array is gone.
-     * top_k==0 means "all", which the graph serves by querying for its live
-     * count. */
-    if (s->hnsw) {
-        size_t k = top_k ? top_k : hnsw_count(s->hnsw);
-        if (k == 0) {
-            *out_ids = malloc(sizeof(uint64_t));
-            *out_scores = malloc(sizeof(float));
-            *out_n = 0;
-            return (*out_ids && *out_scores) ? 0 : -1;
+/* Collapse (record, score) candidates (which may repeat a record across its
+ * vectors) to the top_k distinct records by best score. `cand[i].id` is a
+ * record id. top_k == 0 returns all distinct records. Allocates the outputs. */
+typedef struct { uint64_t rec; size_t idx; int used; } DedupSlot;
+static int dedup_topk(Scored *cand, size_t m, size_t top_k, uint64_t **out_ids,
+                      float **out_scores, size_t *out_n) {
+    size_t cap = 16;
+    while (cap < m * 2) cap *= 2;
+    DedupSlot *ds = calloc(cap, sizeof(DedupSlot));
+    Scored *uni = malloc((m ? m : 1) * sizeof(Scored));
+    if (!ds || !uni) {
+        free(ds);
+        free(uni);
+        return -1;
+    }
+    size_t un = 0, mask = cap - 1;
+    for (size_t i = 0; i < m; i++) {
+        uint64_t rec = cand[i].id;
+        size_t h = mix64(rec) & mask;
+        while (ds[h].used && ds[h].rec != rec) h = (h + 1) & mask;
+        if (ds[h].used) {
+            if (cand[i].score > uni[ds[h].idx].score)
+                uni[ds[h].idx].score = cand[i].score; /* best-of-N */
+        } else {
+            ds[h].used = 1;
+            ds[h].rec = rec;
+            ds[h].idx = un;
+            uni[un].id = rec;
+            uni[un].score = cand[i].score;
+            un++;
         }
-        return hnsw_search(s->hnsw, query, dim, k, s->ef_search, out_ids,
-                           out_scores, out_n);
     }
-    float qnorm = l2norm(query, dim);
-    Scored *all = malloc((s->n ? s->n : 1) * sizeof(Scored));
-    if (!all) return -1;
-    size_t m = 0;
-    for (size_t i = 0; i < s->n; i++) {
-        if (!s->e[i].used) continue;
-        double dot = 0;
-        const float *v = s->e[i].vec;
-        for (size_t k = 0; k < dim; k++) dot += (double)v[k] * query[k];
-        float denom = s->e[i].norm * qnorm;
-        float sim = denom > 0 ? (float)(dot / denom) : 0.0f;
-        all[m].id = s->e[i].id;
-        all[m].score = sim;
-        m++;
-    }
-    size_t k = (top_k && top_k < m) ? top_k : m;
-    /* Select the k highest scores in O(m log k): keep a size-k min-heap of the
-     * best seen, then sort just those k. Falls back to a full sort when k == m. */
-    if (k < m) {
-        for (size_t i = k / 2; i-- > 0;) scored_sift_down(all, k, i);
-        for (size_t i = k; i < m; i++)
-            if (all[i].score > all[0].score) {
-                all[0] = all[i];
-                scored_sift_down(all, k, 0);
+    free(ds);
+
+    size_t k = (top_k && top_k < un) ? top_k : un;
+    if (k < un) {
+        for (size_t i = k / 2; i-- > 0;) scored_sift_down(uni, k, i);
+        for (size_t i = k; i < un; i++)
+            if (uni[i].score > uni[0].score) {
+                uni[0] = uni[i];
+                scored_sift_down(uni, k, 0);
             }
     }
-    qsort(all, k, sizeof(Scored), cmp_scored_desc);
+    qsort(uni, k, sizeof(Scored), cmp_scored_desc);
     uint64_t *ids = malloc((k ? k : 1) * sizeof(uint64_t));
     float *sc = malloc((k ? k : 1) * sizeof(float));
     if (!ids || !sc) {
         free(ids);
         free(sc);
-        free(all);
+        free(uni);
         return -1;
     }
     for (size_t i = 0; i < k; i++) {
-        ids[i] = all[i].id;
-        sc[i] = all[i].score;
+        ids[i] = uni[i].id;
+        sc[i] = uni[i].score;
     }
-    free(all);
+    free(uni);
     *out_ids = ids;
     *out_scores = sc;
     *out_n = k;
     return 0;
+}
+
+int semantic_index_search(const SemanticIndex *s, const float *query,
+                          size_t dim, size_t top_k, uint64_t **out_ids,
+                          float **out_scores, size_t *out_n) {
+    if (dim != s->dim) return -1;
+
+    if (s->hnsw) {
+        /* Over-fetch synthetic (per-vector) candidates so record-dedup still
+         * leaves enough distinct records; then collapse best-of-N. */
+        size_t want = top_k ? top_k : hnsw_count(s->hnsw);
+        if (want == 0) {
+            *out_ids = malloc(sizeof(uint64_t));
+            *out_scores = malloc(sizeof(float));
+            *out_n = 0;
+            return (*out_ids && *out_scores) ? 0 : -1;
+        }
+        size_t live = hnsw_count(s->hnsw);
+        size_t fetch = want * 2;
+        if (fetch > live) fetch = live;
+        if (fetch < want) fetch = want;
+        uint64_t *sid = NULL;
+        float *ssc = NULL;
+        size_t sn = 0;
+        if (hnsw_search(s->hnsw, query, dim, fetch, s->ef_search, &sid, &ssc,
+                        &sn) != 0)
+            return -1;
+        Scored *cand = malloc((sn ? sn : 1) * sizeof(Scored));
+        if (!cand) {
+            free(sid);
+            free(ssc);
+            return -1;
+        }
+        for (size_t i = 0; i < sn; i++) {
+            cand[i].id = mv_rec(sid[i]);
+            cand[i].score = ssc[i];
+        }
+        free(sid);
+        free(ssc);
+        int rc = dedup_topk(cand, sn, top_k, out_ids, out_scores, out_n);
+        free(cand);
+        return rc;
+    }
+
+    /* dense/exact: score every stored vector, then collapse best-of-N */
+    float qnorm = l2norm(query, dim);
+    Scored *cand = malloc((s->n ? s->n : 1) * sizeof(Scored));
+    if (!cand) return -1;
+    size_t m = 0;
+    for (size_t i = 0; i < s->n; i++) {
+        if (!s->e[i].used) continue;
+        double dot = 0;
+        const float *v = s->e[i].vec;
+        for (size_t d = 0; d < dim; d++) dot += (double)v[d] * query[d];
+        float denom = s->e[i].norm * qnorm;
+        cand[m].id = mv_rec(s->e[i].id);
+        cand[m].score = denom > 0 ? (float)(dot / denom) : 0.0f;
+        m++;
+    }
+    int rc = dedup_topk(cand, m, top_k, out_ids, out_scores, out_n);
+    free(cand);
+    return rc;
 }
 /* ----------------------------------------------------------- persistence -- */
 
@@ -372,6 +534,25 @@ int semantic_index_save(const SemanticIndex *s, const char *path,
     return hnsw_save(s->hnsw, path, covered_log_size);
 }
 
+typedef struct {
+    SemanticIndex *s;
+    int err;
+} RcRebuild;
+/* Called per live graph node on load: bump the record's vec_count to cover this
+ * slot (slots are contiguous 0..count-1, so max slot + 1 is the count). */
+static int rc_rebuild_cb(uint64_t synid, const float *vec, void *ctx) {
+    (void)vec;
+    RcRebuild *c = ctx;
+    uint64_t rec = mv_rec(synid);
+    uint32_t slot = (uint32_t)(synid & MV_SLOT_MASK);
+    uint32_t cur = rc_get(c->s, rec);
+    if (slot + 1 > cur && rc_set(c->s, rec, slot + 1) != 0) {
+        c->err = 1;
+        return 1;
+    }
+    return 0;
+}
+
 int semantic_index_load(SemanticIndex *s, const char *path,
                         uint64_t *out_covered_log_size) {
     if (s->hnsw || s->n != 0) return -1; /* must be a fresh index */
@@ -384,40 +565,28 @@ int semantic_index_load(SemanticIndex *s, const char *path,
         return -1;
     }
     s->hnsw = g; /* the graph is authoritative; no dense array to rebuild */
-    return 0;
-}
-
-/* Gather every live id (from the graph if present, else the dense array) into a
- * growing list. */
-struct id_list {
-    uint64_t *ids;
-    size_t n, cap;
-    int err;
-};
-static int collect_id(uint64_t id, const float *vec, void *ctx) {
-    (void)vec;
-    struct id_list *l = ctx;
-    if (l->n == l->cap) {
-        size_t nc = l->cap ? l->cap * 2 : 16;
-        uint64_t *g = realloc(l->ids, nc * sizeof(uint64_t));
-        if (!g) { l->err = 1; return 1; }
-        l->ids = g;
-        l->cap = nc;
+    /* Rebuild the record->vec_count map from the graph's synthetic node ids
+     * (record = id >> MV_SLOT_BITS; slot = id & mask); count = max slot + 1. */
+    RcRebuild cx = {s, 0};
+    hnsw_foreach_live(g, rc_rebuild_cb, &cx);
+    if (cx.err) {
+        semantic_index_clear(s);
+        return -1;
     }
-    l->ids[l->n++] = id;
     return 0;
 }
 
 void semantic_index_reconcile(SemanticIndex *s,
                               int (*keep)(uint64_t id, void *ctx), void *ctx) {
-    struct id_list l = {0};
-    if (s->hnsw) {
-        hnsw_foreach_live(s->hnsw, collect_id, &l);
-    } else {
-        for (size_t i = 0; i < s->n && !l.err; i++) collect_id(s->e[i].id, NULL, &l);
-    }
-    /* remove after gathering so we don't disturb the structure being iterated */
-    for (size_t i = 0; i < l.n; i++)
-        if (!keep(l.ids[i], ctx)) semantic_index_remove(s, l.ids[i]);
-    free(l.ids);
+    /* The rc map holds exactly the live record ids (one entry per record,
+     * regardless of vector count). Snapshot them, then remove those not kept —
+     * gathering first so removal doesn't disturb the map we're iterating. */
+    uint64_t *recs = malloc((s->rcn ? s->rcn : 1) * sizeof(uint64_t));
+    if (!recs) return;
+    size_t n = 0;
+    for (size_t i = 0; i < s->rccap; i++)
+        if (s->rc[i].used) recs[n++] = s->rc[i].rec;
+    for (size_t i = 0; i < n; i++)
+        if (!keep(recs[i], ctx)) semantic_index_remove(s, recs[i]);
+    free(recs);
 }

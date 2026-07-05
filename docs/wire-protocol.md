@@ -137,7 +137,7 @@ is what you later pass to `promote` as `working_id`.
 | `importance` | number | No | 0.0–1.0 |
 | `confidence` | number | No | 0.0–1.0 |
 | `embedding` | number[] | No | A single vector; length must equal the server's `--embedding-dim` (default 384) or the request is rejected with `INVALID_REQUEST` |
-| `embeddings` | number[][] | No | Multiple vectors for one record (each `--embedding-dim` long, up to 64), stored and returned together. Use instead of `embedding`. Semantic search currently matches on the first vector; best-of-N matching across all vectors is planned. |
+| `embeddings` | number[][] | No | Multiple vectors for one record (each `--embedding-dim` long, up to 64), stored and returned together. Use instead of `embedding`. Semantic search scores the record by its best-matching vector (best-of-N) and returns it once. |
 | `agent_id` | string | No | Namespace the record to an agent; scopes `get`/`search`/`traverse` |
 | `session_id` | string | Working only | Required to create working memory |
 | `ttl_ms` | integer | No | Time-to-live in ms. For episodic/semantic, an opt-in TTL: the record is archived (hidden from recall, then reclaimed) once `created + ttl_ms` passes; omit or `0` = never expires. For working memory, its buffer expiry. |

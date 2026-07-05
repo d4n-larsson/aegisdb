@@ -183,8 +183,8 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
         time_index_add(db->time, rec->created, rec->id);
         for (size_t i = 0; i < rec->tag_count; i++)
             tag_index_add(db->tags, rec->tags[i], rec->id);
-        if (rec->embedding_dim)
-            semantic_index_add(db->sem, rec->id, rec->embedding,
+        if (rec->embedding_dim && rec->vec_count)
+            semantic_index_add(db->sem, rec->id, rec->embedding, rec->vec_count,
                                rec->embedding_dim);
     }
     pthread_rwlock_unlock(&db->index_lock);

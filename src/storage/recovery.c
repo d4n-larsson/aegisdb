@@ -130,8 +130,10 @@ long recovery_run(AegisDB *db) {
             for (size_t k = 0; k < r.tag_count; k++)
                 tag_index_add(db->tags, r.tags[k], r.id);
             if (r.embedding_dim == db->config.embedding_dimensions &&
-                r.embedding && (!sem_loaded || e->offset >= sem_covered))
-                semantic_index_add(db->sem, r.id, r.embedding, r.embedding_dim);
+                r.embedding && r.vec_count &&
+                (!sem_loaded || e->offset >= sem_covered))
+                semantic_index_add(db->sem, r.id, r.embedding, r.vec_count,
+                                   r.embedding_dim);
             record_free(&r);
             live++;
         }
