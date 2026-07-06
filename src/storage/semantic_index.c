@@ -17,7 +17,9 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "aegisdb/hash_mix.h"
 #include "aegisdb/hnsw.h"
+#include "aegisdb/vecmath.h"
 
 #define DEFAULT_ANN_THRESHOLD 10000 /* live vectors above which HNSW kicks in */
 
@@ -70,15 +72,6 @@ struct SemanticIndex {
 };
 
 #define MAP_INITIAL_CAP 128 /* power of two; covers the dense array's first growths */
-
-static uint64_t mix64(uint64_t x) {
-    x ^= x >> 33;
-    x *= 0xff51afd7ed558ccdULL;
-    x ^= x >> 33;
-    x *= 0xc4ceb9fe1a85ec53ULL;
-    x ^= x >> 33;
-    return x;
-}
 
 /* Probe to the slot holding `id`, or the empty slot where it would go. Requires
  * mcap > 0 and at least one empty slot (the load factor guarantees both). */
@@ -253,12 +246,6 @@ static int build_hnsw(SemanticIndex *s) {
     s->hnsw = h;
     drop_dense(s);
     return 0;
-}
-
-static float l2norm(const float *v, size_t dim) {
-    double acc = 0;
-    for (size_t i = 0; i < dim; i++) acc += (double)v[i] * v[i];
-    return (float)sqrt(acc);
 }
 
 /* Insert or replace id's vector in the dense array + id-map only (no graph).

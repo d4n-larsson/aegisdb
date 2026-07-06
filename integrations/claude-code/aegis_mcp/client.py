@@ -25,6 +25,16 @@ class AegisClient:
         self.read_timeout = read_timeout_ms / 1000.0
         self.auth_token = auth_token or ""
 
+    @classmethod
+    def from_config(cls, config, *, connect_timeout_ms=None, read_timeout_ms=None):
+        """Build a client from a Config, optionally overriding the timeouts
+        (recall uses a tighter budget). Centralises the Config->client mapping
+        so a new client field is wired in one place."""
+        return cls(config.aegis_host, config.aegis_port,
+                   connect_timeout_ms=connect_timeout_ms or config.connect_timeout_ms,
+                   read_timeout_ms=read_timeout_ms or config.read_timeout_ms,
+                   auth_token=config.auth_token)
+
     def request(self, payload: dict, read_timeout_ms: int | None = None) -> dict:
         """Send one request, return the parsed JSON response.
 

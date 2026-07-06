@@ -12,6 +12,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include "aegisdb/fsutil.h"
 #include "aegisdb/logging.h"
 #include "aegisdb/recovery.h"
 
@@ -26,22 +27,6 @@ uint64_t db_next_id(AegisDB *db) {
     uint64_t id = db->next_id++;
     pthread_mutex_unlock(&db->id_lock);
     return id;
-}
-
-static int mkdir_p(const char *path) {
-    char tmp[1024];
-    snprintf(tmp, sizeof(tmp), "%s", path);
-    size_t len = strlen(tmp);
-    if (len && tmp[len - 1] == '/') tmp[len - 1] = '\0';
-    for (char *p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
-            *p = '/';
-        }
-    }
-    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
-    return 0;
 }
 
 int db_save_metadata(AegisDB *db) {
@@ -133,7 +118,7 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
 
     char dir[1300];
     snprintf(dir, sizeof(dir), "%s/snapshots/%s", db->config.data_dir, name);
-    if (mkdir_p(dir) != 0) {
+    if (fs_mkdir_p(dir) != 0) {
         LOG_ERROR("snapshot: cannot create %s", dir);
         return DB_SNAPSHOT_ERR;
     }
@@ -223,7 +208,7 @@ int db_open(AegisDB *db, const Config *cfg) {
     db->config = *cfg;
     db->next_id = 1;
 
-    if (mkdir_p(cfg->data_dir) != 0) {
+    if (fs_mkdir_p(cfg->data_dir) != 0) {
         LOG_ERROR("cannot create data dir: %s", cfg->data_dir);
         return -1;
     }

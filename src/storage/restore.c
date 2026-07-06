@@ -11,24 +11,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "aegisdb/fsutil.h"
 #include "aegisdb/logging.h"
 #include "cJSON.h"
-
-static int mkdir_p(const char *path) {
-    char tmp[1024];
-    snprintf(tmp, sizeof(tmp), "%s", path);
-    size_t len = strlen(tmp);
-    if (len && tmp[len - 1] == '/') tmp[len - 1] = '\0';
-    for (char *p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
-            *p = '/';
-        }
-    }
-    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
-    return 0;
-}
 
 static int file_exists(const char *path) {
     struct stat st;
@@ -136,7 +121,7 @@ int restore_run(const Config *cfg) {
                   "--data-dir", cfg->data_dir);
         goto done;
     }
-    if (mkdir_p(cfg->data_dir) != 0) {
+    if (fs_mkdir_p(cfg->data_dir) != 0) {
         LOG_ERROR("restore: cannot create data dir %s", cfg->data_dir);
         goto done;
     }

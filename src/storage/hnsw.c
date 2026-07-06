@@ -19,6 +19,8 @@
 #include <unistd.h>
 
 #include "aegisdb/crc32.h"
+#include "aegisdb/hash_mix.h"
+#include "aegisdb/vecmath.h"
 
 #define HNSW_FORMAT_MAGIC "AHNS"
 #define HNSW_FORMAT_VERSION 2u /* v2 adds the quantized flag + int8 vector layout */
@@ -79,15 +81,6 @@ struct Hnsw {
     Cand *scratch_cand;
     uint32_t *scratch_sel;
 };
-
-static uint64_t mix64(uint64_t x) {
-    x ^= x >> 33;
-    x *= 0xff51afd7ed558ccdULL;
-    x ^= x >> 33;
-    x *= 0xc4ceb9fe1a85ec53ULL;
-    x ^= x >> 33;
-    return x;
-}
 
 /* ------------------------------------------------------------- id -> node -- */
 static size_t map_probe(const MapSlot *m, size_t mcap, uint64_t id) {
@@ -153,12 +146,6 @@ static void map_del(Hnsw *h, uint64_t id) {
 }
 
 /* -------------------------------------------------------------- distance -- */
-static float l2norm(const float *v, size_t dim) {
-    double acc = 0;
-    for (size_t i = 0; i < dim; i++) acc += (double)v[i] * v[i];
-    return (float)sqrt(acc);
-}
-
 /* Dot product of a float query vector with node `nd`'s stored vector, handling
  * either storage mode (float, or int8 dequantized via the node's scale). */
 static double node_dot_query(const Hnsw *h, const float *q, const Node *nd) {
