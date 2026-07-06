@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "aegisdb/crc32.h"
+#include "aegisdb/hash_mix.h"
 
 #define IDX_VERSION 4u
 #define IDX_HDR 36   /* "AIDX"(4) ver(4) count(8) covered(8) next_id(8) crc(4) */
@@ -43,15 +44,6 @@ static int read_all(int fd, uint8_t *buf, size_t n) {
 
 #define INITIAL_CAP 1024
 #define MAX_LOAD 0.7
-
-static uint64_t mix64(uint64_t x) {
-    x ^= x >> 33;
-    x *= 0xff51afd7ed558ccdULL;
-    x ^= x >> 33;
-    x *= 0xc4ceb9fe1a85ec53ULL;
-    x ^= x >> 33;
-    return x;
-}
 
 HashIndex *hash_index_create(void) {
     HashIndex *h = malloc(sizeof(*h));

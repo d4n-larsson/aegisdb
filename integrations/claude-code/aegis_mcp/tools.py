@@ -87,6 +87,21 @@ class MemoryTools:
         self._emb_usable = usable
         return usable
 
+    def _send(self, payload: dict, read_timeout_ms=None):
+        """Send a request and translate transport/backend failures.
+
+        Returns ``(resp, None)`` on success, or ``(None, error_result)`` if the
+        backend was unreachable or returned ``ok=false`` — so callers do
+        ``resp, err = self._send(...); if err: return err``.
+        """
+        try:
+            resp = self._request(payload, read_timeout_ms=read_timeout_ms)
+        except AegisUnavailable as exc:
+            return None, results.unavailable(str(exc))
+        if not resp.get("ok"):
+            return None, results.from_aegis_error(resp)
+        return resp, None
+
     # ---- operations ------------------------------------------------------
 
     def save(self, text: str, tags=None, importance: float = 0.5,
@@ -104,22 +119,16 @@ class MemoryTools:
             payload["confidence"] = confidence
         if self._embeddings_usable():
             payload["embedding"] = self.provider.embed_document(text)
-        try:
-            resp = self._request(payload)
-        except AegisUnavailable as exc:
-            return results.unavailable(str(exc))
-        if not resp.get("ok"):
-            return results.from_aegis_error(resp)
+        resp, err = self._send(payload)
+        if err:
+            return err
         rec = resp.get("record", {})
         return results.ok(id=rec.get("id"), kind=rec.get("type"))
 
     def get(self, id: int) -> dict:
-        try:
-            resp = self._request({"operation": "get", "id": id})
-        except AegisUnavailable as exc:
-            return results.unavailable(str(exc))
-        if not resp.get("ok"):
-            return results.from_aegis_error(resp)
+        resp, err = self._send({"operation": "get", "id": id})
+        if err:
+            return err
         return results.ok(memory=record_to_memory(resp.get("record", {})))
 
     def search(self, query: str | None = None, tags=None, match: str = "any",
@@ -179,22 +188,16 @@ class MemoryTools:
             payload["tags"] = list(tags)
         if text is not None and self._embeddings_usable():
             payload["embedding"] = self.provider.embed_document(text)
-        try:
-            resp = self._request(payload)
-        except AegisUnavailable as exc:
-            return results.unavailable(str(exc))
-        if not resp.get("ok"):
-            return results.from_aegis_error(resp)
+        resp, err = self._send(payload)
+        if err:
+            return err
         return results.ok(memory=record_to_memory(resp.get("record", {})))
 
     def relate(self, from_id: int, to_id: int, kind: str | None = None) -> dict:
         payload = {"operation": "relate", "from_id": from_id, "to_id": to_id}
         if kind:
             payload["kind"] = kind
-        try:
-            resp = self._request(payload)
-        except AegisUnavailable as exc:
-            return results.unavailable(str(exc))
-        if not resp.get("ok"):
-            return results.from_aegis_error(resp)
+        resp, err = self._send(payload)
+        if err:
+            return err
         return results.ok(relationship=resp.get("relationship"))

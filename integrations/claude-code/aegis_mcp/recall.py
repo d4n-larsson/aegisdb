@@ -45,10 +45,10 @@ def run_recall(prompt: str, config, provider: EmbeddingProvider,
     if client is None:
         # Bound the backend read by the recall budget so a slow/hung backend
         # cannot stall the turn.
-        client = AegisClient(config.aegis_host, config.aegis_port,
-                             connect_timeout_ms=min(config.connect_timeout_ms, budget_ms),
-                             read_timeout_ms=budget_ms,
-                             auth_token=config.auth_token)
+        client = AegisClient.from_config(
+            config,
+            connect_timeout_ms=min(config.connect_timeout_ms, budget_ms),
+            read_timeout_ms=budget_ms)
 
     if not prompt or not prompt.strip():
         return RecallResult(degraded=False, elapsed_ms=0)

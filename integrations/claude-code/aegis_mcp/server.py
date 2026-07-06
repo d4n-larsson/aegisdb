@@ -17,10 +17,7 @@ from .tools import MemoryTools
 
 def build_tools(config=None) -> MemoryTools:
     config = config or load_config()
-    client = AegisClient(config.aegis_host, config.aegis_port,
-                         connect_timeout_ms=config.connect_timeout_ms,
-                         read_timeout_ms=config.read_timeout_ms,
-                         auth_token=config.auth_token)
+    client = AegisClient.from_config(config)
     provider = make_provider(config)
 
     # NOTE: provider/config embedding-dimension validation is deferred to the
