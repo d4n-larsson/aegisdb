@@ -67,6 +67,102 @@ int db_checkpoint(AegisDB *db) {
     return (rv == 0 && rv2 == 0) ? 0 : -1;
 }
 
+/* Deferred, off-lock HNSW build (driven by the maintenance thread).
+ *
+ * Crossing the ANN threshold used to build the graph inline under the index
+ * write lock, freezing every reader and writer for the whole build (tens of
+ * seconds at scale). This runs the build the way compaction runs a log rewrite:
+ * snapshot under a brief write lock, build with no lock held, then install under
+ * a brief write lock. Writes that race the build keep updating the dense array
+ * (which still answers searches) and are journalled as deltas; a catch-up loop
+ * replays those deltas into the new graph off-lock until the residual is small
+ * enough to fold into the install under the lock.
+ *
+ * Returns 1 if a graph was built and installed, 0 if there was nothing to do,
+ * -1 on failure (the dense array remains authoritative and it retries later). */
+#define SEM_BUILD_COMMIT_MAX 512 /* deltas small enough to replay under the lock */
+#define SEM_BUILD_MAX_ROUNDS 16  /* off-lock catch-up rounds before giving up */
+
+static void build_abort_locked(AegisDB *db, SemBuildJob *job) {
+    pthread_rwlock_wrlock(&db->index_lock);
+    semantic_index_build_abort(db->sem, job);
+    pthread_rwlock_unlock(&db->index_lock);
+}
+
+int db_semantic_build_step(AegisDB *db) {
+    if (!db->sem) return 0;
+
+    /* Phase 1: cheap poll under the read lock. */
+    pthread_rwlock_rdlock(&db->index_lock);
+    int pending = semantic_index_needs_build(db->sem);
+    pthread_rwlock_unlock(&db->index_lock);
+    if (!pending) return 0;
+
+    /* Phase 2: snapshot the dense vectors, enter building mode. */
+    pthread_rwlock_wrlock(&db->index_lock);
+    SemBuildJob *job = semantic_index_build_begin(db->sem);
+    size_t snap_n = semantic_index_count(db->sem);
+    pthread_rwlock_unlock(&db->index_lock);
+    if (!job) return 0; /* raced away / OOM: retry next tick */
+
+    LOG_INFO("semantic index: building HNSW graph from %zu vectors off-lock",
+             snap_n);
+
+    /* Phase 3: build the graph with no lock held — the expensive part. */
+    if (semantic_index_build_run(job) != 0) {
+        build_abort_locked(db, job);
+        LOG_WARN("semantic index: off-lock build failed; keeping exact scan");
+        return -1;
+    }
+
+    /* Phase 4: catch the graph up to writes that raced the build. Take the
+     * journalled deltas under the lock (brief) and replay them off-lock; repeat
+     * until the residual shrinks to a batch small enough to fold into the
+     * install under the lock. If writes keep arriving faster than the replay can
+     * drain them, the residual never shrinks — rather than block writers with a
+     * huge under-lock replay (the very stall this change removes), abort and
+     * keep serving from the exact dense scan; a later tick retries. */
+    int converged = 0;
+    for (int round = 0; round < SEM_BUILD_MAX_ROUNDS; round++) {
+        pthread_rwlock_wrlock(&db->index_lock);
+        int failed = semantic_index_build_failed(db->sem);
+        size_t took = failed ? 0 : semantic_index_build_take_deltas(db->sem, job);
+        pthread_rwlock_unlock(&db->index_lock);
+
+        if (failed) {
+            build_abort_locked(db, job);
+            LOG_WARN("semantic index: build journal OOM; keeping exact scan");
+            return -1;
+        }
+        if (semantic_index_build_apply(job) != 0) {
+            build_abort_locked(db, job);
+            return -1;
+        }
+        if (took <= SEM_BUILD_COMMIT_MAX) {
+            converged = 1;
+            break; /* residual is small; commit under the lock below */
+        }
+    }
+    if (!converged) {
+        build_abort_locked(db, job);
+        LOG_WARN("semantic index: writes outpaced the off-lock build; keeping "
+                 "exact scan (will retry)");
+        return -1;
+    }
+
+    /* Phase 5: install under the write lock, replaying the small residual. */
+    pthread_rwlock_wrlock(&db->index_lock);
+    int rc = semantic_index_build_commit(db->sem, job);
+    size_t live = semantic_index_count(db->sem);
+    pthread_rwlock_unlock(&db->index_lock);
+    if (rc != 0) {
+        LOG_WARN("semantic index: build commit failed; keeping exact scan");
+        return -1;
+    }
+    LOG_INFO("semantic index: HNSW graph installed (%zu vectors)", live);
+    return 1;
+}
+
 /* A snapshot name becomes a single path component under snapshots/, so it must
  * be non-empty and free of separators or dot-traversal. */
 static int snapshot_name_ok(const char *name) {

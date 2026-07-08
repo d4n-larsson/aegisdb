@@ -247,6 +247,9 @@ static void test_recovery_semantic_checkpoint(void) {
         vec_for(i, v[i]);
         ids[i] = insert_vec(&db1, v[i]);
     }
+    /* The graph build is deferred to the maintenance thread on a live server;
+     * drive it directly here (no maintenance thread in the unit test). */
+    TEST_ASSERT_EQUAL_INT(1, db_semantic_build_step(&db1));
     db_close(&db1); /* writes memory.sem (graph exists) */
 
     char sem[320];
@@ -268,6 +271,7 @@ static void test_recovery_semantic_tail(void) {
     AegisDB db1;
     open_db_ann(&db1, 8);
     for (unsigned i = 1; i <= 12; i++) { vec_for(i, v[i]); ids[i] = insert_vec(&db1, v[i]); }
+    TEST_ASSERT_EQUAL_INT(1, db_semantic_build_step(&db1)); /* build the graph */
     TEST_ASSERT_EQUAL_INT(0, db_checkpoint(&db1)); /* covers 1..12 */
     for (unsigned i = 13; i <= 16; i++) { vec_for(i, v[i]); ids[i] = insert_vec(&db1, v[i]); }
     log_fsync(&db1.log);
@@ -288,6 +292,7 @@ static void test_recovery_semantic_tail_delete(void) {
     AegisDB db1;
     open_db_ann(&db1, 8);
     for (unsigned i = 1; i <= 12; i++) { vec_for(i, v[i]); ids[i] = insert_vec(&db1, v[i]); }
+    TEST_ASSERT_EQUAL_INT(1, db_semantic_build_step(&db1)); /* build the graph */
     TEST_ASSERT_EQUAL_INT(0, db_checkpoint(&db1)); /* graph includes id 5 */
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_delete(&db1, ids[5], NULL)); /* tail delete */
     log_fsync(&db1.log);
@@ -309,6 +314,7 @@ static void test_recovery_semantic_corrupt_fallback(void) {
     AegisDB db1;
     open_db_ann(&db1, 8);
     for (unsigned i = 1; i <= 12; i++) { vec_for(i, v[i]); ids[i] = insert_vec(&db1, v[i]); }
+    TEST_ASSERT_EQUAL_INT(1, db_semantic_build_step(&db1)); /* build the graph */
     db_close(&db1);
 
     char sem[320];

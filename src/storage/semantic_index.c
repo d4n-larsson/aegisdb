@@ -56,6 +56,28 @@ typedef struct {
     int used;
 } RCount;
 
+/* One journalled mutation during a deferred build: `vec` non-NULL is an add
+ * (owns a copy of the vector), NULL is a remove. Replayed in order into the
+ * newly built graph so it converges to the live dense state. */
+typedef struct {
+    uint64_t synid;
+    float *vec;
+} SemDelta;
+
+/* An in-flight off-lock graph build. Snapshot taken under the write lock, graph
+ * built with no lock held, then installed under the write lock. */
+struct SemBuildJob {
+    size_t dim;
+    size_t n;          /* snapshot vector count */
+    uint64_t *synids;  /* snapshot synthetic ids (n) */
+    float *vecs;       /* snapshot vectors, n * dim contiguous */
+    size_t ef_search;
+    int quantize;
+    Hnsw *graph;       /* built in phase 2 */
+    SemDelta *pending; /* deltas taken from the index, awaiting replay */
+    size_t npending;
+};
+
 struct SemanticIndex {
     size_t dim;
     SemEntry *e;
@@ -69,9 +91,20 @@ struct SemanticIndex {
     size_t ann_threshold;
     size_t ef_search;    /* HNSW query beam width; 0 = the HNSW default */
     int quantize;        /* store HNSW vectors as int8 (#75) */
+
+    /* Deferred off-lock graph build (see semantic_index_build_*). While a build
+     * runs on the maintenance thread, the dense array stays authoritative for
+     * search, and every add/remove is also journalled here so the freshly built
+     * graph can be caught up to the live state before it is installed. */
+    int building;        /* a build_begin() is outstanding: journal deltas */
+    int build_failed;    /* a delta could not be journalled (OOM): abort at commit */
+    SemDelta *deltas;    /* journalled add/remove ops since build_begin() */
+    size_t ndelta, deltacap;
 };
 
 #define MAP_INITIAL_CAP 128 /* power of two; covers the dense array's first growths */
+
+static void deltas_free(SemDelta *d, size_t n); /* defined with the build API */
 
 /* Probe to the slot holding `id`, or the empty slot where it would go. Requires
  * mcap > 0 and at least one empty slot (the load factor guarantees both). */
@@ -227,13 +260,23 @@ void semantic_index_clear(SemanticIndex *s) {
     s->rccap = s->rcn = 0;
     hnsw_free(s->hnsw);
     s->hnsw = NULL;
+    deltas_free(s->deltas, s->ndelta);
+    s->deltas = NULL;
+    s->ndelta = s->deltacap = 0;
+    s->building = 0;
+    s->build_failed = 0;
 }
 
-/* Build the HNSW graph from the current dense array (one-time, at the threshold
- * crossing), then drop the dense array so the graph holds the only copy of each
- * vector; thereafter add/remove operate on the graph. Returns 0/-1. */
-static int build_hnsw(SemanticIndex *s) {
-    HnswParams p = {.ef_search = s->ef_search, .seed = 0x9E3779B97F4A7C15ULL,
+#define HNSW_BUILD_SEED 0x9E3779B97F4A7C15ULL
+
+/* Build the HNSW graph from the current dense array, then drop the dense array
+ * so the graph holds the only copy of each vector; thereafter add/remove
+ * operate on the graph. Synchronous — blocks the caller for the whole build, so
+ * the server uses the deferred off-lock path below; this stays for
+ * single-threaded contexts and tests. Returns 0/-1. */
+int semantic_index_build_now(SemanticIndex *s) {
+    if (!s || s->hnsw) return -1;
+    HnswParams p = {.ef_search = s->ef_search, .seed = HNSW_BUILD_SEED,
                     .quantize = s->quantize};
     Hnsw *h = hnsw_create(s->dim, &p);
     if (!h) return -1;
@@ -245,6 +288,137 @@ static int build_hnsw(SemanticIndex *s) {
     }
     s->hnsw = h;
     drop_dense(s);
+    return 0;
+}
+
+/* ---------------------------------------------- deferred off-lock build ---- */
+/* The graph is expensive to build (~seconds at production scale). Building it
+ * inline under the index write lock froze every reader and writer for the whole
+ * build. Instead the maintenance thread drives a three-phase build that mirrors
+ * compaction: snapshot under a brief write lock (begin), build with no lock held
+ * (run), then install under a brief write lock (commit), catching the new graph
+ * up to writes that raced the build via a journal of deltas. */
+
+/* Free a delta array (and the vector copies it owns). */
+static void deltas_free(SemDelta *d, size_t n) {
+    for (size_t i = 0; i < n; i++) free(d[i].vec);
+    free(d);
+}
+
+int semantic_index_needs_build(const SemanticIndex *s) {
+    return s && !s->hnsw && !s->building && s->n >= s->ann_threshold;
+}
+
+SemBuildJob *semantic_index_build_begin(SemanticIndex *s) {
+    if (!semantic_index_needs_build(s)) return NULL;
+    SemBuildJob *j = calloc(1, sizeof(*j));
+    if (!j) return NULL;
+    j->dim = s->dim;
+    j->n = s->n;
+    j->ef_search = s->ef_search;
+    j->quantize = s->quantize;
+    j->synids = malloc(s->n * sizeof(uint64_t));
+    j->vecs = malloc(s->n * s->dim * sizeof(float));
+    if (!j->synids || !j->vecs) {
+        free(j->synids);
+        free(j->vecs);
+        free(j);
+        return NULL;
+    }
+    for (size_t i = 0; i < s->n; i++) {
+        j->synids[i] = s->e[i].id;
+        memcpy(j->vecs + i * s->dim, s->e[i].vec, s->dim * sizeof(float));
+    }
+    s->building = 1;
+    s->build_failed = 0;
+    return j;
+}
+
+int semantic_index_build_run(SemBuildJob *job) {
+    if (!job) return -1;
+    HnswParams p = {.ef_search = job->ef_search, .seed = HNSW_BUILD_SEED,
+                    .quantize = job->quantize};
+    Hnsw *h = hnsw_create(job->dim, &p);
+    if (!h) return -1;
+    for (size_t i = 0; i < job->n; i++) {
+        if (hnsw_add(h, job->synids[i], job->vecs + i * job->dim, job->dim) != 0) {
+            hnsw_free(h);
+            return -1;
+        }
+    }
+    job->graph = h;
+    return 0;
+}
+
+size_t semantic_index_build_take_deltas(SemanticIndex *s, SemBuildJob *job) {
+    /* Consume any deltas the job holds but has not replayed (shouldn't happen —
+     * apply() clears them — but stay leak-free). */
+    deltas_free(job->pending, job->npending);
+    job->pending = s->deltas;
+    job->npending = s->ndelta;
+    s->deltas = NULL;
+    s->ndelta = s->deltacap = 0;
+    return job->npending;
+}
+
+int semantic_index_build_failed(const SemanticIndex *s) {
+    return s->build_failed;
+}
+
+int semantic_index_build_apply(SemBuildJob *job) {
+    int rc = 0;
+    for (size_t i = 0; i < job->npending; i++) {
+        const SemDelta *d = &job->pending[i];
+        if (d->vec) {
+            if (hnsw_add(job->graph, d->synid, d->vec, job->dim) != 0) rc = -1;
+        } else {
+            hnsw_remove(job->graph, d->synid);
+        }
+    }
+    deltas_free(job->pending, job->npending);
+    job->pending = NULL;
+    job->npending = 0;
+    return rc;
+}
+
+/* Free a job and everything it owns. */
+static void build_job_free(SemBuildJob *job) {
+    if (!job) return;
+    hnsw_free(job->graph);
+    deltas_free(job->pending, job->npending);
+    free(job->synids);
+    free(job->vecs);
+    free(job);
+}
+
+void semantic_index_build_abort(SemanticIndex *s, SemBuildJob *job) {
+    s->building = 0;
+    s->build_failed = 0;
+    /* Drop the deltas journalled during this attempt; the dense array already
+     * reflects them, so it stays authoritative and a later begin() re-snapshots. */
+    deltas_free(s->deltas, s->ndelta);
+    s->deltas = NULL;
+    s->ndelta = s->deltacap = 0;
+    build_job_free(job);
+}
+
+int semantic_index_build_commit(SemanticIndex *s, SemBuildJob *job) {
+    /* Replay any residual deltas journalled since the last take (kept small by
+     * the caller's catch-up loop), then swap the graph in atomically. */
+    if (s->build_failed) {
+        semantic_index_build_abort(s, job);
+        return -1;
+    }
+    semantic_index_build_take_deltas(s, job);
+    if (semantic_index_build_apply(job) != 0) {
+        semantic_index_build_abort(s, job);
+        return -1;
+    }
+    s->hnsw = job->graph;
+    job->graph = NULL; /* ownership transferred; keep build_job_free from freeing it */
+    s->building = 0;
+    drop_dense(s);
+    build_job_free(job);
     return 0;
 }
 
@@ -321,16 +495,43 @@ static void dense_remove(SemanticIndex *s, uint64_t synid) {
     s->n--;
 }
 
-/* Add/remove one vector by synthetic id, routing to the graph or dense array. */
+/* Journal one mutation while a deferred build is in flight. `vec` non-NULL is
+ * an add (copied), NULL a remove. On allocation failure the build is marked
+ * failed (aborted at commit) but the dense mutation itself still proceeds, so
+ * the index stays correct. */
+static void delta_push(SemanticIndex *s, uint64_t synid, const float *vec) {
+    if (s->ndelta == s->deltacap) {
+        size_t nc = s->deltacap ? s->deltacap * 2 : 64;
+        SemDelta *nd = realloc(s->deltas, nc * sizeof(*nd));
+        if (!nd) { s->build_failed = 1; return; }
+        s->deltas = nd;
+        s->deltacap = nc;
+    }
+    float *copy = NULL;
+    if (vec) {
+        copy = malloc(s->dim * sizeof(float));
+        if (!copy) { s->build_failed = 1; return; }
+        memcpy(copy, vec, s->dim * sizeof(float));
+    }
+    s->deltas[s->ndelta++] = (SemDelta){synid, copy};
+}
+
+/* Add/remove one vector by synthetic id, routing to the graph or dense array.
+ * When a build is in flight (no graph yet, but one is being constructed) the op
+ * also goes to the dense array *and* is journalled so the new graph catches up. */
 static int vec_add(SemanticIndex *s, uint64_t synid, const float *vec) {
     if (s->hnsw) return hnsw_add(s->hnsw, synid, vec, s->dim) == 0 ? 0 : -1;
-    return dense_put(s, synid, vec, s->dim) < 0 ? -1 : 0;
+    if (dense_put(s, synid, vec, s->dim) < 0) return -1;
+    if (s->building) delta_push(s, synid, vec);
+    return 0;
 }
 static void vec_remove(SemanticIndex *s, uint64_t synid) {
-    if (s->hnsw)
+    if (s->hnsw) {
         hnsw_remove(s->hnsw, synid);
-    else
-        dense_remove(s, synid);
+        return;
+    }
+    dense_remove(s, synid);
+    if (s->building) delta_push(s, synid, NULL);
 }
 
 int semantic_index_add(SemanticIndex *s, uint64_t id, const float *vecs,
@@ -345,8 +546,10 @@ int semantic_index_add(SemanticIndex *s, uint64_t id, const float *vecs,
         if (vec_add(s, mv_syn(id, slot), vecs + slot * dim) != 0) return -1;
     if (rc_set(s, id, (uint32_t)vec_count) != 0) return -1;
 
-    /* crossed the threshold: build the graph from the dense array, drop dense */
-    if (!s->hnsw && s->n >= s->ann_threshold) return build_hnsw(s);
+    /* Crossing ann_threshold no longer builds the graph inline — that froze
+     * every reader and writer for the whole build. The build is now deferred
+     * (semantic_index_needs_build + the phased build_* API, driven off-lock by
+     * the maintenance thread); the dense array answers searches until it lands. */
     return 0;
 }
 

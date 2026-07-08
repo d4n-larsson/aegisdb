@@ -161,7 +161,6 @@ static double node_dot_query(const Hnsw *h, const float *q, const Node *nd) {
 
 /* Dot product of two stored node vectors. */
 static double node_dot_node(const Hnsw *h, const Node *a, const Node *b) {
-    double dot = 0;
     if (h->quantized) {
         const int8_t *va = a->qvec, *vb = b->qvec;
         long acc = 0;
