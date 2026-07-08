@@ -31,6 +31,7 @@ void config_defaults(Config *cfg) {
     cfg->ann_threshold = 0; /* 0 -> built-in default */
     cfg->ann_ef_search = 0; /* 0 -> HNSW built-in default */
     cfg->ann_quantize = 0;  /* float32 vectors by default */
+    cfg->ann_shard_target = 0; /* 0 -> built-in default */
     cfg->working_capacity = 256;
     cfg->default_ttl_ms = 3600000; /* 1 hour */
     cfg->fsync_batch_size = 1000;
@@ -228,6 +229,9 @@ static void usage(const char *prog) {
             "                           HNSW instead of an exact scan (default 10000)\n"
             "  --ann-quantize           store HNSW vectors as int8 (~4x less memory,\n"
             "                           small recall cost); default float32\n"
+            "  --ann-shard-target <n>   target vectors per HNSW shard; the graph\n"
+            "                           splits into ~count/n shards (capped by CPUs)\n"
+            "                           so the build parallelizes (default 25000)\n"
             "  --durability <mode>      sync|batch|interval (default interval)\n"
             "  --fsync-batch <n>        records between fsync in batch mode\n"
             "                           (default 1000)\n"
@@ -328,6 +332,12 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
             NEXT("--ann-threshold");
             if (parse_size(val, &cfg->ann_threshold)) {
                 fprintf(stderr, "%s: invalid ann-threshold '%s'\n", prog, val);
+                return -1;
+            }
+        } else if (strcmp(a, "--ann-shard-target") == 0) {
+            NEXT("--ann-shard-target");
+            if (parse_size(val, &cfg->ann_shard_target)) {
+                fprintf(stderr, "%s: invalid ann-shard-target '%s'\n", prog, val);
                 return -1;
             }
         } else if (strcmp(a, "--ann-quantize") == 0) {

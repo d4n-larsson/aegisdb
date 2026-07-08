@@ -34,10 +34,12 @@
 #define SHARD_TARGET 25000  /* aim for ~this many vectors per shard */
 #define SHARD_MAX 8          /* also capped by online CPUs (build parallelism) */
 
-/* Per-shard vector target. Overridable via AEGIS_SHARD_TARGET (a build-time-only
- * read; used by tests to force multi-shard builds at small N, and available as
- * an ops escape hatch for unusual vector sizes). */
-static size_t shard_target(void) {
+/* Resolve the effective per-shard vector target. Precedence: the configured
+ * value (--ann-shard-target, passed through here) wins; then AEGIS_SHARD_TARGET
+ * (a build-time-only env read — test seam and ops escape hatch); then the
+ * built-in default. */
+static size_t resolve_shard_target(size_t configured) {
+    if (configured > 0) return configured;
     const char *e = getenv("AEGIS_SHARD_TARGET");
     if (e) {
         long v = strtol(e, NULL, 10);
@@ -49,8 +51,8 @@ static size_t shard_target(void) {
 /* Number of shards for a build of `n` vectors: 1 below ~2x the per-shard target,
  * then ~n/target, capped by SHARD_MAX and the online CPU count (one build thread
  * per shard). Deterministic given n + cores. */
-static size_t pick_nshards(size_t n) {
-    size_t by_size = n / shard_target(); /* 0 for n < target */
+static size_t pick_nshards(size_t n, size_t configured_target) {
+    size_t by_size = n / resolve_shard_target(configured_target); /* 0 for n < target */
     if (by_size < 2) return 1;           /* single graph for small indexes */
     long cpus = sysconf(_SC_NPROCESSORS_ONLN);
     size_t cap = SHARD_MAX;
@@ -134,6 +136,7 @@ struct SemanticIndex {
     size_t ann_threshold;
     size_t ef_search;    /* HNSW query beam width; 0 = the HNSW default */
     int quantize;        /* store HNSW vectors as int8 (#75) */
+    size_t shard_target; /* configured vectors/shard (--ann-shard-target); 0 = default */
 
     /* Deferred off-lock graph build (see semantic_index_build_*). While a build
      * runs on the maintenance thread, the dense array stays authoritative for
@@ -254,13 +257,15 @@ static void rc_del(SemanticIndex *s, uint64_t rec) {
 }
 
 SemanticIndex *semantic_index_create(size_t dim, size_t ann_threshold,
-                                     size_t ef_search, int quantize) {
+                                     size_t ef_search, int quantize,
+                                     size_t shard_target) {
     SemanticIndex *s = calloc(1, sizeof(*s));
     if (!s) return NULL;
     s->dim = dim;
     s->ann_threshold = ann_threshold ? ann_threshold : DEFAULT_ANN_THRESHOLD;
     s->ef_search = ef_search;
     s->quantize = quantize;
+    s->shard_target = shard_target; /* 0 -> resolved to env / built-in default */
     return s;
 }
 
@@ -383,7 +388,7 @@ SemBuildJob *semantic_index_build_begin(SemanticIndex *s) {
     if (!j) return NULL;
     j->dim = s->dim;
     j->n = s->n;
-    j->nshards = pick_nshards(s->n); /* fixed for this graph's lifetime */
+    j->nshards = pick_nshards(s->n, s->shard_target); /* fixed for this graph's life */
     j->ef_search = s->ef_search;
     j->quantize = s->quantize;
     j->synids = malloc(s->n * sizeof(uint64_t));

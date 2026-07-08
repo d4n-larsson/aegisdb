@@ -61,6 +61,23 @@ static void test_workers_alias(void) {
     config_free(&cfg);
 }
 
+/* --ann-shard-target: defaults to 0 (built-in default), parses a size, rejects
+ * a non-numeric value. */
+static void test_ann_shard_target(void) {
+    Config cfg;
+    config_defaults(&cfg);
+    TEST_ASSERT_EQUAL_UINT(0, cfg.ann_shard_target); /* default: built-in */
+    char *ok[] = {"aegisdb", "--ann-shard-target", "50000"};
+    TEST_ASSERT_EQUAL_INT(0, config_parse_args(&cfg, 3, ok));
+    TEST_ASSERT_EQUAL_UINT(50000, cfg.ann_shard_target);
+    config_free(&cfg);
+
+    config_defaults(&cfg);
+    char *bad[] = {"aegisdb", "--ann-shard-target", "abc"};
+    TEST_ASSERT_EQUAL_INT(-1, config_parse_args(&cfg, 3, bad));
+    config_free(&cfg);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_rejects_overflow_port);
@@ -69,5 +86,6 @@ int main(void) {
     RUN_TEST(test_accepts_valid);
     RUN_TEST(test_compact_sec);
     RUN_TEST(test_workers_alias);
+    RUN_TEST(test_ann_shard_target);
     return UNITY_END();
 }
