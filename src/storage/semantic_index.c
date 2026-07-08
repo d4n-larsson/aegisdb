@@ -13,6 +13,7 @@
 #include "aegisdb/semantic_index.h"
 
 #include <math.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -22,6 +23,45 @@
 #include "aegisdb/vecmath.h"
 
 #define DEFAULT_ANN_THRESHOLD 10000 /* live vectors above which HNSW kicks in */
+
+/* Sharding (#parallel-build): at scale the HNSW graph is split into independent
+ * shards, each an ordinary single-threaded HNSW over a hash-partitioned subset
+ * of the vectors. The shards share no state, so the (expensive) build runs one
+ * thread per shard for a near-linear speedup, and add/remove/search route by the
+ * same hash. A vector's shard is stable: mix64(synthetic id) % nshards. Sharding
+ * only kicks in for large indexes — small ones stay a single graph (nshards==1),
+ * unchanged, so search fans out over at most a handful of shards. */
+#define SHARD_TARGET 25000  /* aim for ~this many vectors per shard */
+#define SHARD_MAX 8          /* also capped by online CPUs (build parallelism) */
+
+/* Per-shard vector target. Overridable via AEGIS_SHARD_TARGET (a build-time-only
+ * read; used by tests to force multi-shard builds at small N, and available as
+ * an ops escape hatch for unusual vector sizes). */
+static size_t shard_target(void) {
+    const char *e = getenv("AEGIS_SHARD_TARGET");
+    if (e) {
+        long v = strtol(e, NULL, 10);
+        if (v > 0) return (size_t)v;
+    }
+    return SHARD_TARGET;
+}
+
+/* Number of shards for a build of `n` vectors: 1 below ~2x the per-shard target,
+ * then ~n/target, capped by SHARD_MAX and the online CPU count (one build thread
+ * per shard). Deterministic given n + cores. */
+static size_t pick_nshards(size_t n) {
+    size_t by_size = n / shard_target(); /* 0 for n < target */
+    if (by_size < 2) return 1;           /* single graph for small indexes */
+    long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    size_t cap = SHARD_MAX;
+    if (cpus > 0 && (size_t)cpus < cap) cap = (size_t)cpus;
+    return by_size < cap ? by_size : cap;
+}
+
+/* Which shard a synthetic id belongs to (stable across build/add/remove/search). */
+static size_t shard_index(uint64_t synid, size_t nshards) {
+    return nshards > 1 ? (size_t)(mix64(synid) % nshards) : 0;
+}
 
 /* Multi-vector (#85): a record's N vectors are stored as N separate entries
  * keyed by a synthetic id `record << MV_SLOT_BITS | slot`, so the dense map and
@@ -64,8 +104,9 @@ typedef struct {
     float *vec;
 } SemDelta;
 
-/* An in-flight off-lock graph build. Snapshot taken under the write lock, graph
- * built with no lock held, then installed under the write lock. */
+/* An in-flight off-lock graph build. Snapshot taken under the write lock, the
+ * shards built with no lock held (one thread each), then installed under the
+ * write lock. */
 struct SemBuildJob {
     size_t dim;
     size_t n;          /* snapshot vector count */
@@ -73,7 +114,8 @@ struct SemBuildJob {
     float *vecs;       /* snapshot vectors, n * dim contiguous */
     size_t ef_search;
     int quantize;
-    Hnsw *graph;       /* built in phase 2 */
+    Hnsw **shards;     /* nshards graphs built in phase 3 */
+    size_t nshards;
     SemDelta *pending; /* deltas taken from the index, awaiting replay */
     size_t npending;
 };
@@ -87,7 +129,8 @@ struct SemanticIndex {
     size_t mcap;
     RCount *rc;   /* record -> vec_count; power-of-two capacity */
     size_t rccap, rcn;
-    Hnsw *hnsw;          /* NULL until the live count crosses ann_threshold */
+    Hnsw **shards;       /* NULL/0 until the live count crosses ann_threshold, */
+    size_t nshards;      /* then nshards>=1 graphs, hash-partitioned by synid */
     size_t ann_threshold;
     size_t ef_search;    /* HNSW query beam width; 0 = the HNSW default */
     int quantize;        /* store HNSW vectors as int8 (#75) */
@@ -221,10 +264,27 @@ SemanticIndex *semantic_index_create(size_t dim, size_t ann_threshold,
     return s;
 }
 
+/* True once the graph (one or more shards) is authoritative and the dense array
+ * has been dropped. */
+static int graph_present(const SemanticIndex *s) { return s->nshards > 0; }
+
+/* Total live vectors across all shards. */
+static size_t graph_count(const SemanticIndex *s) {
+    size_t total = 0;
+    for (size_t i = 0; i < s->nshards; i++) total += hnsw_count(s->shards[i]);
+    return total;
+}
+
+/* Free an array of `n` shard graphs and the array itself. */
+static void shards_free(Hnsw **shards, size_t n) {
+    for (size_t i = 0; i < n; i++) hnsw_free(shards[i]);
+    free(shards);
+}
+
 size_t semantic_index_count(const SemanticIndex *s) {
     if (!s) return 0;
     /* Above the threshold the graph is authoritative; the dense array is freed. */
-    return s->hnsw ? hnsw_count(s->hnsw) : s->n;
+    return graph_present(s) ? graph_count(s) : s->n;
 }
 
 /* Free the dense array + id-map, keeping the HNSW graph. Used once the graph
@@ -258,8 +318,9 @@ void semantic_index_clear(SemanticIndex *s) {
     free(s->rc);
     s->rc = NULL;
     s->rccap = s->rcn = 0;
-    hnsw_free(s->hnsw);
-    s->hnsw = NULL;
+    shards_free(s->shards, s->nshards);
+    s->shards = NULL;
+    s->nshards = 0;
     deltas_free(s->deltas, s->ndelta);
     s->deltas = NULL;
     s->ndelta = s->deltacap = 0;
@@ -275,7 +336,7 @@ void semantic_index_clear(SemanticIndex *s) {
  * the server uses the deferred off-lock path below; this stays for
  * single-threaded contexts and tests. Returns 0/-1. */
 int semantic_index_build_now(SemanticIndex *s) {
-    if (!s || s->hnsw) return -1;
+    if (!s || graph_present(s)) return -1;
     HnswParams p = {.ef_search = s->ef_search, .seed = HNSW_BUILD_SEED,
                     .quantize = s->quantize};
     Hnsw *h = hnsw_create(s->dim, &p);
@@ -286,7 +347,14 @@ int semantic_index_build_now(SemanticIndex *s) {
             return -1;
         }
     }
-    s->hnsw = h;
+    Hnsw **shards = malloc(sizeof(Hnsw *));
+    if (!shards) {
+        hnsw_free(h);
+        return -1;
+    }
+    shards[0] = h; /* synchronous path is always a single shard */
+    s->shards = shards;
+    s->nshards = 1;
     drop_dense(s);
     return 0;
 }
@@ -306,7 +374,7 @@ static void deltas_free(SemDelta *d, size_t n) {
 }
 
 int semantic_index_needs_build(const SemanticIndex *s) {
-    return s && !s->hnsw && !s->building && s->n >= s->ann_threshold;
+    return s && !graph_present(s) && !s->building && s->n >= s->ann_threshold;
 }
 
 SemBuildJob *semantic_index_build_begin(SemanticIndex *s) {
@@ -315,6 +383,7 @@ SemBuildJob *semantic_index_build_begin(SemanticIndex *s) {
     if (!j) return NULL;
     j->dim = s->dim;
     j->n = s->n;
+    j->nshards = pick_nshards(s->n); /* fixed for this graph's lifetime */
     j->ef_search = s->ef_search;
     j->quantize = s->quantize;
     j->synids = malloc(s->n * sizeof(uint64_t));
@@ -334,19 +403,78 @@ SemBuildJob *semantic_index_build_begin(SemanticIndex *s) {
     return j;
 }
 
-int semantic_index_build_run(SemBuildJob *job) {
-    if (!job) return -1;
-    HnswParams p = {.ef_search = job->ef_search, .seed = HNSW_BUILD_SEED,
-                    .quantize = job->quantize};
-    Hnsw *h = hnsw_create(job->dim, &p);
-    if (!h) return -1;
-    for (size_t i = 0; i < job->n; i++) {
-        if (hnsw_add(h, job->synids[i], job->vecs + i * job->dim, job->dim) != 0) {
+/* One shard's worth of build: an ordinary single-threaded HNSW over just the
+ * snapshot vectors hashed to `shard`. Shards share no state, so these run
+ * concurrently (one pthread each). */
+struct shard_work {
+    const SemBuildJob *job;
+    size_t shard;
+    Hnsw *out; /* result graph, or NULL on failure */
+};
+
+static void *build_shard_worker(void *arg) {
+    struct shard_work *w = arg;
+    const SemBuildJob *j = w->job;
+    HnswParams p = {.ef_search = j->ef_search, .seed = HNSW_BUILD_SEED,
+                    .quantize = j->quantize};
+    Hnsw *h = hnsw_create(j->dim, &p);
+    if (!h) {
+        w->out = NULL;
+        return NULL;
+    }
+    for (size_t i = 0; i < j->n; i++) {
+        if (shard_index(j->synids[i], j->nshards) != w->shard) continue;
+        if (hnsw_add(h, j->synids[i], j->vecs + i * j->dim, j->dim) != 0) {
             hnsw_free(h);
-            return -1;
+            w->out = NULL;
+            return NULL;
         }
     }
-    job->graph = h;
+    w->out = h;
+    return NULL;
+}
+
+int semantic_index_build_run(SemBuildJob *job) {
+    if (!job) return -1;
+    size_t P = job->nshards ? job->nshards : 1;
+    Hnsw **shards = calloc(P, sizeof(Hnsw *));
+    struct shard_work *work = calloc(P, sizeof(*work));
+    pthread_t *tids = calloc(P, sizeof(pthread_t));
+    if (!shards || !work || !tids) {
+        free(shards);
+        free(work);
+        free(tids);
+        return -1;
+    }
+    for (size_t i = 0; i < P; i++) {
+        work[i].job = job;
+        work[i].shard = i;
+    }
+    /* Spawn one thread per shard; any that fail to start (or the single-shard
+     * case) run inline on this thread, so the build always completes. */
+    size_t started = 0;
+    if (P > 1) {
+        for (size_t i = 0; i < P; i++) {
+            if (pthread_create(&tids[i], NULL, build_shard_worker, &work[i]) != 0)
+                break;
+            started++;
+        }
+    }
+    for (size_t i = started; i < P; i++) build_shard_worker(&work[i]);
+    for (size_t i = 0; i < started; i++) pthread_join(tids[i], NULL);
+
+    int ok = 1;
+    for (size_t i = 0; i < P; i++) {
+        shards[i] = work[i].out;
+        if (!shards[i]) ok = 0;
+    }
+    free(work);
+    free(tids);
+    if (!ok) {
+        shards_free(shards, P);
+        return -1;
+    }
+    job->shards = shards;
     return 0;
 }
 
@@ -369,10 +497,11 @@ int semantic_index_build_apply(SemBuildJob *job) {
     int rc = 0;
     for (size_t i = 0; i < job->npending; i++) {
         const SemDelta *d = &job->pending[i];
+        Hnsw *g = job->shards[shard_index(d->synid, job->nshards)];
         if (d->vec) {
-            if (hnsw_add(job->graph, d->synid, d->vec, job->dim) != 0) rc = -1;
+            if (hnsw_add(g, d->synid, d->vec, job->dim) != 0) rc = -1;
         } else {
-            hnsw_remove(job->graph, d->synid);
+            hnsw_remove(g, d->synid);
         }
     }
     deltas_free(job->pending, job->npending);
@@ -384,7 +513,7 @@ int semantic_index_build_apply(SemBuildJob *job) {
 /* Free a job and everything it owns. */
 static void build_job_free(SemBuildJob *job) {
     if (!job) return;
-    hnsw_free(job->graph);
+    shards_free(job->shards, job->nshards);
     deltas_free(job->pending, job->npending);
     free(job->synids);
     free(job->vecs);
@@ -414,8 +543,10 @@ int semantic_index_build_commit(SemanticIndex *s, SemBuildJob *job) {
         semantic_index_build_abort(s, job);
         return -1;
     }
-    s->hnsw = job->graph;
-    job->graph = NULL; /* ownership transferred; keep build_job_free from freeing it */
+    s->shards = job->shards;
+    s->nshards = job->nshards;
+    job->shards = NULL; /* ownership transferred; keep build_job_free from freeing */
+    job->nshards = 0;
     s->building = 0;
     drop_dense(s);
     build_job_free(job);
@@ -520,14 +651,17 @@ static void delta_push(SemanticIndex *s, uint64_t synid, const float *vec) {
  * When a build is in flight (no graph yet, but one is being constructed) the op
  * also goes to the dense array *and* is journalled so the new graph catches up. */
 static int vec_add(SemanticIndex *s, uint64_t synid, const float *vec) {
-    if (s->hnsw) return hnsw_add(s->hnsw, synid, vec, s->dim) == 0 ? 0 : -1;
+    if (graph_present(s)) {
+        Hnsw *g = s->shards[shard_index(synid, s->nshards)];
+        return hnsw_add(g, synid, vec, s->dim) == 0 ? 0 : -1;
+    }
     if (dense_put(s, synid, vec, s->dim) < 0) return -1;
     if (s->building) delta_push(s, synid, vec);
     return 0;
 }
 static void vec_remove(SemanticIndex *s, uint64_t synid) {
-    if (s->hnsw) {
-        hnsw_remove(s->hnsw, synid);
+    if (graph_present(s)) {
+        hnsw_remove(s->shards[shard_index(synid, s->nshards)], synid);
         return;
     }
     dense_remove(s, synid);
@@ -655,39 +789,50 @@ int semantic_index_search(const SemanticIndex *s, const float *query,
                           float **out_scores, size_t *out_n) {
     if (dim != s->dim) return -1;
 
-    if (s->hnsw) {
-        /* Over-fetch synthetic (per-vector) candidates so record-dedup still
+    if (graph_present(s)) {
+        /* Fetch the top candidates from every shard and merge. Fetching the
+         * global `want` from each shard is exact for the global top-`want`: a
+         * global top-k item has fewer than k items closer to the query, hence
+         * fewer than k closer within its own shard, so it is among that shard's
+         * top-k. Over-fetch x2 per shard so record-level best-of-N dedup still
          * leaves enough distinct records; then collapse best-of-N. */
-        size_t want = top_k ? top_k : hnsw_count(s->hnsw);
+        size_t want = top_k ? top_k : graph_count(s);
         if (want == 0) {
             *out_ids = malloc(sizeof(uint64_t));
             *out_scores = malloc(sizeof(float));
             *out_n = 0;
             return (*out_ids && *out_scores) ? 0 : -1;
         }
-        size_t live = hnsw_count(s->hnsw);
-        size_t fetch = want * 2;
-        if (fetch > live) fetch = live;
-        if (fetch < want) fetch = want;
-        uint64_t *sid = NULL;
-        float *ssc = NULL;
-        size_t sn = 0;
-        if (hnsw_search(s->hnsw, query, dim, fetch, s->ef_search, &sid, &ssc,
-                        &sn) != 0)
-            return -1;
-        Scored *cand = malloc((sn ? sn : 1) * sizeof(Scored));
-        if (!cand) {
+        size_t per = want * 2;
+        size_t cap = 0;
+        for (size_t si = 0; si < s->nshards; si++) {
+            size_t live = hnsw_count(s->shards[si]);
+            cap += per < live ? per : live;
+        }
+        Scored *cand = malloc((cap ? cap : 1) * sizeof(Scored));
+        if (!cand) return -1;
+        size_t cn = 0;
+        for (size_t si = 0; si < s->nshards; si++) {
+            size_t live = hnsw_count(s->shards[si]);
+            size_t fetch = per < live ? per : live;
+            if (fetch == 0) continue;
+            uint64_t *sid = NULL;
+            float *ssc = NULL;
+            size_t sn = 0;
+            if (hnsw_search(s->shards[si], query, dim, fetch, s->ef_search, &sid,
+                            &ssc, &sn) != 0) {
+                free(cand);
+                return -1;
+            }
+            for (size_t i = 0; i < sn && cn < cap; i++) {
+                cand[cn].id = mv_rec(sid[i]);
+                cand[cn].score = ssc[i];
+                cn++;
+            }
             free(sid);
             free(ssc);
-            return -1;
         }
-        for (size_t i = 0; i < sn; i++) {
-            cand[i].id = mv_rec(sid[i]);
-            cand[i].score = ssc[i];
-        }
-        free(sid);
-        free(ssc);
-        int rc = dedup_topk(cand, sn, top_k, out_ids, out_scores, out_n);
+        int rc = dedup_topk(cand, cn, top_k, out_ids, out_scores, out_n);
         free(cand);
         return rc;
     }
@@ -713,13 +858,13 @@ int semantic_index_search(const SemanticIndex *s, const float *query,
 
 int semantic_index_save(const SemanticIndex *s, const char *path,
                         uint64_t covered_log_size) {
-    if (!s->hnsw) {
-        /* below the threshold there is no graph; drop any stale checkpoint so
-         * recovery rebuilds from the log rather than trusting it */
-        unlink(path);
-        return 0;
-    }
-    return hnsw_save(s->hnsw, path, covered_log_size);
+    if (s->nshards == 1) return hnsw_save(s->shards[0], path, covered_log_size);
+    /* No graph yet, or a multi-shard graph: the checkpoint format holds a single
+     * graph, so a sharded index is not checkpointed — recovery rebuilds it from
+     * the log, which is fast now that the build is parallel. Drop any stale file
+     * so recovery does not trust it. */
+    unlink(path);
+    return 0;
 }
 
 typedef struct {
@@ -743,7 +888,7 @@ static int rc_rebuild_cb(uint64_t synid, const float *vec, void *ctx) {
 
 int semantic_index_load(SemanticIndex *s, const char *path,
                         uint64_t *out_covered_log_size) {
-    if (s->hnsw || s->n != 0) return -1; /* must be a fresh index */
+    if (graph_present(s) || s->n != 0) return -1; /* must be a fresh index */
     Hnsw *g = hnsw_load(path, s->dim, out_covered_log_size);
     if (!g) return -1;
     /* A checkpoint saved in a different quantization mode than we're configured
@@ -752,7 +897,15 @@ int semantic_index_load(SemanticIndex *s, const char *path,
         hnsw_free(g);
         return -1;
     }
-    s->hnsw = g; /* the graph is authoritative; no dense array to rebuild */
+    /* Checkpoints hold a single graph (see save); load it as a one-shard index. */
+    Hnsw **shards = malloc(sizeof(Hnsw *));
+    if (!shards) {
+        hnsw_free(g);
+        return -1;
+    }
+    shards[0] = g;
+    s->shards = shards;
+    s->nshards = 1; /* the graph is authoritative; no dense array to rebuild */
     /* Rebuild the record->vec_count map from the graph's synthetic node ids
      * (record = id >> MV_SLOT_BITS; slot = id & mask); count = max slot + 1. */
     RcRebuild cx = {s, 0};
