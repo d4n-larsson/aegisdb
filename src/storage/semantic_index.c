@@ -496,9 +496,7 @@ int semantic_index_search(const SemanticIndex *s, const float *query,
     size_t m = 0;
     for (size_t i = 0; i < s->n; i++) {
         if (!s->e[i].used) continue;
-        double dot = 0;
-        const float *v = s->e[i].vec;
-        for (size_t d = 0; d < dim; d++) dot += (double)v[d] * query[d];
+        float dot = dot_f32(s->e[i].vec, query, dim);
         float denom = s->e[i].norm * qnorm;
         cand[m].id = mv_rec(s->e[i].id);
         cand[m].score = denom > 0 ? (float)(dot / denom) : 0.0f;
