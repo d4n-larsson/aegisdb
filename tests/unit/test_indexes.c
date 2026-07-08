@@ -97,7 +97,7 @@ static void test_tag_remove(void) {
 
 static void test_semantic_topk_ordering(void) {
     const size_t dim = 3;
-    SemanticIndex *s = semantic_index_create(dim, 0, 0, 0);
+    SemanticIndex *s = semantic_index_create(dim, 0, 0, 0, 0);
     float a[] = {1.0f, 0.0f, 0.0f};  /* id 1 */
     float b[] = {0.9f, 0.1f, 0.0f};  /* id 2 (close to query) */
     float c[] = {0.0f, 1.0f, 0.0f};  /* id 3 (orthogonal-ish) */
@@ -125,7 +125,7 @@ static void test_semantic_topk_ordering(void) {
  * remove/re-add churn must not grow the index (no leaked/dead slots). */
 static void test_semantic_remove_reclaims(void) {
     const size_t dim = 2;
-    SemanticIndex *s = semantic_index_create(dim, 0, 0, 0);
+    SemanticIndex *s = semantic_index_create(dim, 0, 0, 0, 0);
     float v1[] = {1.0f, 0.0f};
     float v2[] = {0.0f, 1.0f};
     semantic_index_add(s, 1, v1, 1, dim);
@@ -160,7 +160,7 @@ static void test_semantic_remove_reclaims(void) {
  * and search reflects the new direction. */
 static void test_semantic_overwrite_in_place(void) {
     const size_t dim = 2;
-    SemanticIndex *s = semantic_index_create(dim, 0, 0, 0);
+    SemanticIndex *s = semantic_index_create(dim, 0, 0, 0, 0);
     float along_x[] = {1.0f, 0.0f};
     float along_y[] = {0.0f, 1.0f};
     semantic_index_add(s, 7, along_x, 1, dim);
@@ -191,7 +191,7 @@ static void test_semantic_overwrite_in_place(void) {
 static void test_semantic_bulk_add_remove_consistency(void) {
     const size_t dim = 1;
     const uint64_t N = 1000;
-    SemanticIndex *s = semantic_index_create(dim, 0, 0, 0);
+    SemanticIndex *s = semantic_index_create(dim, 0, 0, 0, 0);
     for (uint64_t id = 1; id <= N; id++) {
         float v[] = {(float)id};
         TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, 1, dim));
@@ -237,7 +237,7 @@ static void test_semantic_bulk_add_remove_consistency(void) {
 static void test_semantic_topk_partial_selection(void) {
     const size_t dim = 2;
     const uint64_t N = 200, K = 5;
-    SemanticIndex *s = semantic_index_create(dim, 0, 0, 0);
+    SemanticIndex *s = semantic_index_create(dim, 0, 0, 0, 0);
     /* scramble insertion order with a coprime stride */
     for (uint64_t step = 0; step < N; step++) {
         uint64_t id = 1 + (step * 73 + 11) % N;
@@ -269,7 +269,7 @@ static void test_semantic_topk_partial_selection(void) {
 static void test_semantic_hnsw_path(void) {
     const size_t dim = 2;
     const uint64_t N = 300, K = 5;
-    SemanticIndex *s = semantic_index_create(dim, 16, 100, 0); /* HNSW once n>=16 */
+    SemanticIndex *s = semantic_index_create(dim, 16, 100, 0, 0); /* HNSW once n>=16 */
     for (uint64_t id = 1; id <= N; id++) {
         float v[] = {1.0f, (float)(id - 1)};
         TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, 1, dim));
@@ -317,7 +317,7 @@ static void test_semantic_hnsw_path(void) {
  * HNSW (small) path so both are exercised. */
 static void multivector_best_of_n(size_t threshold) {
     const size_t dim = 3;
-    SemanticIndex *s = semantic_index_create(dim, threshold, 100, 0);
+    SemanticIndex *s = semantic_index_create(dim, threshold, 100, 0, 0);
     float axes[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
     /* record 1 owns two vectors (x and y); record 2 owns z */
     float r1[6] = {1, 0, 0, 0, 1, 0};
@@ -364,7 +364,7 @@ static void test_semantic_multivector_hnsw(void) { multivector_best_of_n(2); }
  * a live server, taking the index lock around begin/take/commit). */
 static void test_semantic_deferred_build_catch_up(void) {
     const size_t dim = 2;
-    SemanticIndex *s = semantic_index_create(dim, 16, 100, 0); /* HNSW once n>=16 */
+    SemanticIndex *s = semantic_index_create(dim, 16, 100, 0, 0); /* HNSW once n>=16 */
     for (uint64_t id = 1; id <= 20; id++) {
         float v[] = {1.0f, (float)(id - 1)};
         TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, 1, dim));
@@ -412,10 +412,10 @@ static void test_semantic_deferred_build_catch_up(void) {
  * well-separated data (id i -> (1, i-1)) the merged approximate result is still
  * the exact top-k, and remove/overwrite stay correct across the shard split. */
 static void test_semantic_sharded_build(void) {
-    setenv("AEGIS_SHARD_TARGET", "16", 1); /* force many shards at small N */
     const size_t dim = 2;
     const uint64_t N = 200, K = 5;
-    SemanticIndex *s = semantic_index_create(dim, 16, 100, 0);
+    /* small shard target (like --ann-shard-target) forces many shards at small N */
+    SemanticIndex *s = semantic_index_create(dim, 16, 100, 0, /*shard_target=*/16);
     for (uint64_t id = 1; id <= N; id++) {
         float v[] = {1.0f, (float)(id - 1)};
         TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, 1, dim));
@@ -459,7 +459,6 @@ static void test_semantic_sharded_build(void) {
     free(ids);
     free(sc);
     semantic_index_free(s);
-    unsetenv("AEGIS_SHARD_TARGET");
 }
 
 int main(void) {

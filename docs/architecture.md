@@ -131,6 +131,14 @@ are held only by the HNSW graph, optionally int8-quantized (`--ann-quantize`,
 server's `--embedding-dim` (default 384) or the request is rejected with
 `INVALID_REQUEST`.
 
+The graph is built off the write path by the maintenance thread (a threshold
+crossing never blocks readers or writers), and at scale it is split into
+independent shards — each a self-contained HNSW over a hash-partitioned subset —
+so the build runs one thread per shard. `--ann-shard-target` sets the target
+vectors per shard (default 25000; the graph splits into ~`count/target` shards,
+capped by the CPU count); small indexes stay a single graph. A search fans out
+across the shards and merges, which is exact for the global top-K.
+
 ## The record model
 
 A `MemoryRecord` (`include/aegisdb/record.h`) carries:
