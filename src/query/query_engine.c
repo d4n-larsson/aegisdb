@@ -1029,11 +1029,18 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
 
 /* ----- dispatch / wire handlers ---------------------------------------- */
 
-static cJSON *resp_record(const MemoryRecord *r) {
+static cJSON *resp_record(const MemoryRecord *r, int include_embeddings) {
     cJSON *o = json_ok();
     if (!o) return NULL;
-    cJSON_AddItemToObject(o, "record", json_record(r));
+    cJSON_AddItemToObject(o, "record", json_record(r, include_embeddings));
     return o;
+}
+
+/* Optional "include_embeddings" response shaping: embeddings are the bulk of a
+ * record's JSON (a 384-float vector is ~8 KB), so recall/read clients that only
+ * need the payload can set it false. Defaults to true (backward compatible). */
+static int want_embeddings(const cJSON *req) {
+    return jr_bool(req, "include_embeddings", 1);
 }
 
 static int build_input_record(AegisDB *db, const cJSON *req, MemoryRecord *in,
@@ -1254,7 +1261,8 @@ static int build_pinned(AegisDB *db, const cJSON *spec, const char *ns,
 /* Insert `records`: [ {record}, ... ] in one request. Validates every element
  * first, so a malformed element rejects the whole batch before anything is
  * written; then inserts all. Returns {ok, count, records:[...]}. */
-static cJSON *handle_insert_batch(AegisDB *db, const cJSON *arr, const char *ns) {
+static cJSON *handle_insert_batch(AegisDB *db, const cJSON *arr, const char *ns,
+                                  int include_embeddings) {
     int n = cJSON_GetArraySize(arr);
     if (n < 1 || n > MAX_BATCH) return json_error_status(AEGIS_ERR_INVALID_REQUEST);
 
@@ -1280,7 +1288,7 @@ static cJSON *handle_insert_batch(AegisDB *db, const cJSON *arr, const char *ns)
         jr_u64(spec, "ttl_ms", &ttl);
         MemoryRecord out;
         if (qe_insert(db, &ins[i], session, ttl, &out) == AEGIS_OK) {
-            cJSON_AddItemToArray(out_arr, json_record(&out));
+            cJSON_AddItemToArray(out_arr, json_record(&out, include_embeddings));
             record_free(&out);
             ok++;
         }
@@ -1292,8 +1300,9 @@ static cJSON *handle_insert_batch(AegisDB *db, const cJSON *arr, const char *ns)
 }
 
 static cJSON *handle_insert(AegisDB *db, const cJSON *req, const char *ns) {
+    int emb = want_embeddings(req);
     cJSON *arr = cJSON_GetObjectItemCaseSensitive(req, "records");
-    if (cJSON_IsArray(arr)) return handle_insert_batch(db, arr, ns);
+    if (cJSON_IsArray(arr)) return handle_insert_batch(db, arr, ns, emb);
 
     MemoryRecord in;
     aegis_status_t err;
@@ -1308,7 +1317,7 @@ static cJSON *handle_insert(AegisDB *db, const cJSON *req, const char *ns) {
     aegis_status_t st = qe_insert(db, &in, session, ttl, &out);
     record_free(&in);
     if (st != AEGIS_OK) return json_error_status(st);
-    cJSON *r = resp_record(&out);
+    cJSON *r = resp_record(&out, emb);
     record_free(&out);
     return r;
 }
@@ -1320,7 +1329,7 @@ static cJSON *handle_get(AegisDB *db, const cJSON *req, const char *ns) {
     MemoryRecord out;
     aegis_status_t st = qe_get(db, id, agent, &out);
     if (st != AEGIS_OK) return json_error_status(st);
-    cJSON *r = resp_record(&out);
+    cJSON *r = resp_record(&out, want_embeddings(req));
     record_free(&out);
     return r;
 }
@@ -1358,7 +1367,7 @@ static cJSON *handle_update(AegisDB *db, const cJSON *req, const char *ns) {
     aegis_status_t st = qe_update(db, id, &patch, ns, &out);
     free(tags);
     if (st != AEGIS_OK) return json_error_status(st);
-    cJSON *r = resp_record(&out);
+    cJSON *r = resp_record(&out, want_embeddings(req));
     record_free(&out);
     return r;
 }
@@ -1488,10 +1497,11 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req, const char *ns) {
     free(emb);
     if (st != AEGIS_OK) return json_error_status(st);
 
+    int inc_emb = want_embeddings(req);
     cJSON *o = json_ok();
     cJSON *arr = cJSON_AddArrayToObject(o, "records");
     for (size_t i = 0; i < n; i++) {
-        cJSON_AddItemToArray(arr, json_record(&recs[i]));
+        cJSON_AddItemToArray(arr, json_record(&recs[i], inc_emb));
         record_free(&recs[i]);
     }
     free(recs);
@@ -1511,7 +1521,7 @@ static cJSON *handle_promote(AegisDB *db, const cJSON *req, const char *ns) {
     MemoryRecord out;
     aegis_status_t st = qe_promote(db, session, wid, tt, ns, &out);
     if (st != AEGIS_OK) return json_error_status(st);
-    cJSON *r = resp_record(&out);
+    cJSON *r = resp_record(&out, want_embeddings(req));
     record_free(&out);
     return r;
 }
@@ -1543,10 +1553,11 @@ static cJSON *handle_traverse(AegisDB *db, const cJSON *req, const char *ns) {
     size_t n = 0;
     aegis_status_t st = qe_traverse(db, id, (int)depth, agent, &recs, &n);
     if (st != AEGIS_OK) return json_error_status(st);
+    int emb = want_embeddings(req);
     cJSON *o = json_ok();
     cJSON *arr = cJSON_AddArrayToObject(o, "records");
     for (size_t i = 0; i < n; i++) {
-        cJSON_AddItemToArray(arr, json_record(&recs[i]));
+        cJSON_AddItemToArray(arr, json_record(&recs[i], emb));
         record_free(&recs[i]);
     }
     free(recs);

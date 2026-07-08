@@ -6,7 +6,7 @@
 
 #include "aegisdb/types.h"
 
-cJSON *json_record(const MemoryRecord *r) {
+cJSON *json_record(const MemoryRecord *r, int include_embeddings) {
     cJSON *o = cJSON_CreateObject();
     if (!o) return NULL;
     cJSON_AddNumberToObject(o, "id", (double)r->id);
@@ -21,11 +21,14 @@ cJSON *json_record(const MemoryRecord *r) {
     for (size_t i = 0; i < r->tag_count; i++)
         cJSON_AddItemToArray(tags, cJSON_CreateString(r->tags[i]));
 
-    if (r->embedding_dim && r->vec_count == 1) {
+    /* Embeddings dominate the response size (a 384-float vector is ~8 KB of
+     * JSON per record); clients that only need the payload/metadata can omit
+     * them with "include_embeddings": false to cut read latency and bandwidth. */
+    if (include_embeddings && r->embedding_dim && r->vec_count == 1) {
         cJSON *emb = cJSON_AddArrayToObject(o, "embedding");
         for (size_t i = 0; i < r->embedding_dim; i++)
             cJSON_AddItemToArray(emb, cJSON_CreateNumber(r->embedding[i]));
-    } else if (r->embedding_dim && r->vec_count > 1) {
+    } else if (include_embeddings && r->embedding_dim && r->vec_count > 1) {
         /* multi-vector: echo as an array of arrays (#85) */
         cJSON *embs = cJSON_AddArrayToObject(o, "embeddings");
         for (size_t v = 0; v < r->vec_count; v++) {

@@ -25,6 +25,9 @@ int jr_u64(const cJSON *o, const char *key, uint64_t *out);
 /* Reads a double from `key`. Returns 0 found / -1 absent. */
 int jr_f64(const cJSON *o, const char *key, double *out);
 
+/* Reads a boolean from `key`. Returns `dflt` if absent or not a JSON boolean. */
+int jr_bool(const cJSON *o, const char *key, int dflt);
+
 /* Extract a string array (e.g. tags). Allocates *out (array of char*, each
  * borrowed from the cJSON tree — do not free the strings, only the array).
  * `max` bounds the array length: if `max` is non-zero and the array is longer,
