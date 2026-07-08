@@ -40,7 +40,7 @@ TEST_BIN  := $(patsubst tests/unit/%.c,$(BUILD)/tests/%,$(TEST_SRC))
 
 PYTHON ?= python3
 
-.PHONY: all clean test integration check bench
+.PHONY: all clean test integration check bench wire-bench
 all: $(BIN)
 
 $(BIN): $(CORE_OBJ) $(CJSON_OBJ) $(MAIN_OBJ)
@@ -51,11 +51,13 @@ $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CSTD) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
 
-# Relaxed FP only for the vector-search translation unit, so the cosine
+# Relaxed FP only for the vector-search translation units, so the cosine
 # reduction can vectorize under NATIVE; scoped here so isnan/isinf elsewhere
-# (e.g. cJSON number parsing) keep strict IEEE semantics.
+# (e.g. cJSON number parsing) keep strict IEEE semantics. Both the exact scan
+# (semantic_index) and the HNSW graph distance (hnsw) are hot dot-product loops.
 ifeq ($(NATIVE),1)
 $(BUILD)/src/storage/semantic_index.o: CFLAGS += -ffast-math
+$(BUILD)/src/storage/hnsw.o: CFLAGS += -ffast-math
 endif
 
 # Tests: each test file links against all core objects + unity.
@@ -81,6 +83,16 @@ $(BUILD)/bench/hnsw_bench: bench/hnsw_bench.c $(BUILD)/src/storage/hnsw.o \
 	    $(BUILD)/src/storage/hnsw.o $(BUILD)/src/util/crc32.o $(LDLIBS)
 bench: $(BUILD)/bench/hnsw_bench
 	$(BUILD)/bench/hnsw_bench
+
+# End-to-end wire-protocol benchmark: drives a RUNNING server over TCP and
+# reports throughput + latency percentiles for the full pipeline. Build with
+# `make wire-bench` (or `make NATIVE=1 wire-bench`), then run against a server:
+#   ./build/aegisdb --data-dir /tmp/wb --port 9470 &
+#   ./build/bench/wire_bench --op mixed --conns 16 --secs 10
+$(BUILD)/bench/wire_bench: bench/wire_bench.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(CFLAGS) $(CPPFLAGS) -o $@ $< $(LDLIBS)
+wire-bench: $(BUILD)/bench/wire_bench
 
 # Run the full suite: C unit tests + protocol contract tests.
 check: test integration

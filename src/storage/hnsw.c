@@ -19,6 +19,7 @@
 #include <unistd.h>
 
 #include "aegisdb/crc32.h"
+#include "aegisdb/vecmath.h"
 #include "aegisdb/hash_mix.h"
 #include "aegisdb/vecmath.h"
 
@@ -155,9 +156,7 @@ static double node_dot_query(const Hnsw *h, const float *q, const Node *nd) {
         for (size_t i = 0; i < h->dim; i++) dot += (double)q[i] * v[i];
         return dot * nd->scale;
     }
-    const float *v = nd->vec;
-    for (size_t i = 0; i < h->dim; i++) dot += (double)q[i] * v[i];
-    return dot;
+    return dot_f32(q, nd->vec, h->dim);
 }
 
 /* Dot product of two stored node vectors. */
@@ -169,9 +168,7 @@ static double node_dot_node(const Hnsw *h, const Node *a, const Node *b) {
         for (size_t i = 0; i < h->dim; i++) acc += (long)va[i] * vb[i];
         return (double)acc * a->scale * b->scale;
     }
-    const float *va = a->vec, *vb = b->vec;
-    for (size_t i = 0; i < h->dim; i++) dot += (double)va[i] * vb[i];
-    return dot;
+    return dot_f32(a->vec, b->vec, h->dim);
 }
 
 /* 1 - cosine similarity, in [0, 2]; smaller is nearer. */
