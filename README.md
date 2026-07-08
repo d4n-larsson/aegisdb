@@ -3,8 +3,9 @@
 A standalone C database server optimized for **AI agent memory**: append-heavy
 writes, fast ID lookup, temporal/tag search, semantic similarity, and volatile
 working memory. AegisDB uses a log-structured storage engine with purpose-built
-indexes (hash for ID lookup, a sorted time index, inverted tags, and exact-cosine
-vector search) behind a JSON-over-TCP wire protocol.
+indexes (hash for ID lookup, a sorted time index, inverted tags, and vector
+search — an exact cosine scan that upgrades to an HNSW graph at scale) behind a
+JSON-over-TCP wire protocol.
 
 ## Features
 
@@ -13,11 +14,15 @@ vector search) behind a JSON-over-TCP wire protocol.
 - **Working memory** — volatile per-session ring buffer with TTL and promotion
 - **Retrieval** — lookup by ID, time-range search, tag search (`all`/`any`),
   semantic (embedding) search ranked by cosine similarity weighted by
-  importance × confidence
+  importance × confidence; `count` and `consolidate` (dedup) over the same filters
+- **Semantic scale** — exact cosine while small; past `--ann-threshold` an HNSW
+  graph for sublinear approximate top-K, built off the write path and sharded so
+  the build parallelizes (`--ann-shard-target`), optionally int8-quantized
 - **Relationships** — directed edges between records, graph traversal, and
   agent-namespace isolation
 - **Multi-tenant auth** — optional bearer tokens (constant-time check; `ping` exempt), each bound to a namespace + scope (`ro`/`rw`/admin) so one server safely isolates many tenants
-- **Concurrency** — worker thread pool; selectable `fsync` durability (`sync` / `batch` / `interval`)
+- **Operations** — `stats` for monitoring and online `snapshot`/restore backups
+- **Concurrency** — sharded `poll()` event-loop threads (`--io-threads`); selectable `fsync` durability (`sync` / `batch` / `interval`)
 
 ## Requirements
 
@@ -142,14 +147,20 @@ token: 9f3c…              # give to the client (AEGIS_TOKEN); not recoverable
 | `--data-dir <path>` | `./data` | Persistence directory |
 | `--port <n>` | `9470` | TCP listen port |
 | `--phase <1-4>` | `4` | Highest enabled feature phase (gates operations) |
-| `--workers <n>` | `4` | Worker thread count |
+| `--io-threads <n>` | 2× CPUs (8–64) | `poll()` event-loop threads for dispatch parallelism (does not cap concurrent connections). Alias: `--workers` |
 | `--max-payload <bytes>` | `1048576` | Max `data` size (1 MiB) |
 | `--embedding-dim <n>` | `384` | Expected embedding vector length |
+| `--ann-threshold <n>` | `10000` | Live vectors before semantic search switches from exact scan to the HNSW graph |
+| `--ann-ef-search <n>` | HNSW default | HNSW query beam width (recall/latency knob) |
+| `--ann-shard-target <n>` | `25000` | Target vectors per HNSW shard; the graph splits into ~`count/n` shards (capped by CPUs) so the build parallelizes |
+| `--ann-quantize` | off | Store HNSW vectors as int8 (~4× less memory, small recall cost) |
 | `--durability <mode>` | `interval` | `sync` (fsync per write), `batch` (per `--fsync-batch` records), or `interval` (per `--fsync-interval-ms`) |
 | `--fsync-batch <n>` | `1000` | Records between `fsync` calls in `batch` mode |
 | `--fsync-interval-ms <n>` | `1000` | Flush cadence in `interval` mode (floored at the ~1s maintenance tick) |
 | `--checkpoint-sec <n>` | `60` | Index checkpoint cadence so recovery replays only the tail; `0` disables |
+| `--compact-sec <n>` | `300` | Log-compaction check cadence; compacts only when enough of the log is dead; `0` disables |
 | `--working-capacity <n>` | `256` | Working-memory ring buffer size |
+| `--restore <dir>` | — | One-shot: install the snapshot at `<dir>` into an empty `--data-dir`, then exit |
 | `--log-level <level>` | `info` | `error`, `warn`, `info`, or `debug` (also `$AEGISDB_LOG_LEVEL`) |
 | `--auth-token <token>` | — | Accept this global **admin** token (repeatable) |
 | `--auth-token-file <path>` | — | Accept tokens, one per line: `<token> [namespace] [ro\|rw\|admin]`; a token may be `sha256$<hex>` (hashed at rest) |
@@ -212,9 +223,10 @@ echo '{"operation":"search","start_time":0,"end_time":9999999999999,"top_k":10}'
 echo '{"operation":"search","tags":["user"],"match":"all","top_k":10}' | nc -q1 localhost 9470
 ```
 
-Supported operations: `ping`, `insert` (episodic/semantic/working), `get`,
-`update` (semantic), `delete`, `search` (time/tags/embedding), `promote`,
-`relate`, `traverse`.
+Supported operations: `ping`, `insert` (episodic/semantic/working, single or
+batch), `get`, `update` (semantic), `delete` (by id or query), `search`
+(time/tags/embedding), `count`, `consolidate`, `promote`, `relate`, `traverse`,
+`stats`, and `snapshot`.
 
 ### Python client example
 
@@ -235,14 +247,14 @@ print(request({"operation": "insert", "type": "episodic",
 
 ```text
 src/
-├── main.c              # Entry point, CLI args
-├── server/             # TCP NDJSON server + worker thread pool
+├── main.c              # Entry point, CLI args, client subcommands
+├── server/             # TCP NDJSON server, sharded poll() event loops
 ├── protocol/           # JSON request parsing / response building
 ├── query/              # Operation router / query engine
 ├── storage/            # Append-only log, hash/time/tag/semantic indexes,
 │                       #   compaction, recovery
 ├── memory/             # MemoryRecord encode/decode, working buffer
-└── util/               # CRC32, config
+└── util/               # CRC32, SHA-256, config, health check, client, logging
 include/aegisdb/        # Public headers
 tests/                  # unit/, integration/, contract/
 third_party/            # Vendored cJSON and Unity
