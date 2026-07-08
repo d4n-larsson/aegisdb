@@ -28,6 +28,12 @@ int jr_f64(const cJSON *o, const char *key, double *out) {
     return 0;
 }
 
+int jr_bool(const cJSON *o, const char *key, int dflt) {
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, key);
+    if (cJSON_IsBool(v)) return cJSON_IsTrue(v) ? 1 : 0;
+    return dflt;
+}
+
 int jr_str_array(const cJSON *o, const char *key, const char ***out,
                  size_t *out_n, size_t max) {
     *out = NULL;

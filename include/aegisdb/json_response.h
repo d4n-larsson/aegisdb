@@ -6,8 +6,10 @@
 #include "aegisdb/record.h"
 #include "cJSON.h"
 
-/* Build a JSON object representing a MemoryRecord per the wire protocol. */
-cJSON *json_record(const MemoryRecord *r);
+/* Build a JSON object representing a MemoryRecord per the wire protocol. When
+ * `include_embeddings` is 0 the (large) embedding/embeddings arrays are omitted;
+ * all other fields are unchanged. */
+cJSON *json_record(const MemoryRecord *r, int include_embeddings);
 
 /* {"ok":true} base object the caller can extend. */
 cJSON *json_ok(void);

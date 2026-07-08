@@ -25,6 +25,7 @@
  *   --top-k N       search top_k (default 10)
  *   --token T       auth token sent on every request (default none)
  *   --seed N        RNG seed (default 1)
+ *   --no-embeddings send include_embeddings:false so responses omit vectors
  */
 #include <arpa/inet.h>
 #include <errno.h>
@@ -53,6 +54,7 @@ struct config {
     int top_k;
     const char *token;
     uint64_t seed;
+    int no_embeddings; /* send include_embeddings:false on get/search */
 };
 
 static double now_s(void) {
@@ -265,8 +267,13 @@ static void *worker(void *v) {
     char *emb = malloc(1 << 16);
     char *resp = malloc(READER_CAP);
     char tokfield[256] = "";
+    size_t tf = 0;
     if (g_cfg.token)
-        snprintf(tokfield, sizeof tokfield, ",\"token\":\"%s\"", g_cfg.token);
+        tf += (size_t)snprintf(tokfield + tf, sizeof tokfield - tf,
+                               ",\"token\":\"%s\"", g_cfg.token);
+    if (g_cfg.no_embeddings)
+        snprintf(tokfield + tf, sizeof tokfield - tf,
+                 ",\"include_embeddings\":false");
 
     pthread_barrier_wait(&g_barrier); /* all threads start the timed run together */
 
@@ -305,8 +312,13 @@ static size_t preload(size_t n) {
     char *emb = malloc(1 << 16);
     char *resp = malloc(READER_CAP);
     char tokfield[256] = "";
+    size_t tf = 0;
     if (g_cfg.token)
-        snprintf(tokfield, sizeof tokfield, ",\"token\":\"%s\"", g_cfg.token);
+        tf += (size_t)snprintf(tokfield + tf, sizeof tokfield - tf,
+                               ",\"token\":\"%s\"", g_cfg.token);
+    if (g_cfg.no_embeddings)
+        snprintf(tokfield + tf, sizeof tokfield - tf,
+                 ",\"include_embeddings\":false");
     uint64_t rng = g_cfg.seed ^ 0xDEADBEEF;
     size_t got = 0;
     for (size_t i = 0; i < n; i++) {
@@ -360,6 +372,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--top-k")) g_cfg.top_k = atoi(NEXT());
         else if (!strcmp(a, "--token")) g_cfg.token = NEXT();
         else if (!strcmp(a, "--seed")) g_cfg.seed = strtoull(NEXT(), NULL, 10);
+        else if (!strcmp(a, "--no-embeddings")) g_cfg.no_embeddings = 1;
         else { fprintf(stderr, "unknown arg '%s'\n", a); return 2; }
 #undef NEXT
     }

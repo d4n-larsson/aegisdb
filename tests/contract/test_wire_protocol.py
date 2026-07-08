@@ -679,6 +679,52 @@ def test_multivector(binary, port):
               "wrong-dimension embedding rejected")
 
 
+def test_include_embeddings(binary, port):
+    print("[include_embeddings: response shaping]")
+    with Server(binary, port, phase=4) as srv:  # default --embedding-dim 384
+        dim = 384
+        single = [1.0] + [0.0] * (dim - 1)
+        multi = [[1.0] + [0.0] * (dim - 1), [0.0, 1.0] + [0.0] * (dim - 2)]
+
+        r = srv.req({"operation": "insert", "type": "semantic", "tags": ["ie"],
+                     "data": "one", "embedding": single})
+        sid = r["record"]["id"]
+        r = srv.req({"operation": "insert", "type": "semantic", "tags": ["ie"],
+                     "data": "many", "embeddings": multi})
+        mid = r["record"]["id"]
+
+        # default: embeddings are present (backward compatible)
+        r = srv.req({"operation": "get", "id": sid})
+        check("embedding" in r.get("record", {}),
+              "get includes embedding by default")
+
+        # include_embeddings=false omits them but keeps the rest
+        r = srv.req({"operation": "get", "id": sid, "include_embeddings": False})
+        rec = r.get("record", {})
+        check(rec.get("ok", True) is not False and "embedding" not in rec,
+              "get omits single embedding when include_embeddings=false")
+        check(rec.get("data") == "one" and rec.get("tags") == ["ie"],
+              "omitting embeddings preserves data/tags")
+
+        # multi-vector "embeddings" array is omitted too
+        r = srv.req({"operation": "get", "id": mid, "include_embeddings": False})
+        check("embeddings" not in r.get("record", {}),
+              "get omits multi-vector embeddings when include_embeddings=false")
+
+        # search honors the flag while still ranking by the query vector
+        r = srv.req({"operation": "search", "embedding": single, "top_k": 5,
+                     "include_embeddings": False})
+        recs = r.get("records", [])
+        check(any(x["id"] == sid for x in recs), "search still returns the match")
+        check(all("embedding" not in x and "embeddings" not in x for x in recs),
+              "search omits embeddings from every record when false")
+
+        # explicit true behaves like the default
+        r = srv.req({"operation": "get", "id": sid, "include_embeddings": True})
+        check("embedding" in r.get("record", {}),
+              "include_embeddings=true includes the embedding")
+
+
 def test_search_limits(binary, port):
     print("[search input limits]")
     with Server(binary, port, phase=4) as srv:  # default --embedding-dim 384
@@ -793,6 +839,7 @@ def main():
     test_bulk_ops(binary, 19480)
     test_consolidate(binary, 19481)
     test_multivector(binary, 19482)
+    test_include_embeddings(binary, 19487)
     test_snapshot(binary, 19483)
     test_snapshot_admin_only(binary, 19485)
     test_restore(binary, 19486)

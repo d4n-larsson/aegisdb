@@ -20,6 +20,7 @@
 | `operation` | string | Yes | Operation name (see below) |
 | `request_id` | string | No | Client correlation ID echoed in response |
 | `token` | string | When auth enabled | Bearer token. Required on every operation except `ping` when the server is started with `--auth-token`/`--auth-token-file`; ignored when authentication is disabled |
+| `include_embeddings` | boolean | No | Defaults to `true`. Set `false` to omit the (large) `embedding`/`embeddings` arrays from every record in the response — all other fields are unchanged. Embeddings dominate response size (a 384-dim vector is ~8 KB of JSON per record), so recall/read clients that only need the payload and metadata can cut latency and bandwidth. Honored by `get`, `search`, `traverse`, `insert`, `update`, and `promote`. |
 
 ### Authentication & multi-tenancy
 
