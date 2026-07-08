@@ -37,12 +37,15 @@ Expected startup log:
 
 ```text
 2026-06-28 12:00:00.000 INFO  [aegisdb] AegisDB 0.1.0 starting (log level: info)
+2026-06-28 12:00:00.000 WARN  [aegisdb] no auth tokens configured; the server accepts unauthenticated requests from anyone who can reach the port
 2026-06-28 12:00:00.000 INFO  [aegisdb] recovery complete: N records loaded
 2026-06-28 12:00:00.000 INFO  [aegisdb] listening on 0.0.0.0:9470
 2026-06-28 12:00:00.000 INFO  [aegisdb] data directory: ./data
 ```
 
-Each line is `<timestamp> <LEVEL> [aegisdb] <message>` on stderr. Set the
+The `WARN` line appears only because this example starts without
+`--auth-token`/`--auth-token-file`; configure a token to remove it. Each line is
+`<timestamp> <LEVEL> [aegisdb] <message>` on stderr. Set the
 verbosity with `--log-level error|warn|info|debug` (or the `AEGISDB_LOG_LEVEL`
 environment variable; the flag wins). `debug` adds per-connection and
 per-request detail.
