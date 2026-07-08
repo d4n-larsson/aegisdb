@@ -275,6 +275,10 @@ static void test_semantic_hnsw_path(void) {
         TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, 1, dim));
     }
     TEST_ASSERT_EQUAL_size_t((size_t)N, semantic_index_count(s));
+    /* The build is deferred on a live server; drive it directly so the searches
+     * and the remove/overwrite below exercise the HNSW graph, not the dense scan. */
+    TEST_ASSERT_TRUE(semantic_index_needs_build(s));
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_build_now(s));
 
     float q[] = {1.0f, 0.0f};
     uint64_t *ids = NULL;
@@ -319,6 +323,10 @@ static void multivector_best_of_n(size_t threshold) {
     float r1[6] = {1, 0, 0, 0, 1, 0};
     TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, 1, r1, 2, dim));
     TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, 2, axes[2], 1, dim));
+    /* HNSW variant (small threshold): build the deferred graph so the search
+     * runs against it; exact variant (high threshold) leaves the dense scan. */
+    if (semantic_index_needs_build(s))
+        TEST_ASSERT_EQUAL_INT(0, semantic_index_build_now(s));
 
     uint64_t *ids = NULL;
     float *sc = NULL;
@@ -349,6 +357,55 @@ static void multivector_best_of_n(size_t threshold) {
 static void test_semantic_multivector_dense(void) { multivector_best_of_n(0); }
 static void test_semantic_multivector_hnsw(void) { multivector_best_of_n(2); }
 
+/* The deferred off-lock build must fold in add/remove ops that race the build:
+ * begin() snapshots and starts journalling, mutations after it are recorded as
+ * deltas, and commit() replays them so the installed graph matches the live
+ * dense state. Drives the phases directly (the maintenance thread does this on
+ * a live server, taking the index lock around begin/take/commit). */
+static void test_semantic_deferred_build_catch_up(void) {
+    const size_t dim = 2;
+    SemanticIndex *s = semantic_index_create(dim, 16, 100, 0); /* HNSW once n>=16 */
+    for (uint64_t id = 1; id <= 20; id++) {
+        float v[] = {1.0f, (float)(id - 1)};
+        TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, 1, dim));
+    }
+    TEST_ASSERT_TRUE(semantic_index_needs_build(s));
+
+    /* Phase 2: snapshot 20 vectors, enter building mode. */
+    SemBuildJob *job = semantic_index_build_begin(s);
+    TEST_ASSERT_NOT_NULL(job);
+    TEST_ASSERT_FALSE(semantic_index_needs_build(s)); /* build now in flight */
+
+    /* Writes that race the build: remove the query's nearest (id 1) and add a
+     * brand-new nearest (id 100 exactly on the query axis). Both are journalled. */
+    semantic_index_remove(s, 1);
+    float onaxis[] = {1.0f, 0.0f};
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, 100, onaxis, 1, dim));
+    /* Dense (still authoritative) already reflects them. */
+    TEST_ASSERT_EQUAL_size_t(20, semantic_index_count(s)); /* -1 (id1) +1 (id100) */
+
+    /* Phase 3: build from the snapshot (which predates the two mutations). */
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_build_run(job));
+    /* Phase 4: fold the journalled deltas into the graph. */
+    TEST_ASSERT_EQUAL_size_t(2, semantic_index_build_take_deltas(s, job));
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_build_apply(job));
+    /* Phase 5: install. */
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_build_commit(s, job));
+
+    /* The graph is now live and reflects the racing writes. */
+    TEST_ASSERT_EQUAL_size_t(20, semantic_index_count(s));
+    float q[] = {1.0f, 0.0f};
+    uint64_t *ids = NULL;
+    float *sc = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_search(s, q, dim, 5, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_UINT64(100, ids[0]); /* the raced-in add is the nearest */
+    for (size_t i = 0; i < n; i++) TEST_ASSERT_TRUE(ids[i] != 1); /* raced-out gone */
+    free(ids);
+    free(sc);
+    semantic_index_free(s);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_time_range_chronological);
@@ -363,5 +420,6 @@ int main(void) {
     RUN_TEST(test_semantic_hnsw_path);
     RUN_TEST(test_semantic_multivector_dense);
     RUN_TEST(test_semantic_multivector_hnsw);
+    RUN_TEST(test_semantic_deferred_build_catch_up);
     return UNITY_END();
 }

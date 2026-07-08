@@ -251,6 +251,10 @@ static void *maint_loop(void *arg) {
                 LOG_DEBUG("interval fsync: flushed log to disk");
             }
         }
+        /* Build the ANN graph off-lock once the vector count crosses the
+         * threshold (checked every tick; the build itself is snapshot/build/
+         * install so it never holds the index lock for the whole build). */
+        db_semantic_build_step(c->db);
         if (c->sweep_sec && (elapsed % c->sweep_sec) == 0) {
             uint64_t now = db_now_ms();
             size_t swept = working_store_sweep(c->db->working, now);

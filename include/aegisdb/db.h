@@ -79,6 +79,12 @@ int db_save_metadata(AegisDB *db);
  * Thread-safe. Returns 0/-1. */
 int db_checkpoint(AegisDB *db);
 
+/* Build the HNSW graph off-lock if the live vector count has crossed the ANN
+ * threshold and no graph exists yet. Driven by the maintenance thread so the
+ * expensive build never blocks readers/writers. Returns 1 if a graph was built,
+ * 0 if nothing to do, -1 on failure (retried on a later tick). */
+int db_semantic_build_step(AegisDB *db);
+
 /* Result of a successful db_snapshot(): where it landed and what it covers. */
 typedef struct {
     char dir[1300];        /* the snapshot directory that was written */
