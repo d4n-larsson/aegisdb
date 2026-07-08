@@ -406,6 +406,62 @@ static void test_semantic_deferred_build_catch_up(void) {
     semantic_index_free(s);
 }
 
+/* Multi-shard build: with a small per-shard target the deferred build splits
+ * into several independent HNSW shards (one thread each). Search must fan out
+ * over all shards and merge, and add/remove must route to the right shard. On
+ * well-separated data (id i -> (1, i-1)) the merged approximate result is still
+ * the exact top-k, and remove/overwrite stay correct across the shard split. */
+static void test_semantic_sharded_build(void) {
+    setenv("AEGIS_SHARD_TARGET", "16", 1); /* force many shards at small N */
+    const size_t dim = 2;
+    const uint64_t N = 200, K = 5;
+    SemanticIndex *s = semantic_index_create(dim, 16, 100, 0);
+    for (uint64_t id = 1; id <= N; id++) {
+        float v[] = {1.0f, (float)(id - 1)};
+        TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, 1, dim));
+    }
+    TEST_ASSERT_TRUE(semantic_index_needs_build(s));
+
+    /* Deferred build, no racing writes -> straight begin/run/commit. */
+    SemBuildJob *job = semantic_index_build_begin(s);
+    TEST_ASSERT_NOT_NULL(job);
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_build_run(job));
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_build_commit(s, job));
+    TEST_ASSERT_EQUAL_size_t((size_t)N, semantic_index_count(s));
+
+    float q[] = {1.0f, 0.0f};
+    uint64_t *ids = NULL;
+    float *sc = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_search(s, q, dim, K, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_size_t((size_t)K, n);
+    for (uint64_t i = 0; i < K; i++) {
+        TEST_ASSERT_EQUAL_UINT64(i + 1, ids[i]);       /* exact top-k across shards */
+        if (i > 0) TEST_ASSERT_TRUE(sc[i - 1] >= sc[i]);
+    }
+    free(ids);
+    free(sc);
+
+    /* remove the nearest (routes to its shard); id 2 becomes nearest */
+    semantic_index_remove(s, 1);
+    TEST_ASSERT_EQUAL_size_t((size_t)N - 1, semantic_index_count(s));
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_search(s, q, dim, K, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_UINT64(2, ids[0]);
+    for (size_t i = 0; i < n; i++) TEST_ASSERT_TRUE(ids[i] != 1);
+    free(ids);
+    free(sc);
+
+    /* overwrite id 2 to point away from q: it drops out, id 3 becomes nearest */
+    float away[] = {0.0f, 1.0f};
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, 2, away, 1, dim));
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_search(s, q, dim, K, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_UINT64(3, ids[0]);
+    free(ids);
+    free(sc);
+    semantic_index_free(s);
+    unsetenv("AEGIS_SHARD_TARGET");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_time_range_chronological);
@@ -421,5 +477,6 @@ int main(void) {
     RUN_TEST(test_semantic_multivector_dense);
     RUN_TEST(test_semantic_multivector_hnsw);
     RUN_TEST(test_semantic_deferred_build_catch_up);
+    RUN_TEST(test_semantic_sharded_build);
     return UNITY_END();
 }
