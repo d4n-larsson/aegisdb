@@ -280,6 +280,13 @@ tunnel, or a TLS-terminating reverse proxy — AegisDB does not terminate TLS
 itself. Every client must set `AEGIS_EMBEDDING_DIMENSIONS` to the server's
 `--embedding-dim`.
 
+To keep the shared server stable, cap what any one tenant can consume:
+`--tenant-max-records` / `--tenant-max-bytes` bound per-namespace storage and
+`--tenant-rate-qps` bounds a namespace's request rate, so one member's runaway
+agent can't fill the disk or monopolize the server (over-limit writes get
+`QUOTA_EXCEEDED`, over-rate requests `RATE_LIMITED`). Admin `stats` reports each
+tenant's live usage.
+
 ### Isolated tenants (recommended)
 
 Give each project (or person) a **namespaced token** so the server *enforces*

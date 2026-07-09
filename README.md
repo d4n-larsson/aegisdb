@@ -21,6 +21,7 @@ JSON-over-TCP wire protocol.
 - **Relationships** — directed edges between records, graph traversal, and
   agent-namespace isolation
 - **Multi-tenant auth** — optional bearer tokens (constant-time check; `ping` exempt), each bound to a namespace + scope (`ro`/`rw`/admin) so one server safely isolates many tenants
+- **Per-tenant limits** — optional storage quotas (records/bytes) and a request rate limit per namespace, so one team member's runaway agent can't fill the disk or monopolize the shared server
 - **Operations** — `stats` for monitoring and online `snapshot`/restore backups
 - **Concurrency** — sharded `poll()` event-loop threads (`--io-threads`); selectable `fsync` durability (`sync` / `batch` / `interval`)
 
@@ -159,6 +160,9 @@ token: 9f3c…              # give to the client (AEGIS_TOKEN); not recoverable
 | `--fsync-interval-ms <n>` | `1000` | Flush cadence in `interval` mode (floored at the ~1s maintenance tick) |
 | `--checkpoint-sec <n>` | `60` | Index checkpoint cadence so recovery replays only the tail; `0` disables |
 | `--compact-sec <n>` | `300` | Log-compaction check cadence; compacts only when enough of the log is dead; `0` disables |
+| `--tenant-max-records <n>` | `0` | Per-namespace live-record cap (`0` = unlimited); enforced only when auth is enabled |
+| `--tenant-max-bytes <n>` | `0` | Per-namespace live-byte cap (`0` = unlimited) |
+| `--tenant-rate-qps <n>` | `0` | Per-namespace request rate limit in req/s, burst = 1s (`0` = unlimited) |
 | `--working-capacity <n>` | `256` | Working-memory ring buffer size |
 | `--restore <dir>` | — | One-shot: install the snapshot at `<dir>` into an empty `--data-dir`, then exit |
 | `--log-level <level>` | `info` | `error`, `warn`, `info`, or `debug` (also `$AEGISDB_LOG_LEVEL`) |

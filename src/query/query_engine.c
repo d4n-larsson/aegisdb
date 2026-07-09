@@ -69,6 +69,34 @@ static aegis_status_t append_and_hash(AegisDB *db, const MemoryRecord *rec) {
     uint8_t *buf = NULL;
     size_t len = 0;
     if (record_encode(rec, &buf, &len) != 0) return AEGIS_ERR_INTERNAL;
+
+    /* Per-tenant accounting (this is the sole live-set mutation point, so it is
+     * also the sole accounting point). Only under auth — with no namespaces
+     * there are no tenants to bound. The delta vs the record's current live
+     * state covers insert (+1), delete/tombstone (-1), and update (bytes only,
+     * count unchanged). agent_id is immutable per id, so it is the tenant. */
+    const char *ns =
+        (db->config.auth_token_count > 0) ? rec->agent_id : NULL;
+    long d_records = 0, d_bytes = 0;
+    if (ns) {
+        const HashEntry *prior = hash_index_get(db->hash, rec->id);
+        int prior_live = prior && !prior->deleted;
+        int new_live = !rec->deleted;
+        long prior_bytes = prior_live ? (long)prior->length : 0;
+        long new_bytes = new_live ? (long)len : 0;
+        d_records = (new_live ? 1 : 0) - (prior_live ? 1 : 0);
+        d_bytes = new_bytes - prior_bytes;
+        /* Reject a write that would push this tenant over quota — but never a
+         * delete/shrink (checked on positive deltas only). */
+        if (tenant_usage_would_exceed(
+                db->tenants, ns, d_records > 0 ? d_records : 0,
+                d_bytes > 0 ? d_bytes : 0, db->config.tenant_max_records,
+                db->config.tenant_max_bytes) != 0) {
+            free(buf);
+            return AEGIS_ERR_QUOTA_EXCEEDED;
+        }
+    }
+
     uint64_t off = 0;
     int rv = log_append(&db->log, buf, len, &off);
     free(buf);
@@ -76,6 +104,8 @@ static aegis_status_t append_and_hash(AegisDB *db, const MemoryRecord *rec) {
     if (hash_index_put(db->hash, rec->id, off, (uint32_t)len, (uint8_t)rec->type,
                        (uint8_t)(rec->deleted ? 1 : 0), rec->expires_at) != 0)
         return AEGIS_ERR_INTERNAL;
+    if (ns && (d_records || d_bytes))
+        tenant_usage_adjust(db->tenants, ns, d_records, d_bytes);
     return AEGIS_OK;
 }
 
@@ -1209,6 +1239,32 @@ static cJSON *handle_stats(AegisDB *db) {
                 cJSON_AddNumberToObject(bo, op_names[i],
                     (double)atomic_load_explicit(&mt->by_op[i], memory_order_relaxed));
     }
+
+    /* Per-tenant usage against the configured caps (admin-only op, so this is
+     * server-wide). Only emitted when a limit is configured, keeping the common
+     * single-tenant / no-quota response unchanged. */
+    if (db->config.tenant_max_records || db->config.tenant_max_bytes ||
+        db->config.tenant_rate_qps > 0) {
+        cJSON *lim = cJSON_AddObjectToObject(o, "tenant_limits");
+        if (lim) {
+            cJSON_AddNumberToObject(lim, "max_records",
+                                    (double)db->config.tenant_max_records);
+            cJSON_AddNumberToObject(lim, "max_bytes",
+                                    (double)db->config.tenant_max_bytes);
+            cJSON_AddNumberToObject(lim, "rate_qps", db->config.tenant_rate_qps);
+        }
+        size_t tn = 0;
+        TenantUsage *usage = tenant_usage_snapshot(db->tenants, &tn);
+        cJSON *arr = cJSON_AddArrayToObject(o, "tenants");
+        for (size_t i = 0; arr && i < tn; i++) {
+            cJSON *e = cJSON_CreateObject();
+            cJSON_AddStringToObject(e, "namespace", usage[i].ns);
+            cJSON_AddNumberToObject(e, "records", (double)usage[i].records);
+            cJSON_AddNumberToObject(e, "bytes", (double)usage[i].bytes);
+            cJSON_AddItemToArray(arr, e);
+        }
+        tenant_usage_free(usage, tn);
+    }
     return o;
 }
 
@@ -1583,6 +1639,8 @@ static int ct_eq_bytes(const uint8_t *a, const uint8_t *b, size_t n) {
     return diff == 0;
 }
 
+static uint64_t monotonic_micros(void); /* defined below; used by the rate limiter */
+
 /* Resolved caller identity for a request. */
 typedef struct {
     const char *ns; /* bound namespace; NULL = unrestricted (admin / auth off) */
@@ -1650,6 +1708,16 @@ static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
     if (is_write_op(op) && !ctx.can_write) {
         LOG_WARN("dispatch: read-only token attempted \"%s\"", op);
         return json_error_status(AEGIS_ERR_FORBIDDEN);
+    }
+
+    /* Per-tenant rate limit: bound a single namespace's request rate so one
+     * runaway agent can't monopolize the shared server. Namespaced callers only
+     * (admin/unrestricted are exempt); ping already returned above. */
+    if (ctx.ns && db->config.tenant_rate_qps > 0 &&
+        !tenant_rate_allow(db->tenants, ctx.ns, db->config.tenant_rate_qps,
+                           db->config.tenant_rate_qps, monotonic_micros())) {
+        LOG_WARN("dispatch: rate limit hit for ns=%s on \"%s\"", ctx.ns, op);
+        return json_error_status(AEGIS_ERR_RATE_LIMITED);
     }
 
     LOG_DEBUG("dispatch: operation \"%s\" (ns=%s)", op, ctx.ns ? ctx.ns : "*");

@@ -14,6 +14,8 @@ const char *aegis_status_code(aegis_status_t s) {
         case AEGIS_ERR_NOT_READY: return "NOT_READY";
         case AEGIS_ERR_UNAUTHORIZED: return "UNAUTHORIZED";
         case AEGIS_ERR_FORBIDDEN: return "FORBIDDEN";
+        case AEGIS_ERR_QUOTA_EXCEEDED: return "QUOTA_EXCEEDED";
+        case AEGIS_ERR_RATE_LIMITED: return "RATE_LIMITED";
         case AEGIS_ERR_INTERNAL:
         default: return "INTERNAL";
     }
@@ -29,6 +31,8 @@ const char *aegis_status_message(aegis_status_t s) {
         case AEGIS_ERR_NOT_READY: return "feature not enabled for current phase";
         case AEGIS_ERR_UNAUTHORIZED: return "authentication required or invalid token";
         case AEGIS_ERR_FORBIDDEN: return "not permitted for this token";
+        case AEGIS_ERR_QUOTA_EXCEEDED: return "tenant storage quota exceeded";
+        case AEGIS_ERR_RATE_LIMITED: return "tenant request rate limit exceeded";
         case AEGIS_ERR_INTERNAL:
         default: return "internal server error";
     }

@@ -344,7 +344,9 @@ int db_open(AegisDB *db, const Config *cfg) {
                                     cfg->ann_quantize, cfg->ann_shard_target);
     db->working =
         working_store_create(cfg->working_capacity, cfg->default_ttl_ms);
-    if (!db->hash || !db->time || !db->tags || !db->sem || !db->working) {
+    db->tenants = tenant_table_create();
+    if (!db->hash || !db->time || !db->tags || !db->sem || !db->working ||
+        !db->tenants) {
         LOG_ERROR("index allocation failed");
         goto fail_indexes;
     }
@@ -378,6 +380,7 @@ fail_indexes:
     tag_index_free(db->tags);
     semantic_index_free(db->sem);
     working_store_free(db->working);
+    tenant_table_free(db->tenants);
     log_close(&db->log);
 fail_locks:
     pthread_mutex_destroy(&db->id_lock);
@@ -399,6 +402,7 @@ void db_close(AegisDB *db) {
     tag_index_free(db->tags);
     semantic_index_free(db->sem);
     working_store_free(db->working);
+    tenant_table_free(db->tenants);
     log_close(&db->log);
     pthread_mutex_destroy(&db->id_lock);
     pthread_rwlock_destroy(&db->index_lock);

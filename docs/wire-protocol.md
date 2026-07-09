@@ -104,6 +104,8 @@ dependency-free C binary); terminate it at the edge.
 | `NOT_READY` | 503 | Operation disabled by `--phase` gating (advanced; see below) |
 | `UNAUTHORIZED` | 401 | Missing or invalid `token` when authentication is enabled |
 | `FORBIDDEN` | 403 | Authenticated, but the token's scope/namespace disallows the operation |
+| `QUOTA_EXCEEDED` | 507 | Write would push the tenant over its `--tenant-max-records`/`--tenant-max-bytes` cap |
+| `RATE_LIMITED` | 429 | Tenant exceeded its `--tenant-rate-qps` request rate |
 | `INTERNAL` | 500 | Unexpected server error |
 
 ---
@@ -529,6 +531,17 @@ successive differences:
 | `unauthorized` | Auth rejections (a subset of `errors`) |
 | `dispatch_micros` | Cumulative in-dispatch time in µs (avg latency = `dispatch_micros / requests`) |
 | `by_op` | Per-operation request counts (`insert`, `search`, …, `other`) |
+
+When any per-tenant limit is configured (`--tenant-max-records`,
+`--tenant-max-bytes`, or `--tenant-rate-qps`), the response also carries a
+`tenant_limits` object (the configured caps) and a `tenants` array of
+`{ "namespace", "records", "bytes" }` — each namespace's current live usage
+against the caps, for capacity planning:
+
+```json
+"tenant_limits": { "max_records": 100000, "max_bytes": 0, "rate_qps": 50 },
+"tenants": [ { "namespace": "acme", "records": 1042, "bytes": 2310544 } ]
+```
 
 `stats` is admin-only (a namespaced token gets `FORBIDDEN`), so metrics are
 server-wide. AegisDB has no HTTP endpoint by design — a sidecar can poll `stats`

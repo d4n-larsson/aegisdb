@@ -15,6 +15,8 @@ typedef enum {
     AEGIS_ERR_NOT_READY,         /* phase-gated feature off     -> NOT_READY */
     AEGIS_ERR_UNAUTHORIZED,      /* missing/invalid auth token  -> UNAUTHORIZED */
     AEGIS_ERR_FORBIDDEN,         /* authenticated but not allowed -> FORBIDDEN */
+    AEGIS_ERR_QUOTA_EXCEEDED,    /* tenant storage quota reached -> QUOTA_EXCEEDED */
+    AEGIS_ERR_RATE_LIMITED,      /* tenant request rate exceeded -> RATE_LIMITED */
     AEGIS_ERR_INTERNAL           /* unexpected failure          -> INTERNAL */
 } aegis_status_t;
 

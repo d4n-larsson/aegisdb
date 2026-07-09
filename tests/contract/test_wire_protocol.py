@@ -32,19 +32,21 @@ def check(cond, msg):
 
 class Server:
     def __init__(self, binary, port, phase=4, auth_token=None, token_lines=None,
-                 io_threads=None):
+                 io_threads=None, extra_args=None):
         self.binary = binary
         self.port = port
         self.phase = phase
         self.auth_token = auth_token
         self.token_lines = token_lines  # lines for --auth-token-file
         self.io_threads = io_threads
+        self.extra_args = extra_args or []  # arbitrary extra CLI flags
         self.proc = None
         self.datadir = tempfile.mkdtemp(prefix="aegis_contract_")
 
     def __enter__(self):
         args = [self.binary, "--data-dir", self.datadir, "--port",
                 str(self.port), "--phase", str(self.phase)]
+        args += self.extra_args
         if self.io_threads is not None:
             args += ["--io-threads", str(self.io_threads)]
         if self.auth_token:
@@ -725,6 +727,65 @@ def test_include_embeddings(binary, port):
               "include_embeddings=true includes the embedding")
 
 
+def test_tenant_quota(binary, port):
+    print("[per-tenant storage quota]")
+    tokens = ["adm", "acme-key acme rw", "beta-key beta rw"]
+    with Server(binary, port, token_lines=tokens,
+                extra_args=["--tenant-max-records", "3"]) as srv:
+        acme = {"token": "acme-key"}
+        # first 3 inserts for acme succeed
+        for i in range(3):
+            r = srv.req({"operation": "insert", "type": "episodic",
+                         "data": f"a{i}", **acme})
+            check(r.get("ok") is True, f"acme insert {i} within quota")
+        # the 4th is rejected with QUOTA_EXCEEDED (still 3 live records)
+        r = srv.req({"operation": "insert", "type": "episodic", "data": "a3", **acme})
+        check(r.get("ok") is False and r["error"]["code"] == "QUOTA_EXCEEDED",
+              "insert over record quota -> QUOTA_EXCEEDED")
+
+        # a different tenant has its own quota (isolation)
+        r = srv.req({"operation": "insert", "type": "episodic", "data": "b0",
+                     "token": "beta-key"})
+        check(r.get("ok") is True, "beta unaffected by acme's quota")
+
+        # deleting frees a slot, so a subsequent insert fits again
+        ids = [x["id"] for x in
+               srv.req({"operation": "search", "top_k": 10, "start_time": 0,
+                        "end_time": 9999999999999, **acme}).get("records", [])]
+        d = srv.req({"operation": "delete", "id": ids[0], **acme})
+        check(d.get("ok") is True, "acme delete frees a slot")
+        r = srv.req({"operation": "insert", "type": "episodic", "data": "a3", **acme})
+        check(r.get("ok") is True, "insert fits after freeing a slot")
+
+        # admin stats reports per-tenant usage
+        st = srv.req({"operation": "stats", "token": "adm"})
+        tenants = {t["namespace"]: t for t in st.get("tenants", [])}
+        check(tenants.get("acme", {}).get("records") == 3,
+              "stats reports acme at its record cap")
+        check(st.get("tenant_limits", {}).get("max_records") == 3,
+              "stats reports the configured record limit")
+
+
+def test_tenant_rate_limit(binary, port):
+    print("[per-tenant rate limit]")
+    tokens = ["adm", "acme-key acme rw"]
+    # 5 req/s, burst 5: a quick burst of gets must eventually hit RATE_LIMITED
+    with Server(binary, port, token_lines=tokens,
+                extra_args=["--tenant-rate-qps", "5"]) as srv:
+        acme = {"token": "acme-key"}
+        limited = False
+        for _ in range(30):
+            r = srv.req({"operation": "get", "id": 1, **acme})
+            code = (r.get("error") or {}).get("code")
+            if code == "RATE_LIMITED":
+                limited = True
+                break
+        check(limited, "a burst beyond the rate hits RATE_LIMITED")
+        # ping is always exempt (health checks must never be rate-limited)
+        check(srv.req({"operation": "ping"}).get("ok") is True,
+              "ping is exempt from the rate limit")
+
+
 def test_search_limits(binary, port):
     print("[search input limits]")
     with Server(binary, port, phase=4) as srv:  # default --embedding-dim 384
@@ -840,6 +901,8 @@ def main():
     test_consolidate(binary, 19481)
     test_multivector(binary, 19482)
     test_include_embeddings(binary, 19487)
+    test_tenant_quota(binary, 19488)
+    test_tenant_rate_limit(binary, 19489)
     test_snapshot(binary, 19483)
     test_snapshot_admin_only(binary, 19485)
     test_restore(binary, 19486)

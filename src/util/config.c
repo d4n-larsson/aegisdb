@@ -32,6 +32,9 @@ void config_defaults(Config *cfg) {
     cfg->ann_ef_search = 0; /* 0 -> HNSW built-in default */
     cfg->ann_quantize = 0;  /* float32 vectors by default */
     cfg->ann_shard_target = 0; /* 0 -> built-in default */
+    cfg->tenant_max_records = 0; /* 0 -> unlimited */
+    cfg->tenant_max_bytes = 0;   /* 0 -> unlimited */
+    cfg->tenant_rate_qps = 0;    /* 0 -> unlimited */
     cfg->working_capacity = 256;
     cfg->default_ttl_ms = 3600000; /* 1 hour */
     cfg->fsync_batch_size = 1000;
@@ -232,6 +235,11 @@ static void usage(const char *prog) {
             "  --ann-shard-target <n>   target vectors per HNSW shard; the graph\n"
             "                           splits into ~count/n shards (capped by CPUs)\n"
             "                           so the build parallelizes (default 25000)\n"
+            "  --tenant-max-records <n> per-namespace live-record cap; 0 = unlimited\n"
+            "                           (enforced only when auth is enabled)\n"
+            "  --tenant-max-bytes <n>   per-namespace live-byte cap; 0 = unlimited\n"
+            "  --tenant-rate-qps <n>    per-namespace request rate limit (req/s,\n"
+            "                           burst = 1s); 0 = unlimited\n"
             "  --durability <mode>      sync|batch|interval (default interval)\n"
             "  --fsync-batch <n>        records between fsync in batch mode\n"
             "                           (default 1000)\n"
@@ -342,6 +350,27 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
             }
         } else if (strcmp(a, "--ann-quantize") == 0) {
             cfg->ann_quantize = 1; /* boolean flag: int8 HNSW vectors */
+        } else if (strcmp(a, "--tenant-max-records") == 0) {
+            NEXT("--tenant-max-records");
+            if (parse_size(val, &cfg->tenant_max_records)) {
+                fprintf(stderr, "%s: invalid tenant-max-records '%s'\n", prog, val);
+                return -1;
+            }
+        } else if (strcmp(a, "--tenant-max-bytes") == 0) {
+            NEXT("--tenant-max-bytes");
+            if (parse_size(val, &cfg->tenant_max_bytes)) {
+                fprintf(stderr, "%s: invalid tenant-max-bytes '%s'\n", prog, val);
+                return -1;
+            }
+        } else if (strcmp(a, "--tenant-rate-qps") == 0) {
+            NEXT("--tenant-rate-qps");
+            char *end = NULL;
+            double q = strtod(val, &end);
+            if (end == val || *end != '\0' || q < 0) {
+                fprintf(stderr, "%s: invalid tenant-rate-qps '%s'\n", prog, val);
+                return -1;
+            }
+            cfg->tenant_rate_qps = q;
         } else if (strcmp(a, "--fsync-batch") == 0) {
             NEXT("--fsync-batch");
             if (parse_size(val, &cfg->fsync_batch_size)) {
