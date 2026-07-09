@@ -351,8 +351,9 @@ aegis_mcp/
   recall.py       # automatic-recall query/format + time budget
   capture.py      # session salience heuristic + persistence
   server.py       # FastMCP binding (lazy-imports `mcp`)
+  hooks.py        # console-script entry points (aegisdb-recall-hook / -capture-hook)
 hooks/
-  recall_hook.py  # UserPromptSubmit
+  recall_hook.py  # UserPromptSubmit (checkout path: python3 …/hooks/recall_hook.py)
   capture_hook.py # SessionEnd / Stop
 tests/            # unit, contract, integration (stdlib unittest)
 examples/         # mcp.json, settings.json
