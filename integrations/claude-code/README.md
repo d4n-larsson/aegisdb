@@ -41,9 +41,12 @@ so you spend tokens on the work, not on re-establishing context.
   The *selection* happens in AegisDB, so the model never sees (or pays to sift)
   the rest.
 - **A bounded block, not a runaway one.** The injected context is size-capped:
-  each memory is truncated at `AEGIS_RECALL_MAX_CHARS_PER_MEMORY` and the whole
-  block at `AEGIS_RECALL_CHAR_BUDGET`, so a few long memories can't quietly
-  dominate a turn's tokens.
+  each memory is truncated at `AEGIS_RECALL_MAX_CHARS_PER_MEMORY` (on a word
+  boundary, marked `[…]`) and the whole block at `AEGIS_RECALL_CHAR_BUDGET` (a
+  hard ceiling — even the top memory is bounded by it), so a few long memories
+  can't quietly dominate a turn's tokens. Dropped memories are flagged with an
+  explicit "N more omitted" trailer, so the model knows the list is partial (and
+  can `memory_search` for the rest) rather than mistaking it for complete.
 - **Short sessions, full knowledge.** Because memory is external, you can start
   fresh sessions instead of dragging one giant transcript whose every turn
   re-bills the whole context.
