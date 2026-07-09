@@ -93,6 +93,8 @@ static void set_timeouts(int fd, int secs) {
 
 /* ============================================================ SOURCE ======= */
 
+#define MAX_REPLICAS 128
+
 struct ReplicationSource {
     AegisDB *db;
     int listen_fd;
@@ -100,7 +102,40 @@ struct ReplicationSource {
     pthread_t acceptor;
     atomic_int stop;
     atomic_int replicas;
+    /* Live streamer sockets, so stop() can wake them (shutdown) and wait for
+     * them to exit before the source — and then the log — is freed. */
+    pthread_mutex_t lock;
+    int conn_fds[MAX_REPLICAS];
+    int conn_n;
 };
+
+/* Track/untrack a streamer's socket in the source's registry. */
+static int src_track(ReplicationSource *s, int fd) {
+    int ok = 0;
+    pthread_mutex_lock(&s->lock);
+    if (s->conn_n < MAX_REPLICAS) { s->conn_fds[s->conn_n++] = fd; ok = 1; }
+    pthread_mutex_unlock(&s->lock);
+    return ok;
+}
+static void src_untrack(ReplicationSource *s, int fd) {
+    pthread_mutex_lock(&s->lock);
+    for (int i = 0; i < s->conn_n; i++)
+        if (s->conn_fds[i] == fd) {
+            s->conn_fds[i] = s->conn_fds[--s->conn_n];
+            break;
+        }
+    pthread_mutex_unlock(&s->lock);
+}
+
+/* Read the log's current end offset race-free. Appends update db->log.size
+ * while holding index_lock (write), so read it under index_lock (read) — the
+ * log's own mutex does not serialize with index-lock readers. */
+static uint64_t log_size_locked(AegisDB *db) {
+    pthread_rwlock_rdlock(&db->index_lock);
+    uint64_t sz = (uint64_t)db->log.size;
+    pthread_rwlock_unlock(&db->index_lock);
+    return sz;
+}
 
 /* One binary message on the stream. */
 static int send_msg(int fd, uint8_t type, uint64_t offset, const uint8_t *pay,
@@ -124,12 +159,15 @@ static void *streamer(void *arg) {
     AegisDB *db = s->db;
     int fd = c->fd;
     free(c);
+    /* The acceptor already tracked this fd and incremented s->replicas; every
+     * exit path goes through `done` to untrack + close + decrement, so stop()
+     * can reliably wait for all streamers before the source is freed. */
     set_timeouts(fd, 30);
 
     char line[512];
-    if (read_line(fd, line, sizeof line) < 0) { close(fd); return NULL; }
+    if (read_line(fd, line, sizeof line) < 0) goto done;
     cJSON *req = cJSON_Parse(line);
-    if (!req) { close(fd); return NULL; }
+    if (!req) goto done;
     const cJSON *jtok = cJSON_GetObjectItemCaseSensitive(req, "token");
     const cJSON *joff = cJSON_GetObjectItemCaseSensitive(req, "from_offset");
     const cJSON *jgen = cJSON_GetObjectItemCaseSensitive(req, "generation");
@@ -140,17 +178,13 @@ static void *streamer(void *arg) {
     if (strcmp(tok, s->token) != 0) {
         (void)write_all(fd, "{\"ok\":false}\n", 13);
         cJSON_Delete(req);
-        close(fd);
         LOG_WARN("replication: subscriber rejected (bad token)");
-        return NULL;
+        goto done;
     }
     cJSON_Delete(req);
 
     uint64_t cur_gen = atomic_load_explicit(&db->log_generation, memory_order_relaxed);
-    uint64_t logsz;
-    pthread_rwlock_rdlock(&db->log_lock);
-    logsz = (uint64_t)db->log.size;
-    pthread_rwlock_unlock(&db->log_lock);
+    uint64_t logsz = log_size_locked(db);
     int reset = (req_gen != cur_gen) || (from_off > logsz);
     uint64_t cursor = reset ? 0 : from_off;
 
@@ -158,31 +192,37 @@ static void *streamer(void *arg) {
     int rl = snprintf(resp, sizeof resp,
                       "{\"ok\":true,\"generation\":%llu,\"reset\":%s}\n",
                       (unsigned long long)cur_gen, reset ? "true" : "false");
-    if (write_all(fd, resp, (size_t)rl) != 0) { close(fd); return NULL; }
+    if (write_all(fd, resp, (size_t)rl) != 0) goto done;
 
-    atomic_fetch_add(&s->replicas, 1);
     LOG_INFO("replication: replica subscribed from offset %llu (reset=%d)",
              (unsigned long long)cursor, reset);
 
     while (!atomic_load_explicit(&s->stop, memory_order_relaxed)) {
+        /* Early out if the primary compacted (offsets changed); the authoritative
+         * re-check happens under log_lock before each read below. */
+        if (atomic_load_explicit(&db->log_generation, memory_order_relaxed) !=
+            cur_gen) {
+            (void)send_msg(fd, MSG_RESET, 0, NULL, 0);
+            goto done;
+        }
+        uint64_t size = log_size_locked(db);
         int sent_any = 0;
-        for (;;) {
+        while (cursor < size &&
+               !atomic_load_explicit(&s->stop, memory_order_relaxed)) {
             uint8_t *payload = NULL;
             size_t plen = 0;
+            /* log_lock excludes compaction's log swap; re-check the generation
+             * under it so we never read a stale offset from a swapped log. */
             pthread_rwlock_rdlock(&db->log_lock);
-            uint64_t gen = atomic_load_explicit(&db->log_generation, memory_order_relaxed);
-            uint64_t size = (uint64_t)db->log.size;
-            if (gen != cur_gen) { /* the primary compacted → tell the replica */
+            if (atomic_load_explicit(&db->log_generation, memory_order_relaxed) !=
+                cur_gen) {
                 pthread_rwlock_unlock(&db->log_lock);
                 (void)send_msg(fd, MSG_RESET, 0, NULL, 0);
                 goto done;
             }
-            if (cursor >= size) { pthread_rwlock_unlock(&db->log_lock); break; }
             int rc = log_read(&db->log, cursor, &payload, &plen);
             pthread_rwlock_unlock(&db->log_lock);
-            if (rc != 0) { /* transient (e.g. raced a swap) — retry next tick */
-                break;
-            }
+            if (rc != 0) break; /* transient — retry next tick */
             if (send_msg(fd, MSG_FRAME, cursor, payload, (uint32_t)plen) != 0) {
                 free(payload);
                 goto done;
@@ -193,15 +233,13 @@ static void *streamer(void *arg) {
         }
         /* Heartbeat carries the current log size so an idle replica can measure
          * lag and notice a dead primary. */
-        pthread_rwlock_rdlock(&db->log_lock);
-        uint64_t size = (uint64_t)db->log.size;
-        pthread_rwlock_unlock(&db->log_lock);
         if (send_msg(fd, MSG_HEARTBEAT, size, NULL, 0) != 0) goto done;
         if (!sent_any) usleep(POLL_MS * 1000);
     }
 done:
-    atomic_fetch_sub(&s->replicas, 1);
+    src_untrack(s, fd);
     close(fd);
+    atomic_fetch_sub(&s->replicas, 1); /* last: stop() waits on this hitting 0 */
     LOG_INFO("replication: replica stream ended");
     return NULL;
 }
@@ -216,12 +254,19 @@ static void *acceptor(void *arg) {
             if (atomic_load_explicit(&s->stop, memory_order_relaxed)) break;
             continue;
         }
+        if (atomic_load_explicit(&s->stop, memory_order_relaxed)) { close(fd); break; }
         struct stream_ctx *c = malloc(sizeof *c);
-        if (!c) { close(fd); continue; }
+        /* Count + track before creating the thread so stop() (which joins the
+         * acceptor first, then waits for the count) never races a starting
+         * streamer. */
+        if (!c || !src_track(s, fd)) { free(c); close(fd); continue; }
+        atomic_fetch_add(&s->replicas, 1);
         c->s = s;
         c->fd = fd;
         pthread_t t;
         if (pthread_create(&t, NULL, streamer, c) != 0) {
+            src_untrack(s, fd);
+            atomic_fetch_sub(&s->replicas, 1);
             close(fd);
             free(c);
             continue;
@@ -237,9 +282,10 @@ ReplicationSource *replication_source_start(AegisDB *db, int port,
     if (!s) return NULL;
     s->db = db;
     snprintf(s->token, sizeof s->token, "%s", token ? token : "");
+    pthread_mutex_init(&s->lock, NULL);
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) { free(s); return NULL; }
+    if (fd < 0) { pthread_mutex_destroy(&s->lock); free(s); return NULL; }
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     struct sockaddr_in addr = {0};
@@ -251,6 +297,7 @@ ReplicationSource *replication_source_start(AegisDB *db, int port,
         LOG_ERROR("replication: cannot listen on port %d: %s", port,
                   strerror(errno));
         close(fd);
+        pthread_mutex_destroy(&s->lock);
         free(s);
         return NULL;
     }
@@ -260,6 +307,7 @@ ReplicationSource *replication_source_start(AegisDB *db, int port,
     s->listen_fd = fd;
     if (pthread_create(&s->acceptor, NULL, acceptor, s) != 0) {
         close(fd);
+        pthread_mutex_destroy(&s->lock);
         free(s);
         return NULL;
     }
@@ -270,10 +318,18 @@ ReplicationSource *replication_source_start(AegisDB *db, int port,
 void replication_source_stop(ReplicationSource *s) {
     if (!s) return;
     atomic_store(&s->stop, 1);
+    /* Join the acceptor first: after this no new streamer is created, so the
+     * replica count + fd set are stable. */
     pthread_join(s->acceptor, NULL);
     close(s->listen_fd);
-    /* Detached streamer threads observe stop and exit on their own; their
-     * sockets close as they wake. */
+    /* Wake every live streamer so its blocking send/recv returns promptly. */
+    pthread_mutex_lock(&s->lock);
+    for (int i = 0; i < s->conn_n; i++) shutdown(s->conn_fds[i], SHUT_RDWR);
+    pthread_mutex_unlock(&s->lock);
+    /* Wait for all streamers to finish before freeing the source (and, in the
+     * caller, before db_close closes the log they read via pread). */
+    while (atomic_load(&s->replicas) > 0) usleep(1000);
+    pthread_mutex_destroy(&s->lock);
     free(s);
 }
 
@@ -292,6 +348,7 @@ struct ReplicationFollower {
     atomic_int stop;
     atomic_int connected;
     atomic_uint_fast64_t primary_size;
+    atomic_uint_fast64_t applied; /* local applied offset (published for stats) */
     uint64_t gen; /* last generation synced from the primary (follower-thread only) */
 };
 
@@ -315,13 +372,15 @@ static int connect_primary(const char *host, int port) {
 }
 
 /* Wipe the replica back to empty (primary compacted / desync). */
-static void follower_reset(AegisDB *db) {
+static void follower_reset(ReplicationFollower *f) {
+    AegisDB *db = f->db;
     pthread_rwlock_wrlock(&db->index_lock);
     pthread_rwlock_wrlock(&db->log_lock);
     if (db_reset_replica(db) != 0)
         LOG_ERROR("replication: replica reset failed");
     pthread_rwlock_unlock(&db->log_lock);
     pthread_rwlock_unlock(&db->index_lock);
+    atomic_store(&f->applied, 0);
 }
 
 /* One connected session: handshake, then apply the stream until it drops. */
@@ -334,7 +393,7 @@ static void follow_session(ReplicationFollower *f) {
      * poll cycle, so reads return well within this. */
     set_timeouts(fd, 5);
 
-    uint64_t from_off = (uint64_t)db->log.size; /* follower is the only writer */
+    uint64_t from_off = log_size_locked(db);
     char hs[256];
     int hl = snprintf(hs, sizeof hs,
                       "{\"from_offset\":%llu,\"generation\":%llu,\"token\":\"%s\"}\n",
@@ -358,11 +417,12 @@ static void follow_session(ReplicationFollower *f) {
     }
     if (reset) {
         LOG_INFO("replication: primary requested reset; re-bootstrapping");
-        follower_reset(db);
+        follower_reset(f);
     }
+    atomic_store(&f->applied, log_size_locked(db)); /* 0 after a reset */
     atomic_store(&f->connected, 1);
     LOG_INFO("replication: following primary %s:%d from offset %llu", f->host,
-             f->port, (unsigned long long)db->log.size);
+             f->port, (unsigned long long)atomic_load(&f->applied));
 
     uint8_t hdr[MSG_HDR];
     while (!atomic_load_explicit(&f->stop, memory_order_relaxed)) {
@@ -381,7 +441,7 @@ static void follow_session(ReplicationFollower *f) {
         }
         if (type == MSG_RESET) {
             LOG_INFO("replication: reset from primary (compaction); re-bootstrapping");
-            follower_reset(db);
+            follower_reset(f);
             break; /* reconnect and re-subscribe from 0 */
         }
         if (type != MSG_FRAME || len == 0 || len > MAX_PAYLOAD) {
@@ -404,14 +464,16 @@ static void follow_session(ReplicationFollower *f) {
         uint64_t off = 0;
         int arc = log_append(&db->log, payload, len, &off);
         if (arc == 0) arc = db_replica_apply(db, off, payload, len);
+        uint64_t new_applied = (uint64_t)db->log.size;
         pthread_rwlock_unlock(&db->index_lock);
         free(payload);
         if (arc != 0) {
             LOG_ERROR("replication: apply failed; reconnecting");
             break;
         }
-        if (off + LOG_FRAME_HEADER + len > atomic_load(&f->primary_size))
-            atomic_store(&f->primary_size, off + LOG_FRAME_HEADER + len);
+        atomic_store(&f->applied, new_applied);
+        if (new_applied > atomic_load(&f->primary_size))
+            atomic_store(&f->primary_size, new_applied);
     }
     atomic_store(&f->connected, 0);
     close(fd);
@@ -453,7 +515,7 @@ void replication_follower_stop(ReplicationFollower *f) {
 void replication_follower_status(ReplicationFollower *f, uint64_t *applied,
                                  uint64_t *primary_size, int *connected) {
     if (!f) return;
-    if (applied) *applied = (uint64_t)f->db->log.size;
+    if (applied) *applied = atomic_load(&f->applied);
     if (primary_size) *primary_size = atomic_load(&f->primary_size);
     if (connected) *connected = atomic_load(&f->connected);
 }
