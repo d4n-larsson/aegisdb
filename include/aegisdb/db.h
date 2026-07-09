@@ -43,11 +43,19 @@ typedef struct {
     SemanticIndex *sem;  /* embedding ANN (Phase 3) */
     WorkingStore *working; /* volatile sessions (Phase 4) */
     TenantTable *tenants;  /* per-namespace usage + rate limiting (multi-tenant) */
+    /* Replication handles (owned by main); NULL when not configured. Opaque here
+     * to avoid an include cycle — see replication.h. */
+    struct ReplicationSource *repl_source;     /* primary: serves the log stream */
+    struct ReplicationFollower *repl_follower;  /* replica: follows a primary */
 
     uint64_t started_ms;     /* server start time (epoch ms) for uptime stats */
     Metrics metrics;         /* operational counters (see stats op) */
     uint64_t next_id;        /* monotonic id allocator for persisted records */
     pthread_mutex_t id_lock; /* guards next_id */
+    /* Bumped whenever compaction rewrites the log (offsets change). Replicas
+     * detect the change and re-bootstrap, since their byte-offset cursor into
+     * the old log is no longer valid. See docs/read-replica-design.md. */
+    atomic_uint_fast64_t log_generation;
     pthread_rwlock_t index_lock; /* guards the in-memory indexes (T051) */
     /* Guards the log-file lifecycle so a reader can resolve an id->offset under
      * index_lock, then drop it and do the disk read holding only this lock.
@@ -86,6 +94,20 @@ int db_checkpoint(AegisDB *db);
  * expensive build never blocks readers/writers. Returns 1 if a graph was built,
  * 0 if nothing to do, -1 on failure (retried on a later tick). */
 int db_semantic_build_step(AegisDB *db);
+
+/* Apply one replicated log frame on a read-only replica: append the payload to
+ * the local log (producing a byte-identical frame at `offset`) is done by the
+ * caller; this updates the in-memory indexes to reflect the record, diffing
+ * against its prior version so insert/update/delete all converge (mirrors what
+ * the primary's write path does to the indexes). Caller holds the index write
+ * lock. `offset`/`len` describe the just-appended frame. Returns 0/-1. */
+int db_replica_apply(AegisDB *db, uint64_t offset, const uint8_t *payload,
+                     size_t len);
+
+/* Wipe a replica back to empty (truncate the local log, recreate empty
+ * indexes), for re-bootstrapping after the primary compacted (its offsets
+ * changed). Caller holds the index write lock. Returns 0/-1. */
+int db_reset_replica(AegisDB *db);
 
 /* Result of a successful db_snapshot(): where it landed and what it covers. */
 typedef struct {

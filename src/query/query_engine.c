@@ -16,6 +16,7 @@
 #include "aegisdb/json_request.h"
 #include "aegisdb/json_response.h"
 #include "aegisdb/logging.h"
+#include "aegisdb/replication.h"
 #include "aegisdb/sha256.h"
 
 #define MAX_TAGS 32     /* max tags per record (also enforced in validate_common) */
@@ -1265,6 +1266,36 @@ static cJSON *handle_stats(AegisDB *db) {
         }
         tenant_usage_free(usage, tn);
     }
+
+    /* Replication posture (only when this node participates). */
+    if (db->repl_follower) {
+        uint64_t applied = 0, primary_size = 0;
+        int connected = 0;
+        replication_follower_status(db->repl_follower, &applied, &primary_size,
+                                    &connected);
+        cJSON *rep = cJSON_AddObjectToObject(o, "replication");
+        if (rep) {
+            cJSON_AddStringToObject(rep, "role", "replica");
+            cJSON_AddBoolToObject(rep, "connected", connected);
+            cJSON_AddNumberToObject(rep, "applied_offset", (double)applied);
+            cJSON_AddNumberToObject(rep, "primary_offset", (double)primary_size);
+            cJSON_AddNumberToObject(
+                rep, "lag_bytes",
+                (double)(primary_size > applied ? primary_size - applied : 0));
+        }
+    } else if (db->repl_source) {
+        cJSON *rep = cJSON_AddObjectToObject(o, "replication");
+        if (rep) {
+            cJSON_AddStringToObject(rep, "role", "primary");
+            cJSON_AddNumberToObject(
+                rep, "replicas",
+                (double)replication_source_replica_count(db->repl_source));
+            cJSON_AddNumberToObject(
+                rep, "log_generation",
+                (double)atomic_load_explicit(&db->log_generation,
+                                             memory_order_relaxed));
+        }
+    }
     return o;
 }
 
@@ -1708,6 +1739,12 @@ static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
     if (is_write_op(op) && !ctx.can_write) {
         LOG_WARN("dispatch: read-only token attempted \"%s\"", op);
         return json_error_status(AEGIS_ERR_FORBIDDEN);
+    }
+    /* A read-only replica serves reads from its followed copy but never accepts
+     * writes — direct those at the primary. */
+    if (db->config.read_only && is_write_op(op)) {
+        LOG_DEBUG("dispatch: write \"%s\" refused on read-only replica", op);
+        return json_error_status(AEGIS_ERR_READ_ONLY);
     }
 
     /* Per-tenant rate limit: bound a single namespace's request rate so one

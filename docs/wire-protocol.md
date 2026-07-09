@@ -106,6 +106,7 @@ dependency-free C binary); terminate it at the edge.
 | `FORBIDDEN` | 403 | Authenticated, but the token's scope/namespace disallows the operation |
 | `QUOTA_EXCEEDED` | 507 | Write would push the tenant over its `--tenant-max-records`/`--tenant-max-bytes` cap |
 | `RATE_LIMITED` | 429 | Tenant exceeded its `--tenant-rate-qps` request rate |
+| `READ_ONLY` | 405 | Write attempted on a read-only replica (`--replicate-from`/`--read-only`); write to the primary |
 | `INTERNAL` | 500 | Unexpected server error |
 
 ---
@@ -542,6 +543,13 @@ against the caps, for capacity planning:
 "tenant_limits": { "max_records": 100000, "max_bytes": 0, "rate_qps": 50 },
 "tenants": [ { "namespace": "acme", "records": 1042, "bytes": 2310544 } ]
 ```
+
+When the node participates in replication, `stats` also carries a `replication`
+object. On a **primary**: `{ "role":"primary", "replicas":N, "log_generation":G }`.
+On a **replica**: `{ "role":"replica", "connected":bool, "applied_offset":N,
+"primary_offset":N, "lag_bytes":N }` — the byte lag behind the primary. A replica
+answers reads (`get`/`search`/`traverse`/`count`) but returns `READ_ONLY` to
+writes; see [read-replica-design.md](read-replica-design.md).
 
 `stats` is admin-only (a namespaced token gets `FORBIDDEN`), so metrics are
 server-wide. AegisDB has no HTTP endpoint by design — a sidecar can poll `stats`

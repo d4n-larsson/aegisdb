@@ -11,6 +11,7 @@
 #include "aegisdb/db.h"
 #include "aegisdb/health.h"
 #include "aegisdb/logging.h"
+#include "aegisdb/replication.h"
 #include "aegisdb/restore.h"
 #include "aegisdb/sha256.h"
 #include "aegisdb/tcp_server.h"
@@ -119,9 +120,37 @@ int main(int argc, char **argv) {
                      "will only be flushed on shutdown");
     }
 
+    /* Replication (Phase 1 read replicas). Primary: serve the log stream if a
+     * port + token are configured. Replica: follow the primary. Both are
+     * independent of the client server below. */
+    if (cfg.replication_port > 0) {
+        if (cfg.replication_token[0] == '\0') {
+            LOG_ERROR("--replication-port requires --replication-token");
+            compaction_stop(maint);
+            db_close(&db);
+            config_free(&cfg);
+            return 1;
+        }
+        db.repl_source = replication_source_start(&db, cfg.replication_port,
+                                                  cfg.replication_token);
+        if (!db.repl_source)
+            LOG_WARN("replication: source failed to start; no replicas can follow");
+    }
+    if (cfg.replicate_from_host[0] != '\0') {
+        db.repl_follower = replication_follower_start(
+            &db, cfg.replicate_from_host, cfg.replicate_from_port,
+            cfg.replication_token);
+        if (!db.repl_follower)
+            LOG_WARN("replication: follower failed to start; replica will not sync");
+        LOG_INFO("read-only replica of %s:%d", cfg.replicate_from_host,
+                 cfg.replicate_from_port);
+    }
+
     int rv = tcp_server_run(&db);
 
     LOG_INFO("stopping");
+    replication_follower_stop(db.repl_follower);
+    replication_source_stop(db.repl_source);
     compaction_stop(maint);
     db_close(&db);
     config_free(&cfg); /* db.config shares this token array (shallow copy) */
