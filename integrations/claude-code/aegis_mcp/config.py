@@ -31,6 +31,11 @@ class Config:
     recall_time_budget_ms: int = 800
     recall_top_k: int = 5
     recall_min_score: float = 0.2
+    # Token-cost guard rails for the injected context block. A few long memories
+    # can otherwise dominate a turn; cap each memory's rendered text and the
+    # block's total size (both measured in characters; 0 = unlimited).
+    recall_max_chars_per_memory: int = 500
+    recall_char_budget: int = 2000
 
     capture_enabled: bool = True
     capture_scope: str = "session"  # "session" | "turn"
@@ -52,6 +57,8 @@ _ENV = {
     "recall_time_budget_ms": "AEGIS_RECALL_TIME_BUDGET_MS",
     "recall_top_k": "AEGIS_RECALL_TOP_K",
     "recall_min_score": "AEGIS_RECALL_MIN_SCORE",
+    "recall_max_chars_per_memory": "AEGIS_RECALL_MAX_CHARS_PER_MEMORY",
+    "recall_char_budget": "AEGIS_RECALL_CHAR_BUDGET",
     "capture_enabled": "AEGIS_CAPTURE_ENABLED",
     "capture_scope": "AEGIS_CAPTURE_SCOPE",
     "capture_min_salience": "AEGIS_CAPTURE_MIN_SALIENCE",
@@ -61,6 +68,7 @@ _BOOL = {"recall_enabled", "capture_enabled"}
 _INT = {
     "aegis_port", "connect_timeout_ms", "read_timeout_ms",
     "embedding_dimensions", "recall_time_budget_ms", "recall_top_k",
+    "recall_max_chars_per_memory", "recall_char_budget",
 }
 _FLOAT = {"recall_min_score", "capture_min_salience"}
 
