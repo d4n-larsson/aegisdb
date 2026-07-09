@@ -6,9 +6,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "aegisdb/logging.h"
+#include "aegisdb/sha256.h"
 
 /* Default count of poll() event-loop (I/O) threads. Connections are sharded
  * across these threads and a connection's request is dispatched inline, so this
@@ -475,6 +477,8 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
                         val);
                 return -1;
             }
+            snprintf(cfg->auth_token_file, sizeof(cfg->auth_token_file), "%s",
+                     val); /* retained so token-admin ops can persist */
         } else if (strcmp(a, "--log-level") == 0) {
             NEXT("--log-level");
             AegisLogLevel lvl;
@@ -504,4 +508,80 @@ void config_free(Config *cfg) {
     free(cfg->auth_tokens);
     cfg->auth_tokens = NULL;
     cfg->auth_token_count = 0;
+}
+
+/* ----- runtime token administration ------------------------------------- */
+
+int config_add_token(Config *cfg, const char *tok, const char *ns, int scope) {
+    return append_token(cfg, tok, ns, scope);
+}
+
+/* SHA-256 of a token: its stored digest if hashed, else computed from plaintext. */
+static void token_digest(const AuthToken *t, uint8_t out[32]) {
+    if (t->hashed)
+        memcpy(out, t->hash, 32);
+    else
+        sha256((const uint8_t *)t->token, strlen(t->token), out);
+}
+
+static void hex_encode(const uint8_t *in, size_t n, char *out) {
+    static const char hx[] = "0123456789abcdef";
+    for (size_t i = 0; i < n; i++) {
+        out[2 * i] = hx[in[i] >> 4];
+        out[2 * i + 1] = hx[in[i] & 0xf];
+    }
+    out[2 * n] = '\0';
+}
+
+void config_token_fingerprint(const AuthToken *t, char out[13]) {
+    uint8_t d[32];
+    token_digest(t, d);
+    hex_encode(d, 6, out); /* first 6 bytes -> 12 hex chars */
+}
+
+int config_remove_token(Config *cfg, const char *id12) {
+    for (size_t i = 0; i < cfg->auth_token_count; i++) {
+        char fp[13];
+        config_token_fingerprint(&cfg->auth_tokens[i], fp);
+        if (strcmp(fp, id12) == 0) {
+            free(cfg->auth_tokens[i].token);
+            free(cfg->auth_tokens[i].namespace);
+            memmove(&cfg->auth_tokens[i], &cfg->auth_tokens[i + 1],
+                    (cfg->auth_token_count - i - 1) * sizeof(AuthToken));
+            cfg->auth_token_count--;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static const char *scope_name(int scope) {
+    return scope == AEGIS_SCOPE_RO ? "ro" : scope == AEGIS_SCOPE_ADMIN ? "admin"
+                                                                       : "rw";
+}
+
+int config_write_token_file(const Config *cfg, const char *path) {
+    char tmp[1100];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) return -1;
+    int ok = 1;
+    for (size_t i = 0; i < cfg->auth_token_count && ok; i++) {
+        const AuthToken *t = &cfg->auth_tokens[i];
+        uint8_t d[32];
+        char hex[65];
+        token_digest(t, d);
+        hex_encode(d, 32, hex);
+        int n = t->namespace
+                    ? fprintf(f, "sha256$%s %s %s\n", hex, t->namespace,
+                              scope_name(t->scope))
+                    : fprintf(f, "sha256$%s\n", hex); /* global admin */
+        if (n < 0) ok = 0;
+    }
+    if (fflush(f) != 0) ok = 0;
+    if (fclose(f) != 0) ok = 0;
+    if (ok) chmod(tmp, 0600); /* secrets: owner-only */
+    if (ok && rename(tmp, path) != 0) ok = 0;
+    if (!ok) unlink(tmp);
+    return ok ? 0 : -1;
 }

@@ -212,6 +212,13 @@ automatically) and only read its own records — another tenant's records read
 back as `NOT_FOUND`. Read-only tokens are refused writes with `FORBIDDEN`, and
 `stats` is admin-only. This lets one server back many isolated tenants/agents.
 
+Tokens can also be managed **at runtime** (no restart) by an admin token via the
+`token_list` / `token_add` / `token_revoke` operations — a revoked token stops
+authenticating immediately, and changes persist back to `--auth-token-file`
+(rewritten hashed). Tokens are referenced by a fingerprint id, so they can be
+listed and revoked without exposing the secret. See
+[`docs/wire-protocol.md`](docs/wire-protocol.md).
+
 Tokens can be **stored hashed** so a leaked token file reveals nothing usable.
 Run `aegisdb --hash-token <tok>` to get its `sha256$<hex>` form and put that in
 the token file; clients still send the plaintext token, which the server hashes
@@ -248,7 +255,7 @@ echo '{"operation":"search","tags":["user"],"match":"all","top_k":10}' | nc -q1 
 Supported operations: `ping`, `insert` (episodic/semantic/working, single or
 batch), `get`, `update` (semantic), `delete` (by id or query), `search`
 (time/tags/embedding), `count`, `consolidate`, `promote`, `relate`, `traverse`,
-`stats`, and `snapshot`.
+`stats`, `snapshot`, and token administration (`token_list`/`token_add`/`token_revoke`).
 
 ### Python client example
 

@@ -795,6 +795,65 @@ def test_replication(binary, port):
                   "primary stats report a connected replica")
 
 
+def test_token_admin(binary, port):
+    print("[runtime token administration]")
+    tokfile = None  # Server writes it under its datadir
+    with Server(binary, port, token_lines=["adm-key"]) as srv:  # one global admin
+        admin = {"token": "adm-key"}
+
+        # list: the admin token is present, exposed by fingerprint (no secret)
+        r = srv.req({"operation": "token_list", **admin})
+        check(r.get("ok") is True and len(r.get("tokens", [])) == 1,
+              "token_list shows the configured admin token")
+        check("id" in r["tokens"][0] and r["tokens"][0]["scope"] == "admin",
+              "listed token has a fingerprint id + scope, no secret")
+
+        # non-admin / no token cannot administer
+        r = srv.req({"operation": "token_list"})
+        check(r.get("ok") is False and r["error"]["code"] == "UNAUTHORIZED",
+              "token_list without a token -> UNAUTHORIZED")
+
+        # add a namespaced rw token (server mints the secret)
+        r = srv.req({"operation": "token_add", "namespace": "acme",
+                     "scope": "rw", **admin})
+        check(r.get("ok") is True and r.get("token") and r.get("id"),
+              "token_add mints a secret + returns its id")
+        acme_tok = r["token"]
+        acme_id = r["id"]
+
+        # the new token works, scoped to its namespace
+        r = srv.req({"operation": "insert", "type": "episodic", "data": "hi",
+                     "token": acme_tok})
+        check(r.get("ok") is True, "minted token can write in its namespace")
+        rid = r["record"]["id"]
+
+        # a namespaced token cannot administer tokens
+        r = srv.req({"operation": "token_add", "namespace": "x", "scope": "rw",
+                     "token": acme_tok})
+        check(r.get("ok") is False and r["error"]["code"] == "FORBIDDEN",
+              "namespaced token cannot add tokens -> FORBIDDEN")
+
+        # revoke it -> it stops authenticating immediately (no restart)
+        r = srv.req({"operation": "token_revoke", "id": acme_id, **admin})
+        check(r.get("ok") is True and r.get("revoked") is True,
+              "token_revoke removes the token")
+        r = srv.req({"operation": "get", "id": rid, "token": acme_tok})
+        check(r.get("ok") is False and r["error"]["code"] == "UNAUTHORIZED",
+              "revoked token no longer authenticates")
+
+        # revoking an unknown id -> NOT_FOUND
+        r = srv.req({"operation": "token_revoke", "id": "deadbeef0000", **admin})
+        check(r.get("ok") is False and r["error"]["code"] == "NOT_FOUND",
+              "revoking an unknown id -> NOT_FOUND")
+
+        # changes persisted to the token file (admin + none for acme now)
+        tokfile = os.path.join(srv.datadir, "tokens")
+        with open(tokfile) as fh:
+            body = fh.read()
+        check("acme" not in body, "revoked token removed from the token file")
+        check(body.count("sha256$") == 1, "token file rewritten (hashed) with 1 token")
+
+
 def test_tenant_quota(binary, port):
     print("[per-tenant storage quota]")
     tokens = ["adm", "acme-key acme rw", "beta-key beta rw"]
@@ -971,6 +1030,7 @@ def main():
     test_include_embeddings(binary, 19487)
     test_tenant_quota(binary, 19488)
     test_tenant_rate_limit(binary, 19489)
+    test_token_admin(binary, 19490)
     test_replication(binary, 19520)  # uses port, +1 (repl stream), +2 (replica)
     test_snapshot(binary, 19483)
     test_snapshot_admin_only(binary, 19485)
