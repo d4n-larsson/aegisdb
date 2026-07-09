@@ -240,5 +240,7 @@ enabled. TLS is deliberately kept out of the binary — see Non-goals.
 ## Non-goals
 
 - No SQL, no relational joins — retrieval is by id, time, tag, vector, and graph.
-- No built-in replication or sharding; AegisDB is a single-node server.
+- No built-in replication or sharding; AegisDB is a single-node server. (A
+  proposed async read-replica that follows the log is sketched in
+  [read-replica-design.md](read-replica-design.md) — not implemented.)
 - No transport-level encryption; that is delegated to the surrounding channel.
