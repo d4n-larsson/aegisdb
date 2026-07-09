@@ -259,7 +259,8 @@ static char *get_lenstr(Cur *c, int *was_null) {
     uint32_t n = get_u32(c);
     if (was_null) *was_null = 0;
     if (n == NULL_LEN) { if (was_null) *was_null = 1; return NULL; }
-    if (c->err || c->off + n > c->len) { c->err = 1; return NULL; }
+    /* subtraction-form (off <= len invariant): cannot overflow, unlike off + n */
+    if (c->err || n > c->len - c->off) { c->err = 1; return NULL; }
     char *s = malloc((size_t)n + 1);
     if (!s) { c->err = 1; return NULL; }
     memcpy(s, c->p + c->off, n);
@@ -305,12 +306,22 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
     uint32_t dim = get_u32(&c);
     if (c.err) goto fail;
     if (ver == 1 && dim == 0) vec_count = 0; /* v1 with no embedding */
-    size_t total = (size_t)vec_count * dim;
-    if (total) {
-        if (c.off + total * 4 > c.len) goto fail;
+    if (dim && vec_count) {
+        /* `vec_count`/`dim` are attacker-controlled on the decode path (a
+         * replicated frame, or a tampered/corrupt log). Bound the float count
+         * against the payload BEFORE any multiply: computing total*4 first would
+         * overflow size_t (e.g. vec_count=dim=2^31 -> total*4 wraps to 0),
+         * defeating the check and undersizing the malloc -> heap overflow.
+         * Division-form checks cannot overflow (c.off <= c.len invariant). */
+        size_t avail_floats = (c.len - c.off) / 4;
+        if (vec_count > avail_floats / dim) goto fail; /* total > payload */
+        size_t total = (size_t)vec_count * dim;        /* <= avail_floats now */
         out->embedding = malloc(total * sizeof(float));
         if (!out->embedding) goto fail;
-        for (size_t i = 0; i < total; i++) out->embedding[i] = get_f32(&c);
+        for (size_t i = 0; i < total; i++) {
+            out->embedding[i] = get_f32(&c);
+            if (c.err) goto fail; /* every read is in-bounds; guard anyway */
+        }
         out->embedding_dim = dim;
         out->vec_count = vec_count;
     }
@@ -328,7 +339,7 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
     }
 
     uint32_t dl = get_u32(&c);
-    if (c.err || c.off + dl > c.len) goto fail;
+    if (c.err || dl > c.len - c.off) goto fail; /* subtraction-form: no overflow */
     if (dl) {
         out->data = malloc(dl);
         if (!out->data) goto fail;
