@@ -22,6 +22,7 @@
 
 #include "aegisdb/log.h"
 #include "aegisdb/logging.h"
+#include "aegisdb/sha256.h"
 #include "cJSON.h"
 
 #define REPL_MAGIC 0xA6E515EDu
@@ -47,6 +48,13 @@ static uint64_t get_u64(const uint8_t *p) {
     uint64_t v = 0;
     for (int i = 0; i < 8; i++) v |= (uint64_t)p[i] << (8 * i);
     return v;
+}
+
+/* Constant-time fixed-length byte compare (no early exit) — for secrets. */
+static int ct_eq_bytes(const uint8_t *a, const uint8_t *b, size_t n) {
+    unsigned char diff = 0;
+    for (size_t i = 0; i < n; i++) diff |= (unsigned char)(a[i] ^ b[i]);
+    return diff == 0;
 }
 
 static int write_all(int fd, const void *buf, size_t len) {
@@ -98,7 +106,7 @@ static void set_timeouts(int fd, int secs) {
 struct ReplicationSource {
     AegisDB *db;
     int listen_fd;
-    char token[128];
+    uint8_t token_hash[SHA256_DIGEST_LEN]; /* sha256 of the subscribe token */
     pthread_t acceptor;
     atomic_int stop;
     atomic_int replicas;
@@ -175,7 +183,13 @@ static void *streamer(void *arg) {
     uint64_t from_off = cJSON_IsNumber(joff) ? (uint64_t)joff->valuedouble : 0;
     uint64_t req_gen = cJSON_IsNumber(jgen) ? (uint64_t)jgen->valuedouble : 0;
 
-    if (strcmp(tok, s->token) != 0) {
+    /* Constant-time compare of the token's SHA-256 (not the raw bytes): avoids
+     * both the byte-by-byte short-circuit of strcmp and leaking the token's
+     * length via iteration count. A timing oracle here would otherwise let a
+     * network peer recover the token and stream the entire multi-tenant log. */
+    uint8_t th[SHA256_DIGEST_LEN];
+    sha256(tok, strlen(tok), th);
+    if (!ct_eq_bytes(th, s->token_hash, SHA256_DIGEST_LEN)) {
         (void)write_all(fd, "{\"ok\":false}\n", 13);
         cJSON_Delete(req);
         LOG_WARN("replication: subscriber rejected (bad token)");
@@ -281,7 +295,7 @@ ReplicationSource *replication_source_start(AegisDB *db, int port,
     ReplicationSource *s = calloc(1, sizeof *s);
     if (!s) return NULL;
     s->db = db;
-    snprintf(s->token, sizeof s->token, "%s", token ? token : "");
+    sha256(token ? token : "", token ? strlen(token) : 0, s->token_hash);
     pthread_mutex_init(&s->lock, NULL);
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
