@@ -10,6 +10,7 @@
 #include "aegisdb/log.h"
 #include "aegisdb/semantic_index.h"
 #include "aegisdb/tag_index.h"
+#include "aegisdb/tenant.h"
 #include "aegisdb/time_index.h"
 #include "aegisdb/working_buffer.h"
 
@@ -41,6 +42,7 @@ typedef struct {
     TagIndex *tags;      /* tag -> ids (Phase 2) */
     SemanticIndex *sem;  /* embedding ANN (Phase 3) */
     WorkingStore *working; /* volatile sessions (Phase 4) */
+    TenantTable *tenants;  /* per-namespace usage + rate limiting (multi-tenant) */
 
     uint64_t started_ms;     /* server start time (epoch ms) for uptime stats */
     Metrics metrics;         /* operational counters (see stats op) */

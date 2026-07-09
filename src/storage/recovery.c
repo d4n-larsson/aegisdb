@@ -129,6 +129,12 @@ long recovery_run(AegisDB *db) {
             time_index_add(db->time, r.created, r.id);
             for (size_t k = 0; k < r.tag_count; k++)
                 tag_index_add(db->tags, r.tags[k], r.id);
+            /* Seed per-tenant usage from the surviving live set so quotas are
+             * accurate immediately after a restart (matches append_and_hash's
+             * accounting unit: +1 record, +frame-payload bytes). Only under
+             * auth, where namespaces exist. */
+            if (db->config.auth_token_count > 0 && r.agent_id)
+                tenant_usage_adjust(db->tenants, r.agent_id, 1, (long)blen);
             if (r.embedding_dim == db->config.embedding_dimensions &&
                 r.embedding && r.vec_count &&
                 (!sem_loaded || e->offset >= sem_covered))
