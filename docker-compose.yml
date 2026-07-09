@@ -1,30 +1,68 @@
+# AegisDB service.
+#
+# Configuration is driven by an optional .env file (copy .env.example -> .env).
+# Every value has a sane default, so `docker compose up` works with no .env.
+# The service is configured by CLI flags; this file interpolates the .env values
+# into them. Anything not exposed as a named var below can be passed verbatim via
+# AEGIS_EXTRA_ARGS (e.g. auth, --io-threads, ANN tuning).
 services:
   aegisdb:
     build: .
     image: aegisdb:latest
     container_name: aegisdb
     ports:
-      - "9470:9470"
+      # host:container — both track AEGIS_PORT; set AEGIS_HOST_PORT to publish on
+      # a different host port.
+      - "${AEGIS_HOST_PORT:-9470}:${AEGIS_PORT:-9470}"
     volumes:
       # Named volume keeps memory durable across container restarts.
       - aegis-data:/data
+      # To enable auth, drop a token file beside the data and add
+      # `--auth-token-file /data/tokens.txt` to AEGIS_EXTRA_ARGS:
+      # - ./tokens.txt:/data/tokens.txt:ro
     restart: unless-stopped
-    # Override the default flags here. The wire protocol carries no encryption
-    # and tokens travel in plaintext, so enable auth only behind a trusted
-    # network / TLS-terminating proxy.
-    command:
-      - "--data-dir"
-      - "/data"
-      - "--port"
-      - "9470"
-      - "--log-level"
-      - "debug"
-      # Pin the vector length to match the Claude Code MCP integration
-      # (AEGIS_EMBEDDING_MODE=local, all-MiniLM-L6-v2 => 384). Keep these in sync.
-      - "--embedding-dim"
-      - "384"
-      # - "--auth-token-file"
-      # - "/data/tokens.txt"
+    # Give the server time to flush the log and write its checkpoint on SIGTERM
+    # (docker compose stop/down) before it is force-killed.
+    stop_grace_period: ${AEGIS_STOP_GRACE:-30s}
+    # The wire protocol carries no encryption and tokens travel in plaintext, so
+    # enable auth (via AEGIS_EXTRA_ARGS) only behind a trusted network or a
+    # TLS-terminating proxy. Keep --embedding-dim in sync with every client (the
+    # Claude Code MCP integration defaults to 384).
+    command: >
+      --data-dir /data
+      --port ${AEGIS_PORT:-9470}
+      --embedding-dim ${AEGIS_EMBEDDING_DIM:-384}
+      --phase ${AEGIS_PHASE:-4}
+      --log-level ${AEGIS_LOG_LEVEL:-info}
+      --durability ${AEGIS_DURABILITY:-interval}
+      --checkpoint-sec ${AEGIS_CHECKPOINT_SEC:-60}
+      --compact-sec ${AEGIS_COMPACT_SEC:-300}
+      --tenant-max-records ${AEGIS_TENANT_MAX_RECORDS:-0}
+      --tenant-max-bytes ${AEGIS_TENANT_MAX_BYTES:-0}
+      --tenant-rate-qps ${AEGIS_TENANT_RATE_QPS:-0}
+      ${AEGIS_EXTRA_ARGS:-}
+    # Liveness via the binary's built-in probe; tracks AEGIS_PORT so it stays
+    # correct when the port is overridden (the Dockerfile default hardcodes 9470).
+    healthcheck:
+      test: ["CMD", "aegisdb", "--health-check", "--port", "${AEGIS_PORT:-9470}"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    # Bound container log growth (the server logs to stderr).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Resource limits are intentionally unset: AegisDB holds its indexes in RAM,
+    # so memory scales with the dataset and a too-low cap will OOM-kill live
+    # memories. Set them deliberately for your data size, e.g.:
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: ${AEGIS_MEM_LIMIT:-1g}
+    #       cpus: "${AEGIS_CPUS:-2}"
 
 volumes:
   aegis-data:
