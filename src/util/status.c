@@ -16,6 +16,7 @@ const char *aegis_status_code(aegis_status_t s) {
         case AEGIS_ERR_FORBIDDEN: return "FORBIDDEN";
         case AEGIS_ERR_QUOTA_EXCEEDED: return "QUOTA_EXCEEDED";
         case AEGIS_ERR_RATE_LIMITED: return "RATE_LIMITED";
+        case AEGIS_ERR_READ_ONLY: return "READ_ONLY";
         case AEGIS_ERR_INTERNAL:
         default: return "INTERNAL";
     }
@@ -33,6 +34,7 @@ const char *aegis_status_message(aegis_status_t s) {
         case AEGIS_ERR_FORBIDDEN: return "not permitted for this token";
         case AEGIS_ERR_QUOTA_EXCEEDED: return "tenant storage quota exceeded";
         case AEGIS_ERR_RATE_LIMITED: return "tenant request rate limit exceeded";
+        case AEGIS_ERR_READ_ONLY: return "server is a read-only replica; write to the primary";
         case AEGIS_ERR_INTERNAL:
         default: return "internal server error";
     }

@@ -35,6 +35,11 @@ void config_defaults(Config *cfg) {
     cfg->tenant_max_records = 0; /* 0 -> unlimited */
     cfg->tenant_max_bytes = 0;   /* 0 -> unlimited */
     cfg->tenant_rate_qps = 0;    /* 0 -> unlimited */
+    cfg->replication_port = 0;   /* 0 -> replication source disabled */
+    cfg->replication_token[0] = '\0';
+    cfg->replicate_from_host[0] = '\0'; /* empty -> not a replica */
+    cfg->replicate_from_port = 0;
+    cfg->read_only = 0;
     cfg->working_capacity = 256;
     cfg->default_ttl_ms = 3600000; /* 1 hour */
     cfg->fsync_batch_size = 1000;
@@ -240,6 +245,13 @@ static void usage(const char *prog) {
             "  --tenant-max-bytes <n>   per-namespace live-byte cap; 0 = unlimited\n"
             "  --tenant-rate-qps <n>    per-namespace request rate limit (req/s,\n"
             "                           burst = 1s); 0 = unlimited\n"
+            "  --replication-port <n>   serve the read-replica log stream on this\n"
+            "                           port (requires --replication-token)\n"
+            "  --replication-token <t>  token required to subscribe / sent when\n"
+            "                           following a primary\n"
+            "  --replicate-from <h:p>   follow this primary's replication port as a\n"
+            "                           read-only replica (implies --read-only)\n"
+            "  --read-only              refuse client writes (READ_ONLY)\n"
             "  --durability <mode>      sync|batch|interval (default interval)\n"
             "  --fsync-batch <n>        records between fsync in batch mode\n"
             "                           (default 1000)\n"
@@ -348,6 +360,38 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
                 fprintf(stderr, "%s: invalid ann-shard-target '%s'\n", prog, val);
                 return -1;
             }
+        } else if (strcmp(a, "--replication-port") == 0) {
+            NEXT("--replication-port");
+            if (parse_int(val, &cfg->replication_port) ||
+                cfg->replication_port < 0 || cfg->replication_port > 65535) {
+                fprintf(stderr, "%s: invalid replication-port '%s'\n", prog, val);
+                return -1;
+            }
+        } else if (strcmp(a, "--replication-token") == 0) {
+            NEXT("--replication-token");
+            snprintf(cfg->replication_token, sizeof(cfg->replication_token),
+                     "%s", val);
+        } else if (strcmp(a, "--replicate-from") == 0) {
+            NEXT("--replicate-from");
+            /* host:port */
+            const char *colon = strrchr(val, ':');
+            if (!colon || colon == val) {
+                fprintf(stderr, "%s: --replicate-from wants host:port, got '%s'\n",
+                        prog, val);
+                return -1;
+            }
+            size_t hlen = (size_t)(colon - val);
+            if (hlen >= sizeof(cfg->replicate_from_host)) hlen = sizeof(cfg->replicate_from_host) - 1;
+            memcpy(cfg->replicate_from_host, val, hlen);
+            cfg->replicate_from_host[hlen] = '\0';
+            if (parse_int(colon + 1, &cfg->replicate_from_port) ||
+                cfg->replicate_from_port <= 0 || cfg->replicate_from_port > 65535) {
+                fprintf(stderr, "%s: invalid port in --replicate-from '%s'\n", prog, val);
+                return -1;
+            }
+            cfg->read_only = 1; /* a replica never accepts client writes */
+        } else if (strcmp(a, "--read-only") == 0) {
+            cfg->read_only = 1;
         } else if (strcmp(a, "--ann-quantize") == 0) {
             cfg->ann_quantize = 1; /* boolean flag: int8 HNSW vectors */
         } else if (strcmp(a, "--tenant-max-records") == 0) {

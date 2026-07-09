@@ -186,6 +186,9 @@ int compaction_run_once(AegisDB *db) {
                        locs[i].type, locs[i].deleted, locs[i].expires_at);
     hash_index_free(db->hash);
     db->hash = nh;
+    /* Every log offset changed, so any following replica's byte cursor is now
+     * invalid; bump the generation so replicas detect it and re-bootstrap. */
+    atomic_fetch_add_explicit(&db->log_generation, 1, memory_order_relaxed);
     pthread_rwlock_unlock(&db->log_lock);
     free(locs);
 
@@ -255,7 +258,13 @@ static void *maint_loop(void *arg) {
          * threshold (checked every tick; the build itself is snapshot/build/
          * install so it never holds the index lock for the whole build). */
         db_semantic_build_step(c->db);
-        if (c->sweep_sec && (elapsed % c->sweep_sec) == 0) {
+        /* On a read-only replica the follower is the sole writer — it applies
+         * the primary's stream verbatim (including the primary's own expiry
+         * tombstones). Locally sweeping or compacting here would append/rewrite
+         * frames the primary never sent and desync the byte-identical log, so
+         * skip both; the derived work above (fsync, semantic build) is fine. */
+        if (!c->db->config.read_only && c->sweep_sec &&
+            (elapsed % c->sweep_sec) == 0) {
             uint64_t now = db_now_ms();
             size_t swept = working_store_sweep(c->db->working, now);
             if (swept)
@@ -277,8 +286,8 @@ static void *maint_loop(void *arg) {
             else
                 LOG_WARN("checkpoint: failed to persist index");
         }
-        if (c->compact_sec && (elapsed % c->compact_sec) == 0 &&
-            compaction_worthwhile(c->db))
+        if (!c->db->config.read_only && c->compact_sec &&
+            (elapsed % c->compact_sec) == 0 && compaction_worthwhile(c->db))
             compaction_run_once(c->db);
     }
     return NULL;

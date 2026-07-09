@@ -727,6 +727,74 @@ def test_include_embeddings(binary, port):
               "include_embeddings=true includes the embedding")
 
 
+def test_replication(binary, port):
+    print("[read replica: log shipping]")
+    repl_port = port + 1      # primary's replication stream port
+    replica_port = port + 2   # the replica's own client port
+    tok = "repl-secret"
+    with Server(binary, port, extra_args=[
+            "--replication-port", str(repl_port),
+            "--replication-token", tok]) as primary:
+        with Server(binary, replica_port, extra_args=[
+                "--replicate-from", f"127.0.0.1:{repl_port}",
+                "--replication-token", tok]) as replica:
+
+            def wait_replica(payload, want, tries=60):
+                # poll the replica until it converges (async replication)
+                for _ in range(tries):
+                    r = replica.req(payload)
+                    if want(r):
+                        return r
+                    time.sleep(0.1)
+                return r
+
+            # write on the primary -> appears on the replica
+            r = primary.req({"operation": "insert", "type": "semantic",
+                             "tags": ["repl"], "data": "hello-replica"})
+            check(r.get("ok") is True, "primary insert ok")
+            rid = r["record"]["id"]
+            r = wait_replica({"operation": "get", "id": rid},
+                             lambda x: x.get("ok") is True)
+            check(r.get("ok") is True and r["record"]["data"] == "hello-replica",
+                  "record replicated to the replica")
+
+            # tag search works on the replica (secondary indexes are maintained)
+            r = replica.req({"operation": "search", "tags": ["repl"]})
+            check(any(x["id"] == rid for x in r.get("records", [])),
+                  "tag search on replica finds the record")
+
+            # the replica refuses writes
+            r = replica.req({"operation": "insert", "type": "episodic",
+                             "data": "nope"})
+            check(r.get("ok") is False and r["error"]["code"] == "READ_ONLY",
+                  "write to replica -> READ_ONLY")
+
+            # update on the primary re-indexes on the replica (old tag drops)
+            primary.req({"operation": "update", "id": rid, "data": "v2",
+                         "tags": ["repl2"]})
+            r = wait_replica({"operation": "get", "id": rid},
+                             lambda x: x.get("record", {}).get("data") == "v2")
+            check(r.get("record", {}).get("data") == "v2", "update replicated")
+            r = replica.req({"operation": "search", "tags": ["repl"]})
+            check(not r.get("records"), "old tag dropped on replica after update")
+
+            # delete on the primary propagates
+            primary.req({"operation": "delete", "id": rid})
+            r = wait_replica({"operation": "get", "id": rid},
+                             lambda x: x.get("ok") is False)
+            check(r.get("ok") is False and r["error"]["code"] == "NOT_FOUND",
+                  "delete replicated -> NOT_FOUND on replica")
+
+            # stats expose the replication posture
+            st = replica.req({"operation": "stats"})
+            check(st.get("replication", {}).get("role") == "replica",
+                  "replica stats report role=replica")
+            st = primary.req({"operation": "stats"})
+            check(st.get("replication", {}).get("role") == "primary" and
+                  st["replication"]["replicas"] >= 1,
+                  "primary stats report a connected replica")
+
+
 def test_tenant_quota(binary, port):
     print("[per-tenant storage quota]")
     tokens = ["adm", "acme-key acme rw", "beta-key beta rw"]
@@ -903,6 +971,7 @@ def main():
     test_include_embeddings(binary, 19487)
     test_tenant_quota(binary, 19488)
     test_tenant_rate_limit(binary, 19489)
+    test_replication(binary, 19520)  # uses port, +1 (repl stream), +2 (replica)
     test_snapshot(binary, 19483)
     test_snapshot_admin_only(binary, 19485)
     test_restore(binary, 19486)

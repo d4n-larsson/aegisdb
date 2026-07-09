@@ -1,14 +1,30 @@
 # Design: Log-Shipping Read Replicas
 
-**Status:** Proposed (design only — not implemented)
+**Status:** Phase 1 implemented — `--replication-port` / `--replication-token`
+(primary), `--replicate-from` / `--read-only` (replica); source + follower in
+`src/server/replication.c`, frame apply in `db_replica_apply`.
 **Scope:** Asynchronous, read-only replicas that follow a primary by streaming
 its append-only log, for read availability, read scaling, and a warm standby to
 promote by hand after a primary failure.
 
-This is a proposal, not current behavior. AegisDB is single-node today (see
-[architecture.md](architecture.md) → Non-goals); this document describes how we
-would add replication *without* abandoning that simplicity, and is deliberately
-explicit about what it does and does not guarantee.
+This is the design of record; the sections below describe the intended behavior,
+which the shipped Phase 1 follows with a few deliberate simplifications:
+
+- **Dedicated port + polling source.** The stream is served on a separate
+  `--replication-port` (not multiplexed onto the client port), and each streamer
+  *tails the log by polling* (`log_read` from the cursor, ~50 ms idle poll)
+  rather than being pushed from the write path — simpler, fine for
+  eventually-consistent replicas.
+- **Rebase = full re-bootstrap.** On a compaction (log-generation bump) the
+  replica wipes and re-streams from offset 0 rather than pulling a snapshot base;
+  and since it does not persist the primary's generation across its own restart,
+  it also re-bootstraps after a restart if the primary has ever compacted.
+  Correct, occasionally wasteful; the snapshot-base optimization is a follow-up.
+- **Stats** exposes `role` / `lag_bytes` / connected count (per-replica detail is
+  a follow-up).
+
+Automatic failover stays out of scope (Phase 2). The rest of this document is
+the full design and the promotion runbook.
 
 ## 1. Goals & non-goals
 

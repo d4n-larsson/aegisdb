@@ -177,6 +177,10 @@ token: 9f3c…              # give to the client (AEGIS_TOKEN); not recoverable
 | `--tenant-max-records <n>` | `0` | Per-namespace live-record cap (`0` = unlimited); enforced only when auth is enabled |
 | `--tenant-max-bytes <n>` | `0` | Per-namespace live-byte cap (`0` = unlimited) |
 | `--tenant-rate-qps <n>` | `0` | Per-namespace request rate limit in req/s, burst = 1s (`0` = unlimited) |
+| `--replication-port <n>` | — | Serve the read-replica log stream on this port (primary; requires `--replication-token`) |
+| `--replication-token <t>` | — | Token to subscribe to / follow the replication stream |
+| `--replicate-from <h:p>` | — | Follow this primary's replication port as a read-only replica (implies `--read-only`) |
+| `--read-only` | off | Refuse client writes (`READ_ONLY`) |
 | `--working-capacity <n>` | `256` | Working-memory ring buffer size |
 | `--restore <dir>` | — | One-shot: install the snapshot at `<dir>` into an empty `--data-dir`, then exit |
 | `--log-level <level>` | `info` | `error`, `warn`, `info`, or `debug` (also `$AEGISDB_LOG_LEVEL`) |
@@ -332,9 +336,35 @@ cloud SDK is baked into the image — the same "bring your own edge" stance as T
 
 > **Do not** scale the server with `deploy: replicas: N` against the shared
 > volume: AegisDB is single-writer (one append-only log, one id allocator), so
-> multiple writers would corrupt the data. Backups (and, if needed, a future
-> log-shipping read replica — see the
-> [design doc](docs/read-replica-design.md)) are the supported resilience path.
+> multiple writers would corrupt the data. Backups and read replicas (below) are
+> the supported resilience path.
+
+## Read replicas
+
+For read availability and read scaling, a **read-only replica** follows a primary
+by streaming its append-only log and replaying it — always the same frames in the
+same order, so the replica's log is byte-identical and offsets line up. Replicas
+are asynchronous (eventually consistent, bounded by lag) and read-only; promotion
+after a primary failure is a manual, operator-fenced step. Full design and the
+promotion runbook: [`docs/read-replica-design.md`](docs/read-replica-design.md).
+
+```bash
+# primary: serve the replication stream (needs a token)
+aegisdb --data-dir ./p --port 9470 \
+        --replication-port 9480 --replication-token "$TOKEN"
+
+# replica: follow the primary, serve read-only on its own port
+aegisdb --data-dir ./r --port 9471 \
+        --replicate-from 127.0.0.1:9480 --replication-token "$TOKEN"
+```
+
+Send writes to the primary and spread reads across either; a write to a replica
+returns `READ_ONLY`. `stats` reports the replication posture (`role`,
+`lag_bytes`, connected replicas). Compaction on the primary rewrites offsets, so
+a replica automatically re-bootstraps when it detects the change. Every node
+must use the same `--embedding-dim`. The stream is authenticated by the token but
+not encrypted — keep it on a trusted network / behind a TLS proxy, like the
+client protocol.
 
 ## Use as Claude Code memory
 
@@ -349,4 +379,4 @@ the step-by-step setup (start AegisDB → register the MCP server → enable the
 - Wire protocol: [`docs/wire-protocol.md`](docs/wire-protocol.md)
 - Quickstart: [`docs/quickstart.md`](docs/quickstart.md)
 - Architecture: [`docs/architecture.md`](docs/architecture.md)
-- Read-replica design (proposed): [`docs/read-replica-design.md`](docs/read-replica-design.md)
+- Read-replica design & promotion runbook: [`docs/read-replica-design.md`](docs/read-replica-design.md)

@@ -14,6 +14,7 @@
 
 #include "aegisdb/fsutil.h"
 #include "aegisdb/logging.h"
+#include "aegisdb/record.h"
 #include "aegisdb/recovery.h"
 
 uint64_t db_now_ms(void) {
@@ -161,6 +162,77 @@ int db_semantic_build_step(AegisDB *db) {
     }
     LOG_INFO("semantic index: HNSW graph installed (%zu vectors)", live);
     return 1;
+}
+
+int db_replica_apply(AegisDB *db, uint64_t offset, const uint8_t *payload,
+                     size_t len) {
+    MemoryRecord r;
+    if (record_decode(payload, len, &r) != 0) return -1;
+
+    /* Diff against the record's prior live version so update/delete drop stale
+     * secondary-index entries before the new version is applied. */
+    const HashEntry *prior = hash_index_get(db->hash, r.id);
+    if (prior && !prior->deleted) {
+        uint8_t *pbuf = NULL;
+        size_t plen = 0;
+        if (log_read(&db->log, prior->offset, &pbuf, &plen) == 0) {
+            MemoryRecord p;
+            if (record_decode(pbuf, plen, &p) == 0) {
+                time_index_remove(db->time, p.created, p.id);
+                for (size_t i = 0; i < p.tag_count; i++)
+                    tag_index_remove(db->tags, p.tags[i], p.id);
+                if (p.embedding_dim && p.vec_count)
+                    semantic_index_remove(db->sem, p.id);
+                record_free(&p);
+            }
+            free(pbuf);
+        }
+    }
+
+    if (hash_index_put(db->hash, r.id, offset, (uint32_t)len, (uint8_t)r.type,
+                       (uint8_t)(r.deleted ? 1 : 0), r.expires_at) != 0) {
+        record_free(&r);
+        return -1;
+    }
+    if (!r.deleted) {
+        time_index_add(db->time, r.created, r.id);
+        for (size_t i = 0; i < r.tag_count; i++)
+            tag_index_add(db->tags, r.tags[i], r.id);
+        if (r.embedding_dim == db->config.embedding_dimensions && r.embedding &&
+            r.vec_count)
+            semantic_index_add(db->sem, r.id, r.embedding, r.vec_count,
+                               r.embedding_dim);
+    }
+
+    pthread_mutex_lock(&db->id_lock);
+    if (r.id + 1 > db->next_id) db->next_id = r.id + 1;
+    pthread_mutex_unlock(&db->id_lock);
+    record_free(&r);
+    return 0;
+}
+
+int db_reset_replica(AegisDB *db) {
+    if (log_truncate(&db->log, 0) != 0) return -1;
+    HashIndex *nh = hash_index_create();
+    TimeIndex *nt = time_index_create();
+    TagIndex *ntag = tag_index_create();
+    if (!nh || !nt || !ntag) {
+        hash_index_free(nh);
+        time_index_free(nt);
+        tag_index_free(ntag);
+        return -1;
+    }
+    hash_index_free(db->hash);
+    db->hash = nh;
+    time_index_free(db->time);
+    db->time = nt;
+    tag_index_free(db->tags);
+    db->tags = ntag;
+    semantic_index_clear(db->sem);
+    pthread_mutex_lock(&db->id_lock);
+    db->next_id = 1;
+    pthread_mutex_unlock(&db->id_lock);
+    return 0;
 }
 
 /* A snapshot name becomes a single path component under snapshots/, so it must

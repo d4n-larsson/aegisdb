@@ -68,6 +68,15 @@ typedef struct {
     unsigned compact_sec;       /* compaction check cadence (runs only when >=25% dead); 0 disables; def 300 */
     int io_threads;             /* poll() event-loop threads (dispatch parallelism, NOT a connection cap); default 2x CPUs (8-64) */
     int enabled_phase;          /* default 4: gate operations above this phase */
+    /* Replication (Phase 1 read replicas). A primary opens a replication source
+     * on `replication_port` when a token is set; a replica sets
+     * `replicate_from_host`/`_port` to follow one. `read_only` refuses client
+     * writes (implied on a replica). See docs/read-replica-design.md. */
+    int replication_port;         /* >0: serve the replication stream on this port */
+    char replication_token[128];  /* required to subscribe / sent when subscribing */
+    char replicate_from_host[256];/* non-empty: this node is a read-only replica */
+    int replicate_from_port;      /* primary's replication port */
+    int read_only;                /* 1: refuse client writes (implied by replicate_from) */
     int run_health_check;       /* 1 if --health-check: probe a server and exit */
     const char *hash_token;     /* --hash-token <tok>: print sha256$<hex> & exit */
     const char *restore_from;   /* --restore <dir>: install a snapshot into --data-dir & exit */
