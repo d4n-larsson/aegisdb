@@ -21,6 +21,11 @@ CLAUDE.md
 # Integrations build/run on their own toolchain
 integrations/
 
+# Compose config — not a build input
+.env
+.env.example
+docker-compose.yml
+
 # Editor / OS cruft
 .vscode/
 .idea/

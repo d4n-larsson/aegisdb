@@ -77,6 +77,19 @@ docker build -t aegisdb .
 docker run -p 9470:9470 -v aegis-data:/data aegisdb
 ```
 
+Compose is configured by an optional `.env` file — copy the template and edit:
+
+```bash
+cp .env.example .env             # then tweak port, durability, tenant limits, …
+docker compose up --build
+```
+
+Every setting has a default, so `.env` is optional. It exposes the common flags
+as named vars (`AEGIS_PORT`, `AEGIS_EMBEDDING_DIM`, `AEGIS_DURABILITY`,
+`AEGIS_TENANT_MAX_RECORDS`, …) plus `AEGIS_EXTRA_ARGS` for anything else
+(`--auth-token-file`, `--io-threads`, ANN tuning, …). See
+[`.env.example`](.env.example) for the full list.
+
 > To skip building, point `docker-compose.yml` at the published image: replace
 > `build: .` with `image: ghcr.io/d4n-larsson/aegisdb:latest`.
 
@@ -86,9 +99,10 @@ probe (no extra tooling in the image), so `docker ps` and Compose
 
 The container runs as an unprivileged user and listens on `0.0.0.0:9470`.
 Override the default flags by appending them to the run command, e.g.
-`docker run aegisdb --embedding-dim 1024`, or by editing the `command:` block in
-`docker-compose.yml`. To enable authentication, mount a token file into `/data`
-and pass `--auth-token-file` (see [Authentication](#authentication)); the wire
+`docker run aegisdb --embedding-dim 1024`, or (with Compose) via `.env`. To
+enable authentication, mount a token file into `/data` and add
+`--auth-token-file /data/tokens.txt` (to `AEGIS_EXTRA_ARGS` under Compose; see
+[Authentication](#authentication)); the wire
 protocol is plaintext, so keep the port on a trusted network.
 
 ## Run

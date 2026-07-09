@@ -19,6 +19,10 @@ metadata.db
 # Local Claude Code config (per-developer; instantiate from integrations/claude-code/examples/mcp.json)
 .mcp.json
 
+# Local docker-compose config (per-deployment; instantiate from .env.example).
+# The example is committed; a real .env may hold tokens, so keep it local.
+.env
+
 # Spec-kit workflow artifacts — kept local, never published
 /specs/
 /.specify/
