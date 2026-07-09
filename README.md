@@ -333,7 +333,8 @@ cloud SDK is baked into the image — the same "bring your own edge" stance as T
 > **Do not** scale the server with `deploy: replicas: N` against the shared
 > volume: AegisDB is single-writer (one append-only log, one id allocator), so
 > multiple writers would corrupt the data. Backups (and, if needed, a future
-> log-shipping read replica) are the supported resilience path.
+> log-shipping read replica — see the
+> [design doc](docs/read-replica-design.md)) are the supported resilience path.
 
 ## Use as Claude Code memory
 
@@ -348,3 +349,4 @@ the step-by-step setup (start AegisDB → register the MCP server → enable the
 - Wire protocol: [`docs/wire-protocol.md`](docs/wire-protocol.md)
 - Quickstart: [`docs/quickstart.md`](docs/quickstart.md)
 - Architecture: [`docs/architecture.md`](docs/architecture.md)
+- Read-replica design (proposed): [`docs/read-replica-design.md`](docs/read-replica-design.md)
