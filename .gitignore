@@ -48,3 +48,5 @@ venv/
 dist/
 *.egg-info/
 .pytest_cache/
+# Local backup tarballs (docker compose --profile backup)
+backups/

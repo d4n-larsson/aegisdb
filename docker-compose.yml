@@ -64,5 +64,36 @@ services:
     #       memory: ${AEGIS_MEM_LIMIT:-1g}
     #       cpus: "${AEGIS_CPUS:-2}"
 
+  # Off-box backups (opt-in): `docker compose --profile backup up`. Loops
+  # scripts/aegis-backup.sh — takes a consistent online snapshot, tarballs it to
+  # the host ./backups dir, and (if AEGIS_BACKUP_UPLOAD_CMD is set) ships it to
+  # remote storage. Restart + the durable volume survive a crash; this survives
+  # losing the box. A named-profile service does not start on a plain `up`.
+  backup:
+    profiles: ["backup"]
+    image: debian:stable-slim
+    container_name: aegisdb-backup
+    depends_on:
+      aegisdb:
+        condition: service_healthy
+    volumes:
+      - aegis-data:/data                          # shared with the server (snapshots land here)
+      - ./backups:/backups                        # host dir: tarballs land off the volume
+      - ./scripts/aegis-backup.sh:/usr/local/bin/aegis-backup.sh:ro
+    environment:
+      AEGIS_HOST: aegisdb
+      AEGIS_PORT: "${AEGIS_PORT:-9470}"
+      AEGIS_DATA_DIR: /data
+      AEGIS_BACKUP_DIR: /backups
+      AEGIS_AUTH_TOKEN: "${AEGIS_AUTH_TOKEN:-}"    # admin token if auth is on
+      AEGIS_BACKUP_UPLOAD_CMD: "${AEGIS_BACKUP_UPLOAD_CMD:-}"  # e.g. 'rclone copy {} remote:aegis'
+      AEGIS_BACKUP_RETAIN: "${AEGIS_BACKUP_RETAIN:-7}"
+    restart: unless-stopped
+    # Snapshot on an interval (default daily). For genuine off-box storage set
+    # AEGIS_BACKUP_UPLOAD_CMD; without it, tarballs stay on the host ./backups.
+    entrypoint: ["bash", "-c"]
+    command:
+      - 'while true; do aegis-backup.sh || echo "backup failed (will retry)"; sleep "${AEGIS_BACKUP_INTERVAL:-86400}"; done'
+
 volumes:
   aegis-data:

@@ -294,6 +294,47 @@ still load. To verify:
 3. Restart it — startup logs `recovery complete: N records loaded`.
 4. `get` each ID; all records return intact.
 
+## Backups & disaster recovery
+
+Recovery + a durable volume + `restart: unless-stopped` already survive a
+process crash. To survive losing the **host or disk**, take backups off the box.
+
+AegisDB is single-node by design (no built-in replication), and because the log
+is append-only a backup is just a consistent snapshot of its durable prefix. The
+admin `snapshot` op writes one online (no downtime); `--restore` installs it into
+an empty data dir. [`scripts/aegis-backup.sh`](scripts/aegis-backup.sh) automates
+the loop — snapshot → tarball → ship off-box via a transport you supply (S3,
+`rclone`, `rsync`, …) → local retention:
+
+```bash
+# host cron (daily), shipping to S3:
+AEGIS_BACKUP_UPLOAD_CMD='aws s3 cp {} s3://my-bucket/aegis/' \
+  scripts/aegis-backup.sh
+```
+
+Or run it on a schedule as the opt-in compose sidecar:
+
+```bash
+docker compose --profile backup up -d      # loops the script (default: daily)
+```
+
+Restore a shipped tarball into a fresh server:
+
+```bash
+tar -xzf aegis-20260709T....tar.gz -C /tmp/snap
+aegisdb --restore /tmp/snap/aegis-20260709T... --data-dir ./restored --embedding-dim 384
+aegisdb --data-dir ./restored --embedding-dim 384    # start; recovery rebuilds indexes
+```
+
+See [`.env.example`](.env.example) for the backup knobs (`AEGIS_BACKUP_UPLOAD_CMD`,
+`AEGIS_BACKUP_INTERVAL`, `AEGIS_BACKUP_RETAIN`). The transport is pluggable so no
+cloud SDK is baked into the image — the same "bring your own edge" stance as TLS.
+
+> **Do not** scale the server with `deploy: replicas: N` against the shared
+> volume: AegisDB is single-writer (one append-only log, one id allocator), so
+> multiple writers would corrupt the data. Backups (and, if needed, a future
+> log-shipping read replica) are the supported resilience path.
+
 ## Use as Claude Code memory
 
 AegisDB can act as the persistent long-term memory of [Claude Code](https://claude.com/claude-code)

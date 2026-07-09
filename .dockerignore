@@ -31,3 +31,5 @@ docker-compose.yml
 .idea/
 *.swp
 .DS_Store
+# Local backup output — not a build input
+backups/
