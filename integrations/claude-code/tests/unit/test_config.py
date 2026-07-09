@@ -15,6 +15,18 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(cfg.recall_time_budget_ms, 800)
         self.assertTrue(cfg.recall_enabled)
         self.assertEqual(cfg.embedding_mode, "none")
+        self.assertEqual(cfg.recall_max_chars_per_memory, 500)
+        self.assertEqual(cfg.recall_char_budget, 2000)
+
+    def test_recall_budget_env_coercion(self):
+        cfg = load_config(env={
+            "AEGIS_NAMESPACE": "x",
+            "AEGIS_RECALL_MAX_CHARS_PER_MEMORY": "120",
+            "AEGIS_RECALL_CHAR_BUDGET": "0",
+        })
+        self.assertEqual(cfg.recall_max_chars_per_memory, 120)
+        self.assertIsInstance(cfg.recall_max_chars_per_memory, int)
+        self.assertEqual(cfg.recall_char_budget, 0)
 
     def test_env_overrides_and_coercion(self):
         cfg = load_config(env={
