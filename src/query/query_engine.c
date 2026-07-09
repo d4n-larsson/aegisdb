@@ -1672,9 +1672,126 @@ static int ct_eq_bytes(const uint8_t *a, const uint8_t *b, size_t n) {
 
 static uint64_t monotonic_micros(void); /* defined below; used by the rate limiter */
 
-/* Resolved caller identity for a request. */
+/* ----- runtime token administration (admin-only ops) ------------------- */
+
+static int scope_from_str(const char *s, int *out) {
+    if (!s || strcmp(s, "rw") == 0) { *out = AEGIS_SCOPE_RW; return 0; }
+    if (strcmp(s, "ro") == 0) { *out = AEGIS_SCOPE_RO; return 0; }
+    if (strcmp(s, "admin") == 0) { *out = AEGIS_SCOPE_ADMIN; return 0; }
+    return -1;
+}
+static const char *scope_str(int scope) {
+    return scope == AEGIS_SCOPE_RO ? "ro" : scope == AEGIS_SCOPE_ADMIN ? "admin"
+                                                                       : "rw";
+}
+
+/* Mint a random 256-bit token as 64 hex chars (out must hold 65). 0/-1. */
+static int gen_random_token(char out[65]) {
+    uint8_t buf[32];
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (!f) return -1;
+    size_t n = fread(buf, 1, sizeof buf, f);
+    fclose(f);
+    if (n != sizeof buf) return -1;
+    static const char hx[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        out[2 * i] = hx[buf[i] >> 4];
+        out[2 * i + 1] = hx[buf[i] & 0xf];
+    }
+    out[64] = '\0';
+    return 0;
+}
+
+/* token_list: fingerprint + namespace + scope of every token (no secrets). */
+static cJSON *handle_token_list(AegisDB *db) {
+    cJSON *o = json_ok();
+    cJSON *arr = cJSON_AddArrayToObject(o, "tokens");
+    pthread_rwlock_rdlock(&db->auth_lock);
+    for (size_t i = 0; arr && i < db->config.auth_token_count; i++) {
+        const AuthToken *t = &db->config.auth_tokens[i];
+        char id[13];
+        config_token_fingerprint(t, id);
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "id", id);
+        if (t->namespace)
+            cJSON_AddStringToObject(e, "namespace", t->namespace);
+        cJSON_AddStringToObject(e, "scope", scope_str(t->scope));
+        cJSON_AddItemToArray(arr, e);
+    }
+    pthread_rwlock_unlock(&db->auth_lock);
+    return o;
+}
+
+/* token_add: add a token (generating a secret if none supplied) and persist to
+ * the token file. Returns its fingerprint (and the plaintext, once, if minted). */
+static cJSON *handle_token_add(AegisDB *db, const cJSON *req) {
+    /* The secret to add is "new_token" (the request's "token" is the caller's
+     * own auth credential); omit it to have the server mint one. */
+    const char *tok = jr_str(req, "new_token", NULL);
+    const char *ns = jr_str(req, "namespace", NULL);
+    int scope;
+    if (scope_from_str(jr_str(req, "scope", ns ? "rw" : "admin"), &scope) != 0)
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    /* admin scope is global (no namespace); a namespaced token is ro/rw. */
+    if (scope == AEGIS_SCOPE_ADMIN) ns = NULL;
+    else if (!ns) return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+
+    char generated[65];
+    int minted = 0;
+    if (!tok) {
+        if (gen_random_token(generated) != 0)
+            return json_error_status(AEGIS_ERR_INTERNAL);
+        tok = generated;
+        minted = 1;
+    }
+
+    pthread_rwlock_wrlock(&db->auth_lock);
+    if (config_add_token(&db->config, tok, ns, scope) != 0) {
+        pthread_rwlock_unlock(&db->auth_lock);
+        return json_error_status(AEGIS_ERR_INTERNAL);
+    }
+    char id[13];
+    config_token_fingerprint(
+        &db->config.auth_tokens[db->config.auth_token_count - 1], id);
+    int persisted = 0;
+    if (db->config.auth_token_file[0])
+        persisted = (config_write_token_file(&db->config,
+                                             db->config.auth_token_file) == 0);
+    pthread_rwlock_unlock(&db->auth_lock);
+    if (db->config.auth_token_file[0] && !persisted)
+        LOG_WARN("token_add: could not persist to %s", db->config.auth_token_file);
+
+    cJSON *o = json_ok();
+    cJSON_AddStringToObject(o, "id", id);
+    if (minted) cJSON_AddStringToObject(o, "token", generated); /* shown once */
+    cJSON_AddBoolToObject(o, "persisted", persisted);
+    return o;
+}
+
+/* token_revoke: remove the token with the given fingerprint id and persist. */
+static cJSON *handle_token_revoke(AegisDB *db, const cJSON *req) {
+    const char *id = jr_str(req, "id", NULL);
+    if (!id) return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    pthread_rwlock_wrlock(&db->auth_lock);
+    int removed = config_remove_token(&db->config, id);
+    int persisted = 0;
+    if (removed && db->config.auth_token_file[0])
+        persisted = (config_write_token_file(&db->config,
+                                             db->config.auth_token_file) == 0);
+    pthread_rwlock_unlock(&db->auth_lock);
+    if (!removed) return json_error_status(AEGIS_ERR_NOT_FOUND);
+    cJSON *o = json_ok();
+    cJSON_AddBoolToObject(o, "revoked", 1);
+    cJSON_AddBoolToObject(o, "persisted", persisted);
+    return o;
+}
+
+/* Resolved caller identity for a request. The namespace is copied into ns_buf
+ * (not aliased into the token table) so it stays valid for the whole request
+ * even if a concurrent token_revoke frees the matched token. */
 typedef struct {
-    const char *ns; /* bound namespace; NULL = unrestricted (admin / auth off) */
+    char ns_buf[512];
+    const char *ns; /* -> ns_buf, or NULL = unrestricted (admin / auth off) */
     int can_write;  /* 0 for read-only tokens */
 } AuthCtx;
 
@@ -1684,9 +1801,15 @@ typedef struct {
  * AEGIS_OK (ctx filled) or AEGIS_ERR_UNAUTHORIZED. */
 static aegis_status_t resolve_identity(AegisDB *db, const cJSON *req,
                                        AuthCtx *out) {
+    out->ns_buf[0] = '\0';
     out->ns = NULL;
     out->can_write = 1;
-    if (db->config.auth_token_count == 0) return AEGIS_OK; /* auth disabled */
+    /* auth_lock guards the token set against concurrent token_add/revoke. */
+    pthread_rwlock_rdlock(&db->auth_lock);
+    if (db->config.auth_token_count == 0) {
+        pthread_rwlock_unlock(&db->auth_lock);
+        return AEGIS_OK; /* auth disabled */
+    }
 
     const char *token = jr_str(req, "token", NULL);
     const AuthToken *match = NULL;
@@ -1708,10 +1831,17 @@ static aegis_status_t resolve_identity(AegisDB *db, const cJSON *req,
             if (eq) match = t;
         }
     }
-    if (!match) return AEGIS_ERR_UNAUTHORIZED;
-    out->ns = match->namespace; /* NULL for ADMIN tokens */
-    out->can_write = (match->scope != AEGIS_SCOPE_RO);
-    return AEGIS_OK;
+    aegis_status_t st = AEGIS_ERR_UNAUTHORIZED;
+    if (match) {
+        if (match->namespace) { /* copy so it survives past the lock */
+            snprintf(out->ns_buf, sizeof(out->ns_buf), "%s", match->namespace);
+            out->ns = out->ns_buf;
+        }
+        out->can_write = (match->scope != AEGIS_SCOPE_RO);
+        st = AEGIS_OK;
+    }
+    pthread_rwlock_unlock(&db->auth_lock);
+    return st;
 }
 
 static int is_write_op(const char *op) {
@@ -1763,6 +1893,19 @@ static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
         /* stats exposes server-wide counts; restrict to admin/global tokens. */
         if (ctx.ns) return json_error_status(AEGIS_ERR_FORBIDDEN);
         return handle_stats(db);
+    }
+    /* Token administration is admin-only (a global/unrestricted token). */
+    if (strcmp(op, "token_list") == 0) {
+        if (ctx.ns) return json_error_status(AEGIS_ERR_FORBIDDEN);
+        return handle_token_list(db);
+    }
+    if (strcmp(op, "token_add") == 0) {
+        if (ctx.ns) return json_error_status(AEGIS_ERR_FORBIDDEN);
+        return handle_token_add(db, req);
+    }
+    if (strcmp(op, "token_revoke") == 0) {
+        if (ctx.ns) return json_error_status(AEGIS_ERR_FORBIDDEN);
+        return handle_token_revoke(db, req);
     }
     if (strcmp(op, "snapshot") == 0) {
         /* backups expose the whole log; require an admin (unrestricted) token. */

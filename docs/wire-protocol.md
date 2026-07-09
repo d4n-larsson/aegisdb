@@ -608,6 +608,40 @@ a point-in-time restore.
 
 ---
 
+### `token_list` / `token_add` / `token_revoke`
+
+Manage accepted tokens at runtime, without restarting — for onboarding/
+offboarding tenants on a shared server. **Admin-only** (a global/unrestricted
+token; a namespaced token gets `FORBIDDEN`). Changes are persisted back to
+`--auth-token-file` (all entries rewritten hashed); if no token file was
+configured they apply in-memory only (`"persisted": false`) and are lost on
+restart. Tokens are referenced by a **fingerprint** `id` (first 12 hex of the
+token's SHA-256) so they can be listed and revoked without exposing the secret.
+
+```json
+{ "operation": "token_list", "token": "<admin>" }
+→ { "ok": true, "tokens": [ { "id": "caa0cd7de01a", "namespace": "acme", "scope": "rw" } ] }
+```
+
+`token_add` binds a `namespace` + `scope` (`ro`|`rw`, or `admin` for a global
+token — which ignores `namespace`). Supply the secret as `new_token`, or omit it
+to have the server mint one (returned **once** as `token`):
+
+```json
+{ "operation": "token_add", "namespace": "acme", "scope": "rw", "token": "<admin>" }
+→ { "ok": true, "id": "3f9c…", "token": "9f3c… (minted, shown once)", "persisted": true }
+```
+
+`token_revoke` removes the token with the given `id`; it stops authenticating
+immediately. Returns `NOT_FOUND` if no token has that id.
+
+```json
+{ "operation": "token_revoke", "id": "3f9c…", "token": "<admin>" }
+→ { "ok": true, "revoked": true, "persisted": true }
+```
+
+---
+
 ## Phase gating (advanced)
 
 By default the server enables every operation (`--phase 4`). The `--phase <1-4>`

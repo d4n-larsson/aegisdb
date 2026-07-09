@@ -371,6 +371,15 @@ static uint64_t load_metadata_next_id(const char *path) {
     return nid;
 }
 
+static void free_token_array(AuthToken *toks, size_t n) {
+    if (!toks) return;
+    for (size_t i = 0; i < n; i++) {
+        free(toks[i].token);
+        free(toks[i].namespace);
+    }
+    free(toks);
+}
+
 int db_open(AegisDB *db, const Config *cfg) {
     memset(db, 0, sizeof(*db));
     db->config = *cfg;
@@ -401,6 +410,37 @@ int db_open(AegisDB *db, const Config *cfg) {
         pthread_rwlock_destroy(&db->index_lock);
         pthread_mutex_destroy(&db->id_lock);
         return -1;
+    }
+    if (pthread_rwlock_init(&db->auth_lock, NULL) != 0) {
+        pthread_rwlock_destroy(&db->log_lock);
+        pthread_rwlock_destroy(&db->index_lock);
+        pthread_mutex_destroy(&db->id_lock);
+        return -1;
+    }
+    /* Own a private deep copy of the token set: runtime token-admin mutates
+     * db->config.auth_tokens, while the startup Config keeps (and frees) its own. */
+    if (cfg->auth_token_count > 0) {
+        AuthToken *copy = calloc(cfg->auth_token_count, sizeof(AuthToken));
+        if (!copy) goto fail_locks;
+        size_t i = 0;
+        for (; i < cfg->auth_token_count; i++) {
+            copy[i] = cfg->auth_tokens[i]; /* hash[], hashed, scope; dup ptrs below */
+            copy[i].token = NULL;
+            copy[i].namespace = NULL;
+            if (cfg->auth_tokens[i].token &&
+                !(copy[i].token = strdup(cfg->auth_tokens[i].token)))
+                break;
+            if (cfg->auth_tokens[i].namespace &&
+                !(copy[i].namespace = strdup(cfg->auth_tokens[i].namespace)))
+                break;
+        }
+        if (i != cfg->auth_token_count) { /* strdup OOM mid-copy */
+            free_token_array(copy, i + 1);
+            goto fail_locks;
+        }
+        db->config.auth_tokens = copy;
+    } else {
+        db->config.auth_tokens = NULL;
     }
 
     if (log_open(&db->log, db->path_log, config_effective_fsync_batch(cfg)) !=
@@ -458,6 +498,7 @@ fail_locks:
     pthread_mutex_destroy(&db->id_lock);
     pthread_rwlock_destroy(&db->index_lock);
     pthread_rwlock_destroy(&db->log_lock);
+    pthread_rwlock_destroy(&db->auth_lock);
     return -1;
 }
 
@@ -475,8 +516,10 @@ void db_close(AegisDB *db) {
     semantic_index_free(db->sem);
     working_store_free(db->working);
     tenant_table_free(db->tenants);
+    free_token_array(db->config.auth_tokens, db->config.auth_token_count);
     log_close(&db->log);
     pthread_mutex_destroy(&db->id_lock);
     pthread_rwlock_destroy(&db->index_lock);
     pthread_rwlock_destroy(&db->log_lock);
+    pthread_rwlock_destroy(&db->auth_lock);
 }

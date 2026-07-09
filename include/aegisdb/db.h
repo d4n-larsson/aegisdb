@@ -62,6 +62,11 @@ typedef struct {
      * Only compaction's log swap takes it for write; appends never do (they
      * never invalidate an existing offset). Always acquire AFTER index_lock. */
     pthread_rwlock_t log_lock;
+    /* Guards config.auth_tokens for runtime token administration: readers
+     * (auth resolution on every request) take it for read, token_add/revoke
+     * take it for write. The DB owns its own deep copy of the token set (the
+     * startup Config keeps its own), so runtime mutation is isolated. */
+    pthread_rwlock_t auth_lock;
 
     char path_log[1200];
     char path_index[1200];

@@ -89,10 +89,37 @@ typedef struct {
      * by the Config; release with config_free(). */
     AuthToken *auth_tokens;
     size_t auth_token_count;
+    /* Path passed to --auth-token-file, retained so runtime token-admin ops
+     * (token_add/token_revoke) can persist changes back to it. Empty when auth
+     * was configured without a file (runtime changes then cannot persist). */
+    char auth_token_file[1024];
 } Config;
 
 /* Populate cfg with documented defaults. */
 void config_defaults(Config *cfg);
+
+/* ----- runtime token administration (token_add/token_revoke/token_list) ----
+ * These mutate cfg->auth_tokens in place; the caller serializes them against
+ * token readers (the server holds db->auth_lock for write around these and for
+ * read around matching). */
+
+/* Add a token bound to `ns` (NULL = global admin) with `scope`. `tok` is a
+ * plaintext secret or a `sha256$<hex>` digest. Returns 0/-1 (OOM/malformed). */
+int config_add_token(Config *cfg, const char *tok, const char *ns, int scope);
+
+/* A stable public fingerprint of a token: the first 12 hex chars of its
+ * SHA-256 (of the plaintext, or the stored digest for hashed entries). Writes
+ * 13 bytes (12 + NUL) to `out`. Lets token_list/revoke reference a token
+ * without exposing the secret. */
+void config_token_fingerprint(const AuthToken *t, char out[13]);
+
+/* Remove the token whose fingerprint equals `id12`. Returns 1 if removed, 0 if
+ * no match. */
+int config_remove_token(Config *cfg, const char *id12);
+
+/* Rewrite `path` with the current token set, one `sha256$<hex> [ns] [scope]`
+ * line each (all stored hashed), atomically and 0600. Returns 0/-1. */
+int config_write_token_file(const Config *cfg, const char *path);
 
 /* Human-readable name for a durability mode ("sync"|"batch"|"interval"). */
 const char *aegis_durability_name(int mode);
