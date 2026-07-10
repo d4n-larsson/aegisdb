@@ -413,7 +413,9 @@ client protocol.
 AegisDB can act as the persistent long-term memory of [Claude Code](https://claude.com/claude-code)
 via the integration in [`integrations/claude-code/`](integrations/claude-code/):
 an MCP server exposing memory tools plus hooks for automatic recall and capture.
-See [`integrations/claude-code/README.md`](integrations/claude-code/README.md) for
+It is published to PyPI as [`aegisdb-mcp`](https://pypi.org/project/aegisdb-mcp/),
+so `uvx aegisdb-mcp` runs it with no clone. See
+[`integrations/claude-code/README.md`](integrations/claude-code/README.md) for
 the step-by-step setup (start AegisDB → register the MCP server → enable the hooks).
 
 ## Documentation
