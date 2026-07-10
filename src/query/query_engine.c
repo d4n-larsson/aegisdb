@@ -438,8 +438,8 @@ static void idx_sift_down(size_t *h, size_t n, size_t i, const Cand *c,
  * then free the array). 0/-1. */
 static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
                                         size_t fetch, int semantic,
-                                        Cand **out_cands, size_t *out_m,
-                                        int *exhausted) {
+                                        size_t load_cap, Cand **out_cands,
+                                        size_t *out_m, int *exhausted) {
     *out_cands = NULL;
     *out_m = 0;
     *exhausted = 1;
@@ -456,11 +456,16 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
         }
         *exhausted = (nids < fetch); /* fewer returned than asked -> saw them all */
     } else if (p->has_time) {
-        if (time_index_range(db->time, p->start_time, p->end_time, 0, &ids,
-                             &nids) != 0) {
+        /* A wide-open time range is effectively a full scan, so bound it to the
+         * most-recent `load_cap` (0 = unlimited); *exhausted stays set only if
+         * nothing was dropped. */
+        int trunc = 0;
+        if (time_index_range_recent(db->time, p->start_time, p->end_time,
+                                    load_cap, &ids, &nids, &trunc) != 0) {
             pthread_rwlock_unlock(&db->index_lock);
             return AEGIS_ERR_INTERNAL;
         }
+        *exhausted = !trunc;
     } else if (p->tag_count) {
         if (tag_index_query(db->tags, p->tags, p->tag_count, p->match_all, &ids,
                             &nids) != 0) {
@@ -468,11 +473,16 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
             return AEGIS_ERR_INTERNAL;
         }
     } else {
-        /* no positive filter: scan all live records chronologically */
-        if (time_index_range(db->time, 0, UINT64_MAX, 0, &ids, &nids) != 0) {
+        /* No positive filter: scan live records, but load at most the most-recent
+         * `load_cap` so an unfiltered query cannot pull the whole dataset into
+         * RAM (amplification DoS). */
+        int trunc = 0;
+        if (time_index_range_recent(db->time, 0, UINT64_MAX, load_cap, &ids,
+                                    &nids, &trunc) != 0) {
             pthread_rwlock_unlock(&db->index_lock);
             return AEGIS_ERR_INTERNAL;
         }
+        *exhausted = !trunc;
     }
 
     /* resolve id -> log offset under the index lock, snapshotting (offset,
@@ -576,7 +586,7 @@ aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
         if (fetch > SEARCH_FETCH_CAP) fetch = SEARCH_FETCH_CAP;
         for (;;) {
             int exhausted = 0;
-            st = gather_candidates(db, p, fetch, 1, &cands, &m, &exhausted);
+            st = gather_candidates(db, p, fetch, 1, 0, &cands, &m, &exhausted);
             if (st != AEGIS_OK) return st;
             if (m >= want || exhausted || fetch >= SEARCH_FETCH_CAP) break;
             for (size_t i = 0; i < m; i++) record_free(&cands[i].rec);
@@ -587,7 +597,8 @@ aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
         }
     } else {
         int exhausted = 0;
-        st = gather_candidates(db, p, 0, 0, &cands, &m, &exhausted);
+        st = gather_candidates(db, p, 0, 0, db->config.query_scan_cap, &cands,
+                               &m, &exhausted);
         if (st != AEGIS_OK) return st;
     }
 
@@ -668,17 +679,22 @@ aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
 
 /* Count live records matching the filters (type/tags/time/agent_id). Ignores
  * any embedding — count is over the filter predicate, not vector ranking. */
-aegis_status_t qe_count(AegisDB *db, const SearchParams *p, size_t *out_count) {
+aegis_status_t qe_count(AegisDB *db, const SearchParams *p, size_t *out_count,
+                        int *out_capped) {
     aegis_status_t st = require_phase(db, 2);
     if (st != AEGIS_OK) return st;
     Cand *cands = NULL;
     size_t m = 0;
     int exhausted = 0;
-    st = gather_candidates(db, p, 0, 0, &cands, &m, &exhausted);
+    st = gather_candidates(db, p, 0, 0, db->config.query_scan_cap, &cands, &m,
+                           &exhausted);
     if (st != AEGIS_OK) return st;
     for (size_t i = 0; i < m; i++) record_free(&cands[i].rec);
     free(cands);
     *out_count = m;
+    /* When the broad-scan cap truncated the candidate set the count is a floor,
+     * not exact — tell the caller so it isn't reported as authoritative. */
+    if (out_capped) *out_capped = !exhausted;
     return AEGIS_OK;
 }
 
@@ -692,10 +708,13 @@ aegis_status_t qe_delete_by_query(AegisDB *db, const SearchParams *p,
     if (!p->has_type && !p->tag_count && !p->has_time)
         return AEGIS_ERR_INVALID_REQUEST; /* refuse an unfiltered bulk delete */
 
+    /* Delete must act on the complete matching set (a partial delete would
+     * silently leave data behind), so it is not scan-capped; the mandatory
+     * filter above already bounds an unfiltered "delete everything". */
     Cand *cands = NULL;
     size_t m = 0;
     int exhausted = 0;
-    st = gather_candidates(db, p, 0, 0, &cands, &m, &exhausted);
+    st = gather_candidates(db, p, 0, 0, 0, &cands, &m, &exhausted);
     if (st != AEGIS_OK) return st;
 
     /* snapshot the matching ids, then release the loaded records — qe_delete
@@ -1541,11 +1560,15 @@ static cJSON *handle_count(AegisDB *db, const cJSON *req, const char *ns) {
     if (parse_filters(req, ns, &p, &tags) != 0)
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     size_t count = 0;
-    aegis_status_t st = qe_count(db, &p, &count);
+    int capped = 0;
+    aegis_status_t st = qe_count(db, &p, &count, &capped);
     free(tags);
     if (st != AEGIS_OK) return json_error_status(st);
     cJSON *o = json_ok();
     cJSON_AddNumberToObject(o, "count", (double)count);
+    /* Flag a count that hit the broad-scan cap so callers don't treat the
+     * bounded floor as the true total. */
+    if (capped) cJSON_AddBoolToObject(o, "capped", 1);
     return o;
 }
 

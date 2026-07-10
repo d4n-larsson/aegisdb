@@ -416,25 +416,59 @@ static void test_count(void) {
     p.tags = x;
     p.tag_count = 1;
     p.match_all = 1;
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_count(&g_db, &p, &n));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_count(&g_db, &p, &n, NULL));
     TEST_ASSERT_EQUAL_size_t(3, n); /* two global + tenant-A's */
 
     /* namespace-scoped: only tenant-A's "x" record */
     p.agent_id = "tenant-A";
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_count(&g_db, &p, &n));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_count(&g_db, &p, &n, NULL));
     TEST_ASSERT_EQUAL_size_t(1, n);
 
     /* deleting the owned record drops the scoped count to 0 */
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_delete(&g_db, owned, "tenant-A"));
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_count(&g_db, &p, &n));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_count(&g_db, &p, &n, NULL));
     TEST_ASSERT_EQUAL_size_t(0, n);
 
     /* a tag matching nothing counts 0 */
     const char *z[] = {"z"};
     p.agent_id = NULL;
     p.tags = z;
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_count(&g_db, &p, &n));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_count(&g_db, &p, &n, NULL));
     TEST_ASSERT_EQUAL_size_t(0, n);
+}
+
+/* A broad (filterless) count/search loads at most query_scan_cap of the
+ * most-recent records, bounding an unfiltered query's memory/CPU (amplification
+ * DoS). A capped count is flagged; cap 0 restores exact/unbounded behavior. */
+static void test_query_scan_cap_bounds_broad_scan(void) {
+    for (int i = 0; i < 5; i++) {
+        MemoryRecord in = make_input(MEM_EPISODIC, "d");
+        MemoryRecord out;
+        TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &in, NULL, 0, &out));
+        record_free(&out);
+    }
+
+    g_db.config.query_scan_cap = 2; /* tiny cap for the test */
+
+    SearchParams p = {0}; /* no filter -> full scan */
+    size_t n = 0;
+    int capped = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_count(&g_db, &p, &n, &capped));
+    TEST_ASSERT_EQUAL_size_t(2, n); /* bounded, not 5 */
+    TEST_ASSERT_EQUAL_INT(1, capped);
+
+    MemoryRecord *recs = NULL;
+    size_t rn = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &recs, &rn));
+    TEST_ASSERT_EQUAL_size_t(2, rn); /* search is bounded too */
+    for (size_t i = 0; i < rn; i++) record_free(&recs[i]);
+    free(recs);
+
+    /* cap 0 = unlimited: full count, not flagged. */
+    g_db.config.query_scan_cap = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_count(&g_db, &p, &n, &capped));
+    TEST_ASSERT_EQUAL_size_t(5, n);
+    TEST_ASSERT_EQUAL_INT(0, capped);
 }
 
 /* A TTL'd episodic/semantic record is recallable before its horizon and reads
@@ -740,6 +774,7 @@ int main(void) {
     RUN_TEST(test_search_offset_and_min_score);
     RUN_TEST(test_search_recency_decay);
     RUN_TEST(test_count);
+    RUN_TEST(test_query_scan_cap_bounds_broad_scan);
     RUN_TEST(test_ttl_lazy_expiry);
     RUN_TEST(test_ttl_sweep_tombstones);
     RUN_TEST(test_consolidate);

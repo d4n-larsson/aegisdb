@@ -930,6 +930,33 @@ def test_search_limits(binary, port):
         check(r.get("ok") is True, "huge top_k is clamped, not an error")
 
 
+def test_query_scan_cap(binary, port):
+    print("[query scan cap: broad search/count is bounded, count flags it]")
+    # Tiny cap so a filterless scan is bounded to the most-recent 2 records.
+    with Server(binary, port, phase=4,
+                extra_args=["--query-scan-cap", "2"]) as srv:
+        for i in range(5):
+            srv.req({"operation": "insert", "type": "episodic",
+                     "data": f"m{i}"})
+
+        # unfiltered count is bounded to the cap and flags itself as capped
+        r = srv.req({"operation": "count"})
+        check(r.get("ok") is True and r.get("count") == 2 and r.get("capped") is True,
+              "unfiltered count is capped at 2 and flagged")
+
+        # unfiltered search is bounded too (still succeeds, not an error)
+        r = srv.req({"operation": "search", "top_k": 100})
+        check(r.get("ok") is True and len(r.get("records", [])) == 2,
+              "unfiltered search bounded to the cap")
+
+        # a selective tag filter is exact and never flagged
+        srv.req({"operation": "insert", "type": "episodic",
+                 "tags": ["only"], "data": "x"})
+        r = srv.req({"operation": "count", "tags": ["only"]})
+        check(r.get("ok") is True and r.get("count") == 1 and r.get("capped") is None,
+              "tag-filtered count is exact and not capped")
+
+
 def test_phase_gating(binary, port):
     print("[phase 1: gating]")
     with Server(binary, port, phase=1) as srv:
@@ -1023,6 +1050,7 @@ def main():
     test_hashed_tokens(binary, 19476)
     test_cli(binary, 19477)
     test_search_limits(binary, 19478)
+    test_query_scan_cap(binary, 19491)
     test_concurrency(binary, 19479)
     test_bulk_ops(binary, 19480)
     test_consolidate(binary, 19481)

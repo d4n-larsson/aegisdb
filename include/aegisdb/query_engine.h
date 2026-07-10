@@ -74,8 +74,11 @@ aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
                          MemoryRecord **out_records, size_t *out_n);
 
 /* Count live records matching the filters (type/tags/time/agent_id); ignores
- * any embedding. Returns the count in *out_count. */
-aegis_status_t qe_count(AegisDB *db, const SearchParams *p, size_t *out_count);
+ * any embedding. Returns the count in *out_count. A broad/filterless count is
+ * bounded by the query scan cap; when that cap truncates the scan the count is
+ * a floor and *out_capped (may be NULL) is set to 1. */
+aegis_status_t qe_count(AegisDB *db, const SearchParams *p, size_t *out_count,
+                        int *out_capped);
 
 /* Delete all live records matching the filters, scoped to `ns` when non-NULL.
  * Requires at least one positive filter (type/tags/time) — refuses an

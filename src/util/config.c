@@ -52,6 +52,7 @@ void config_defaults(Config *cfg) {
     cfg->io_threads = default_io_threads();
     cfg->idle_timeout_sec = 60; /* reap connections idle (no byte progress) 60s */
     cfg->max_connections = 0;   /* 0 = unlimited */
+    cfg->query_scan_cap = 100000; /* cap broad/filterless search+count loads */
     cfg->enabled_phase = 4; /* all features enabled by default */
     cfg->log_level = AEGIS_LOG_INFO;
 
@@ -237,6 +238,8 @@ static void usage(const char *prog) {
             "                           this long (default 60; 0 disables)\n"
             "  --max-connections <n>    hard cap on concurrent client connections\n"
             "                           (default 0 = unlimited)\n"
+            "  --query-scan-cap <n>     max most-recent records a broad/filterless\n"
+            "                           search or count loads (default 100000; 0=off)\n"
             "  --max-payload <bytes>    max data size (default 1048576)\n"
             "  --embedding-dim <n>      expected vector length (default 384)\n"
             "  --ann-ef-search <n>      HNSW query beam for large semantic indexes;\n"
@@ -352,6 +355,14 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
                 fprintf(stderr, "%s: invalid max-connections '%s'\n", prog, val);
                 return -1;
             }
+        } else if (strcmp(a, "--query-scan-cap") == 0) {
+            NEXT("--query-scan-cap");
+            int v;
+            if (parse_int(val, &v) || v < 0) {
+                fprintf(stderr, "%s: invalid query-scan-cap '%s'\n", prog, val);
+                return -1;
+            }
+            cfg->query_scan_cap = (size_t)v;
         } else if (strcmp(a, "--max-payload") == 0) {
             NEXT("--max-payload");
             if (parse_size(val, &cfg->max_payload_bytes)) {

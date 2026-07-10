@@ -33,4 +33,13 @@ void time_index_remove(TimeIndex *t, uint64_t created, uint64_t id);
 int time_index_range(const TimeIndex *t, uint64_t start, uint64_t end,
                      size_t max, uint64_t **out_ids, size_t *out_n);
 
+/* Like time_index_range but, when the range holds more than `max` entries,
+ * keeps the most-recent `max` (the tail) rather than the oldest — so a bounded
+ * broad scan never hides newly written records. `max` == 0 means unlimited.
+ * *truncated (may be NULL) is set to 1 iff entries were dropped. Result is still
+ * in chronological (ascending) order. Allocates *out_ids. Returns 0/-1. */
+int time_index_range_recent(const TimeIndex *t, uint64_t start, uint64_t end,
+                            size_t max, uint64_t **out_ids, size_t *out_n,
+                            int *truncated);
+
 #endif /* AEGISDB_TIME_INDEX_H */

@@ -86,3 +86,32 @@ int time_index_range(const TimeIndex *t, uint64_t start, uint64_t end,
     *out_n = n;
     return 0;
 }
+
+int time_index_range_recent(const TimeIndex *t, uint64_t start, uint64_t end,
+                            size_t max, uint64_t **out_ids, size_t *out_n,
+                            int *truncated) {
+    if (truncated) *truncated = 0;
+    size_t lo = lower_bound(t, start, 0);
+    /* hi = first index in [lo, n) whose created exceeds `end` (binary search on
+     * the sorted-by-created array); [lo, hi) is the in-range span. */
+    size_t a = lo, b = t->n;
+    while (a < b) {
+        size_t mid = a + (b - a) / 2;
+        if (t->e[mid].created > end) b = mid;
+        else a = mid + 1;
+    }
+    size_t hi = a;
+    size_t total = hi - lo;
+    size_t take = total;
+    if (max && total > max) {
+        take = max;
+        lo = hi - max; /* drop the oldest, keep the most-recent `max` */
+        if (truncated) *truncated = 1;
+    }
+    uint64_t *ids = malloc((take ? take : 1) * sizeof(uint64_t));
+    if (!ids) return -1;
+    for (size_t i = 0; i < take; i++) ids[i] = t->e[lo + i].id;
+    *out_ids = ids;
+    *out_n = take;
+    return 0;
+}

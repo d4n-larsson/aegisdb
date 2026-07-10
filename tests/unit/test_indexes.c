@@ -47,6 +47,50 @@ static void test_time_range_respects_max(void) {
     time_index_free(t);
 }
 
+/* time_index_range_recent keeps the MOST-RECENT `max` (the tail), still in
+ * ascending order, and flags truncation — unlike time_index_range which keeps
+ * the oldest. */
+static void test_time_range_recent_keeps_newest(void) {
+    TimeIndex *t = time_index_create();
+    for (uint64_t i = 1; i <= 10; i++) time_index_add(t, i * 10, i); /* ids 1..10 */
+    uint64_t *ids = NULL;
+    size_t n = 0;
+    int trunc = -1;
+
+    /* cap 3 over the whole range -> newest three (ids 8,9,10) ascending. */
+    TEST_ASSERT_EQUAL_INT(
+        0, time_index_range_recent(t, 0, 1000, 3, &ids, &n, &trunc));
+    TEST_ASSERT_EQUAL_size_t(3, n);
+    TEST_ASSERT_EQUAL_INT(1, trunc);
+    TEST_ASSERT_EQUAL_UINT64(8, ids[0]);
+    TEST_ASSERT_EQUAL_UINT64(9, ids[1]);
+    TEST_ASSERT_EQUAL_UINT64(10, ids[2]);
+    free(ids);
+
+    /* cap >= population (and cap 0 = unlimited) return everything, no trunc. */
+    TEST_ASSERT_EQUAL_INT(
+        0, time_index_range_recent(t, 0, 1000, 100, &ids, &n, &trunc));
+    TEST_ASSERT_EQUAL_size_t(10, n);
+    TEST_ASSERT_EQUAL_INT(0, trunc);
+    free(ids);
+    TEST_ASSERT_EQUAL_INT(
+        0, time_index_range_recent(t, 0, 1000, 0, &ids, &n, &trunc));
+    TEST_ASSERT_EQUAL_size_t(10, n);
+    TEST_ASSERT_EQUAL_INT(0, trunc);
+    free(ids);
+
+    /* cap applies within a sub-range: [50,1000] holds ids 5..10, newest 2. */
+    TEST_ASSERT_EQUAL_INT(
+        0, time_index_range_recent(t, 50, 1000, 2, &ids, &n, &trunc));
+    TEST_ASSERT_EQUAL_size_t(2, n);
+    TEST_ASSERT_EQUAL_INT(1, trunc);
+    TEST_ASSERT_EQUAL_UINT64(9, ids[0]);
+    TEST_ASSERT_EQUAL_UINT64(10, ids[1]);
+    free(ids);
+
+    time_index_free(t);
+}
+
 /* ---- TagIndex ---------------------------------------------------------- */
 
 static void test_tag_intersection_and_union(void) {
@@ -465,6 +509,7 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_time_range_chronological);
     RUN_TEST(test_time_range_respects_max);
+    RUN_TEST(test_time_range_recent_keeps_newest);
     RUN_TEST(test_tag_intersection_and_union);
     RUN_TEST(test_tag_remove);
     RUN_TEST(test_semantic_topk_ordering);

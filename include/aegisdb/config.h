@@ -73,6 +73,12 @@ typedef struct {
      * across io-threads). 0 = disabled for each. */
     unsigned idle_timeout_sec;  /* default 60; 0 disables idle reaping */
     int max_connections;        /* default 0 (unlimited) */
+    /* Bounds a single broad (filterless / whole-time-range) search or count:
+     * at most this many of the most-recent matching records are loaded into
+     * memory, so an unfiltered query cannot pull the entire dataset into RAM
+     * (amplification DoS). Selective filters (tags) are unaffected. Default
+     * 100000; 0 = unlimited. */
+    size_t query_scan_cap;
     int enabled_phase;          /* default 4: gate operations above this phase */
     /* Replication (Phase 1 read replicas). A primary opens a replication source
      * on `replication_port` when a token is set; a replica sets
