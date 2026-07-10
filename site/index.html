@@ -388,6 +388,22 @@
             <h3><span class="bar"></span>Boots from a checkpoint</h3>
             <p>Recovery loads an index <b>checkpoint</b> and replays only the log written since — not the whole history. Compaction reclaims dead frames <b>without stopping the world</b>.</p>
           </div>
+          <div class="feat" data-k="0x05C0">
+            <h3><span class="bar"></span>Encrypted at rest</h3>
+            <p>Point <span class="mono">--encryption-key-file</span> at a key and the log and its checkpoints are sealed with <b>XChaCha20-Poly1305</b> — a stolen disk, volume snapshot, or backup reveals nothing. Vendored, so the binary stays <b>dependency-free</b>; an offline migrator converts an existing store in place.</p>
+          </div>
+          <div class="feat" data-k="0x05E0">
+            <h3><span class="bar"></span>Fair shares per tenant</h3>
+            <p>Cap a namespace's <b>records, bytes, and request rate</b> so one member's runaway agent can't fill the disk or monopolize the server — over-quota writes get <span class="mono">QUOTA_EXCEEDED</span>, floods get <span class="mono">RATE_LIMITED</span>.</p>
+          </div>
+          <div class="feat" data-k="0x0600">
+            <h3><span class="bar"></span>Warm-standby replicas</h3>
+            <p>A read replica follows the primary by streaming its log, serving <span class="mono">get</span>/<span class="mono">search</span> from its own copy and <b>promotable by hand</b> after a failure — read scaling and availability, no consensus system.</p>
+          </div>
+          <div class="feat" data-k="0x0620">
+            <h3><span class="bar"></span>Online backups</h3>
+            <p>Take a point-in-time <span class="mono">snapshot</span> of a live server and restore it into a fresh data dir — <b>no downtime</b>, and an encrypted server's snapshot stays encrypted.</p>
+          </div>
         </div>
       </div>
     </section>
@@ -538,7 +554,7 @@ docker exec aegisdb aegisdb client search --tags user</code>
   -v aegis-data:/data -v "$PWD/tokens.txt:/tokens.txt:ro" \
   ghcr.io/d4n-larsson/aegisdb:latest \
   --data-dir /data --embedding-dim 1024 --auth-token-file /tokens.txt</code>
-              <p class="ann">Tokens travel in plaintext — keep the port on a private network or behind a TLS-terminating proxy.</p>
+              <p class="ann">Tokens travel in plaintext — keep the port on a private network or behind a TLS-terminating proxy. For a shared box, add <span class="mono">--encryption-key-file</span> (see <span class="mono">gen-key</span>) to encrypt the data volume at rest.</p>
             </div>
           </div>
           <div class="row2">

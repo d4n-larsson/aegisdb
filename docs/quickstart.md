@@ -63,7 +63,9 @@ Common flags (see `--help` for the full list):
 
 With no `--auth-token`/`--auth-token-file`, the server runs **without authentication**.
 Tokens are sent in plaintext, so run the server behind an encrypted channel
-(VPN, SSH tunnel, or TLS proxy) when auth is enabled.
+(VPN, SSH tunnel, or TLS proxy) when auth is enabled. To encrypt the data on
+disk, add `--encryption-key-file <path>` (mint a key with `aegisdb gen-key`) —
+see the README's *Encryption at rest*.
 
 ## Talk to it with the built-in client
 
