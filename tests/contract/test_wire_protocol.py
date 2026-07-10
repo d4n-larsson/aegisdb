@@ -89,6 +89,15 @@ class Server:
 
     def __exit__(self, *a):
         if self.proc and self.proc.poll() is None:
+            # Under coverage (`make coverage`) stop gracefully so the server runs
+            # its clean shutdown and gcov flushes its data; SIGKILL would drop it.
+            if os.environ.get("AEGIS_COV"):
+                self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=10)
+                    return
+                except subprocess.TimeoutExpired:
+                    pass
             self.proc.kill()
             self.proc.wait()
 
