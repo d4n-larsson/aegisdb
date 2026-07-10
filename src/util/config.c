@@ -50,6 +50,8 @@ void config_defaults(Config *cfg) {
     cfg->checkpoint_sec = 60;
     cfg->compact_sec = 300;
     cfg->io_threads = default_io_threads();
+    cfg->idle_timeout_sec = 60; /* reap connections idle (no byte progress) 60s */
+    cfg->max_connections = 0;   /* 0 = unlimited */
     cfg->enabled_phase = 4; /* all features enabled by default */
     cfg->log_level = AEGIS_LOG_INFO;
 
@@ -231,6 +233,10 @@ static void usage(const char *prog) {
             "  --io-threads <n>         poll() event-loop threads for dispatch\n"
             "                           parallelism (default: 2x CPUs, 8-64). Does\n"
             "                           not cap concurrent connections. Alias: --workers\n"
+            "  --idle-timeout-sec <n>   close a connection idle (no byte progress)\n"
+            "                           this long (default 60; 0 disables)\n"
+            "  --max-connections <n>    hard cap on concurrent client connections\n"
+            "                           (default 0 = unlimited)\n"
             "  --max-payload <bytes>    max data size (default 1048576)\n"
             "  --embedding-dim <n>      expected vector length (default 384)\n"
             "  --ann-ef-search <n>      HNSW query beam for large semantic indexes;\n"
@@ -330,6 +336,20 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
             NEXT(a); /* --workers kept as a back-compat alias for --io-threads */
             if (parse_int(val, &cfg->io_threads) || cfg->io_threads < 1) {
                 fprintf(stderr, "%s: invalid %s '%s'\n", prog, a, val);
+                return -1;
+            }
+        } else if (strcmp(a, "--idle-timeout-sec") == 0) {
+            NEXT("--idle-timeout-sec");
+            int v;
+            if (parse_int(val, &v) || v < 0) {
+                fprintf(stderr, "%s: invalid idle-timeout-sec '%s'\n", prog, val);
+                return -1;
+            }
+            cfg->idle_timeout_sec = (unsigned)v;
+        } else if (strcmp(a, "--max-connections") == 0) {
+            NEXT("--max-connections");
+            if (parse_int(val, &cfg->max_connections) || cfg->max_connections < 0) {
+                fprintf(stderr, "%s: invalid max-connections '%s'\n", prog, val);
                 return -1;
             }
         } else if (strcmp(a, "--max-payload") == 0) {

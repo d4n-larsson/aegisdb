@@ -67,6 +67,12 @@ typedef struct {
     unsigned checkpoint_sec;    /* index checkpoint cadence; 0 disables; def 60 */
     unsigned compact_sec;       /* compaction check cadence (runs only when >=25% dead); 0 disables; def 300 */
     int io_threads;             /* poll() event-loop threads (dispatch parallelism, NOT a connection cap); default 2x CPUs (8-64) */
+    /* DoS guards on the client port. idle_timeout_sec reaps a connection that
+     * has moved no bytes for that long (defeats slow-loris / stalled sockets);
+     * max_connections is a hard cap on concurrent client connections (total
+     * across io-threads). 0 = disabled for each. */
+    unsigned idle_timeout_sec;  /* default 60; 0 disables idle reaping */
+    int max_connections;        /* default 0 (unlimited) */
     int enabled_phase;          /* default 4: gate operations above this phase */
     /* Replication (Phase 1 read replicas). A primary opens a replication source
      * on `replication_port` when a token is set; a replica sets
