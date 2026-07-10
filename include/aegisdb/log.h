@@ -77,6 +77,11 @@ int log_append(LogFile *lf, const uint8_t *payload, size_t len,
  * verifies the header and payload CRCs. Returns 0/-1. */
 int log_read(LogFile *lf, uint64_t offset, uint8_t **out, size_t *out_len);
 
+/* On-disk bytes a frame occupies beyond its payload (header [+ AEAD tag]). The
+ * total frame size is log_frame_overhead(lf) + payload_len; callers tailing the
+ * log by offset use this to step to the next frame regardless of mode. */
+size_t log_frame_overhead(const LogFile *lf);
+
 /* Force durability: fsync and reset the unflushed-append counter. */
 void log_fsync(LogFile *lf);
 

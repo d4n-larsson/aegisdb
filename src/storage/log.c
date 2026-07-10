@@ -435,6 +435,10 @@ int log_read(LogFile *lf, uint64_t offset, uint8_t **out, size_t *out_len) {
     return 0;
 }
 
+size_t log_frame_overhead(const LogFile *lf) {
+    return lf->encrypted ? V3_FRAME_OVERHEAD : LOG_FRAME_HEADER;
+}
+
 int log_truncate(LogFile *lf, uint64_t valid_end) {
     pthread_mutex_lock(&lf->wlock);
     int rv = ftruncate(lf->fd, (off_t)valid_end);

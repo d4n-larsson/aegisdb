@@ -39,19 +39,6 @@ int main(int argc, char **argv) {
     if (pr != 0) { config_free(&cfg); return pr < 0 ? 1 : 0; } /* -1 err, 1 help */
     aegis_log_set_level((AegisLogLevel)cfg.log_level);
 
-    /* Encryption at rest is being rolled out incrementally (see
-     * docs/encryption-at-rest-design.md). The log is encrypted; wiring the
-     * checkpoints, backup/restore, and replication paths lands in later PRs, so
-     * refuse the combinations that are not yet safe rather than run them wrong. */
-    if (cfg.encryption_enabled &&
-        (cfg.replication_port > 0 || cfg.replicate_from_host[0] != '\0')) {
-        fprintf(stderr,
-                "encryption at rest is not yet supported together with "
-                "replication\n");
-        config_free(&cfg);
-        return 1;
-    }
-
     /* One-shot: print the hashed form of a token for the token file, then exit. */
     if (cfg.hash_token) {
         uint8_t d[SHA256_DIGEST_LEN];

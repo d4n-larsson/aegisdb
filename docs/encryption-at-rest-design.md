@@ -1,7 +1,17 @@
 # Design: Encryption at Rest
 
-**Status:** Proposed (issue #94, sub-issue of the operational-hardening epic #68).
-Not implemented. This is the design of record to review before any code lands.
+**Status:** Implemented (issue #94, sub-issue of the operational-hardening epic
+#68). Shipped across PRs #123 (vendored cipher), #124 (log), #125 (checkpoints),
+#126 (offline `--encrypt-migrate`), #127 (backup/restore), and the replication
+integration. Enabled with `--encryption-key-file`; `aegisdb gen-key` mints a key.
+
+Two deliberate differences from the original design below: replication ships the
+decrypted payload and each node re-encrypts into its own log with its own copy of
+the (shared) key, rather than shipping ciphertext byte-for-byte — so a primary
+and its replicas must be configured with the **same** key (the handshake rejects
+a mismatch), and the replication link itself is plaintext (tunnel it, as with the
+replication token). Nonce management uses XChaCha20's random 192-bit nonce as
+planned; the persisted-counter fallback was not needed.
 **Scope:** Confidentiality of AegisDB's on-disk state — the append-only log and
 the derived checkpoints — under an operator-supplied key, without taking on an
 external crypto dependency.
