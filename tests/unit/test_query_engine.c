@@ -631,6 +631,35 @@ static void test_relate_and_traverse(void) {
     TEST_ASSERT_TRUE(saw_to);
 }
 
+/* qe_relate must reject self-edges and be idempotent per (to_id, kind) so a
+ * record's relationship list cannot grow without bound (which, past 65535,
+ * would truncate the u16 wire count and make the record undecodable). */
+static void test_relate_dedup_and_selfedge(void) {
+    MemoryRecord ia = make_input(MEM_SEMANTIC, "A");
+    MemoryRecord ib = make_input(MEM_SEMANTIC, "B");
+    MemoryRecord oa, ob;
+    qe_insert(&g_db, &ia, NULL, 0, &oa);
+    qe_insert(&g_db, &ib, NULL, 0, &ob);
+    uint64_t from = oa.id, to = ob.id;
+    record_free(&oa);
+    record_free(&ob);
+
+    /* A self-edge is rejected outright. */
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_INVALID_REQUEST,
+                          qe_relate(&g_db, from, from, "x", NULL));
+
+    /* First edge sticks; an identical repeat is a no-op (still OK), and a
+     * different kind to the same target is a distinct edge. */
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_relate(&g_db, from, to, "k", NULL));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_relate(&g_db, from, to, "k", NULL));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_relate(&g_db, from, to, "k2", NULL));
+
+    MemoryRecord got;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_get(&g_db, from, NULL, &got));
+    TEST_ASSERT_EQUAL_size_t(2, got.rel_count); /* "k" once + "k2", not 3 */
+    record_free(&got);
+}
+
 static void test_agent_namespace_filter(void) {
     MemoryRecord in = make_input(MEM_EPISODIC, "owned");
     in.agent_id = strdup("agent-A");
@@ -716,6 +745,7 @@ int main(void) {
     RUN_TEST(test_consolidate);
     RUN_TEST(test_working_memory_promote);
     RUN_TEST(test_relate_and_traverse);
+    RUN_TEST(test_relate_dedup_and_selfedge);
     RUN_TEST(test_agent_namespace_filter);
     RUN_TEST(test_ns_scoped_writes);
     return UNITY_END();
