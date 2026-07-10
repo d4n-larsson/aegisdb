@@ -117,6 +117,34 @@ static void test_encode_decode_with_relationship(void) {
     record_free(&d);
 }
 
+/* A crafted frame with huge vec_count*dim must be rejected, not cause a heap
+ * overflow. Before the fix, total*4 overflowed size_t so the bounds check
+ * passed on a tiny payload and the fill loop wrote past a 0-sized malloc. This
+ * frame is only reachable via the replication stream or a tampered log, both of
+ * which hand attacker-controlled bytes to record_decode. */
+static void test_decode_rejects_embedding_overflow(void) {
+    uint8_t buf[128];
+    size_t n = 0;
+#define B(x) (buf[n++] = (uint8_t)(x))
+#define Z(k) do { for (int _i = 0; _i < (k); _i++) B(0); } while (0)
+    B(2);                       /* version 2 */
+    B(1); Z(7);                 /* id = 1 (u64 LE) */
+    B(0);                       /* type */
+    Z(8); Z(8);                 /* created, updated */
+    Z(4); Z(4);                 /* importance, confidence (f32) */
+    B(0);                       /* deleted */
+    Z(8);                       /* expires_at */
+    B(0xFF); B(0xFF); B(0xFF); B(0xFF); /* agent_id = NULL marker */
+    B(0); B(0);                 /* tag_count = 0 */
+    B(0); B(0); B(0); B(0x80);  /* vec_count = 0x80000000 */
+    B(0); B(0); B(0); B(0x80);  /* dim       = 0x80000000  -> total = 2^62 */
+    /* no float payload follows: the guard must reject before allocating */
+    MemoryRecord d;
+    TEST_ASSERT_EQUAL_INT(-1, record_decode(buf, n, &d));
+#undef B
+#undef Z
+}
+
 static void test_decode_rejects_truncated(void) {
     MemoryRecord r;
     record_init(&r);
@@ -210,6 +238,7 @@ int main(void) {
     RUN_TEST(test_encode_decode_with_embedding_and_agent);
     RUN_TEST(test_encode_decode_with_relationship);
     RUN_TEST(test_decode_rejects_truncated);
+    RUN_TEST(test_decode_rejects_embedding_overflow);
     RUN_TEST(test_clone_is_deep);
     RUN_TEST(test_multivector_roundtrip);
     return UNITY_END();
