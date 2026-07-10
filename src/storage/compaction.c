@@ -65,10 +65,14 @@ int compaction_run_once(AegisDB *db) {
     uint64_t snap_end = (uint64_t)db->log.size;
     pthread_rwlock_unlock(&db->index_lock);
 
-    /* Phase 2 (no lock): copy the snapshot's live frames into the scratch log. */
+    /* Phase 2 (no lock): copy the snapshot's live frames into the scratch log.
+     * The scratch log takes the same key, so log_read decrypts each source frame
+     * and log_append re-seals it with a FRESH nonce into the new log. */
+    const uint8_t *ckey =
+        db->config.encryption_enabled ? db->config.encryption_key : NULL;
     LogFile newlog;
-    if (log_open(&newlog, newpath, config_effective_fsync_batch(&db->config)) !=
-        0) {
+    if (log_open(&newlog, newpath, config_effective_fsync_batch(&db->config),
+                 ckey, NULL) != 0) {
         LOG_ERROR("compaction: cannot open scratch log %s", newpath);
         free(snap);
         return -1;
@@ -156,14 +160,14 @@ int compaction_run_once(AegisDB *db) {
                   newpath, db->path_log);
         /* try to reopen the original log so the server keeps working */
         log_open(&db->log, db->path_log,
-                 config_effective_fsync_batch(&db->config));
+                 config_effective_fsync_batch(&db->config), ckey, NULL);
         pthread_rwlock_unlock(&db->log_lock);
         free(locs);
         pthread_rwlock_unlock(&db->index_lock);
         return -1;
     }
     if (log_open(&db->log, db->path_log,
-                 config_effective_fsync_batch(&db->config)) != 0) {
+                 config_effective_fsync_batch(&db->config), ckey, NULL) != 0) {
         LOG_ERROR("compaction: cannot reopen compacted log %s", db->path_log);
         pthread_rwlock_unlock(&db->log_lock);
         free(locs);

@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "aegisdb/aead.h"
+
 /* Baked in at build time from the git tag (-DAEGIS_VERSION_STRING=...); the
  * build systems derive it from `git describe`, and the release image/CI pass the
  * exact tag. Falls back to a dev marker for ad-hoc builds. */
@@ -80,6 +82,11 @@ typedef struct {
      * 100000; 0 = unlimited. */
     size_t query_scan_cap;
     int enabled_phase;          /* default 4: gate operations above this phase */
+    /* Encryption at rest (see docs/encryption-at-rest-design.md). Set from
+     * --encryption-key-file: when enabled, the log is sealed with `encryption_key`
+     * (XChaCha20-Poly1305). 0 = plaintext (default). */
+    int encryption_enabled;
+    uint8_t encryption_key[AEAD_KEY_LEN];
     /* Replication (Phase 1 read replicas). A primary opens a replication source
      * on `replication_port` when a token is set; a replica sets
      * `replicate_from_host`/`_port` to follow one. `read_only` refuses client

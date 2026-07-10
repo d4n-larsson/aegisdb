@@ -32,7 +32,8 @@ def check(cond, msg):
 
 class Server:
     def __init__(self, binary, port, phase=4, auth_token=None, token_lines=None,
-                 io_threads=None, extra_args=None):
+                 io_threads=None, extra_args=None, datadir=None,
+                 expect_exit=False):
         self.binary = binary
         self.port = port
         self.phase = phase
@@ -41,7 +42,10 @@ class Server:
         self.io_threads = io_threads
         self.extra_args = extra_args or []  # arbitrary extra CLI flags
         self.proc = None
-        self.datadir = tempfile.mkdtemp(prefix="aegis_contract_")
+        # A caller-provided datadir persists across restarts (recovery tests);
+        # otherwise a throwaway one is created per instance.
+        self.datadir = datadir or tempfile.mkdtemp(prefix="aegis_contract_")
+        self.expect_exit = expect_exit  # server is expected to fail to start
 
     def __enter__(self):
         args = [self.binary, "--data-dir", self.datadir, "--port",
@@ -59,6 +63,14 @@ class Server:
         self.proc = subprocess.Popen(
             args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+        # A server expected to reject its config (e.g. wrong key) should exit
+        # nonzero rather than start listening.
+        if self.expect_exit:
+            try:
+                self.rc = self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.rc = None
+            return self
         # Wait for the listener to accept connections.
         for _ in range(50):
             try:
@@ -464,6 +476,13 @@ def test_cli(binary, port):
               "gen-token token authenticates and pins its namespace")
         r = _cli(binary, "--port", p, "put", "nope")  # no token
         check(r.returncode == 1, "client without a token -> exit 1")
+
+    # gen-key mints a 32-byte (64 hex char) encryption key on stdout
+    g = subprocess.run([binary, "gen-key"], capture_output=True, text=True)
+    key = g.stdout.strip()
+    check(g.returncode == 0 and len(key) == 64
+          and all(c in "0123456789abcdef" for c in key),
+          "gen-key prints 64 hex chars")
 
 
 def test_bulk_ops(binary, port):
@@ -998,6 +1017,52 @@ def test_query_scan_cap(binary, port):
               "tag-filtered count is exact and not capped")
 
 
+def test_encryption_at_rest(binary, port):
+    print("[encryption at rest: log sealed, survives restart, wrong key refused]")
+    datadir = tempfile.mkdtemp(prefix="aegis_enc_")
+    keyfile = os.path.join(datadir, "key.hex")
+    with open(keyfile, "w") as fh:
+        fh.write("00112233445566778899aabbccddeeff"
+                 "00112233445566778899aabbccddeeff\n")  # 32 bytes hex
+    marker = "TOP-SECRET-MEMORY-MARKER-42"
+    enc_args = ["--encryption-key-file", keyfile]
+
+    # write under encryption
+    with Server(binary, port, datadir=datadir, extra_args=enc_args) as srv:
+        r = srv.req({"operation": "insert", "type": "semantic",
+                     "tags": ["enc"], "data": marker})
+        check(r.get("ok") is True, "insert into an encrypted log ok")
+        rid = r["record"]["id"]
+        r = srv.req({"operation": "get", "id": rid})
+        check(r.get("ok") is True and r["record"]["data"] == marker,
+              "read back within the same session")
+
+    # the on-disk log must not contain the plaintext marker
+    with open(os.path.join(datadir, "memory.log"), "rb") as fh:
+        blob = fh.read()
+    check(marker.encode() not in blob, "plaintext marker absent from the log file")
+
+    # restart with the right key -> recovery decrypts and the record is present
+    with Server(binary, port, datadir=datadir, extra_args=enc_args) as srv:
+        r = srv.req({"operation": "get", "id": rid})
+        check(r.get("ok") is True and r["record"]["data"] == marker,
+              "record recovered after restart with the correct key")
+
+    # restart with the WRONG key -> server refuses to start
+    badkey = os.path.join(datadir, "bad.hex")
+    with open(badkey, "w") as fh:
+        fh.write("ff" * 32 + "\n")
+    with Server(binary, port, datadir=datadir, expect_exit=True,
+                extra_args=["--encryption-key-file", badkey]) as srv:
+        check(srv.rc is not None and srv.rc != 0,
+              "wrong key -> server exits nonzero, does not start")
+
+    # no key at all against an encrypted dir -> also refused
+    with Server(binary, port, datadir=datadir, expect_exit=True) as srv:
+        check(srv.rc is not None and srv.rc != 0,
+              "missing key on an encrypted dir -> server exits nonzero")
+
+
 def test_phase_gating(binary, port):
     print("[phase 1: gating]")
     with Server(binary, port, phase=1) as srv:
@@ -1092,6 +1157,7 @@ def main():
     test_cli(binary, 19477)
     test_search_limits(binary, 19478)
     test_query_scan_cap(binary, 19491)
+    test_encryption_at_rest(binary, 19492)
     test_concurrency(binary, 19479)
     test_bulk_ops(binary, 19480)
     test_consolidate(binary, 19481)

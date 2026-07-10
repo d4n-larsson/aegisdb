@@ -110,6 +110,24 @@ static int hex_decode(const char *s, uint8_t *out, size_t n) {
     return 0;
 }
 
+/* Load a 32-byte encryption key from `path`: exactly 64 hex chars on the first
+ * line (trailing whitespace/newline ignored). Returns 0 on success, -1 on an
+ * unreadable file or a malformed key. Never logs the key. */
+static int load_key_file(const char *path, uint8_t out[AEAD_KEY_LEN]) {
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    char line[256];
+    char *got = fgets(line, sizeof line, f);
+    fclose(f);
+    if (!got) return -1;
+    size_t n = strlen(line);
+    while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r' ||
+                     line[n - 1] == ' ' || line[n - 1] == '\t'))
+        line[--n] = '\0';
+    if (n != 2 * AEAD_KEY_LEN) return -1;
+    return hex_decode(line, out, 2 * AEAD_KEY_LEN);
+}
+
 /* Append a token bound to `ns` (NULL = global) with `scope`. `tok` is either a
  * plaintext secret or a `sha256$<64-hex>` digest (hashed at rest). Copies the
  * strings. Returns 0 on success, -1 on OOM or a malformed hash. */
@@ -226,6 +244,7 @@ static void usage(const char *prog) {
             "Usage: %s [options]            run the server\n"
             "       %s client <op> [args]   talk to a server (try 'client')\n"
             "       %s gen-token [opts]      mint a token-file line + token\n"
+            "       %s gen-key               mint an encryption-at-rest key\n"
             "\n"
             "Server options:\n"
             "  --data-dir <path>        persistence directory (default ./data)\n"
@@ -240,6 +259,10 @@ static void usage(const char *prog) {
             "                           (default 0 = unlimited)\n"
             "  --query-scan-cap <n>     max most-recent records a broad/filterless\n"
             "                           search or count loads (default 100000; 0=off)\n"
+            "  --encryption-key-file <path>  encrypt the log at rest with the 32-byte\n"
+            "                           key (64 hex chars) in <path>. Only for a NEW\n"
+            "                           data dir; not yet combinable with replication\n"
+
             "  --max-payload <bytes>    max data size (default 1048576)\n"
             "  --embedding-dim <n>      expected vector length (default 384)\n"
             "  --ann-ef-search <n>      HNSW query beam for large semantic indexes;\n"
@@ -292,7 +315,7 @@ static void usage(const char *prog) {
             "  With no --auth-token/--auth-token-file the server runs WITHOUT\n"
             "  authentication. Tokens are sent in plaintext; run the server\n"
             "  behind an encrypted channel (VPN, SSH tunnel, or TLS proxy).\n",
-            prog, prog, prog);
+            prog, prog, prog, prog);
 }
 
 int config_parse_args(Config *cfg, int argc, char **argv) {
@@ -363,6 +386,15 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
                 return -1;
             }
             cfg->query_scan_cap = (size_t)v;
+        } else if (strcmp(a, "--encryption-key-file") == 0) {
+            NEXT("--encryption-key-file");
+            if (load_key_file(val, cfg->encryption_key) != 0) {
+                fprintf(stderr,
+                        "%s: cannot read a 32-byte key (64 hex chars) from '%s'\n",
+                        prog, val);
+                return -1;
+            }
+            cfg->encryption_enabled = 1;
         } else if (strcmp(a, "--max-payload") == 0) {
             NEXT("--max-payload");
             if (parse_size(val, &cfg->max_payload_bytes)) {
