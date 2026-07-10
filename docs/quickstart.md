@@ -195,4 +195,5 @@ aegisdb --data-dir ./restored --embedding-dim 1024
 
 - [Wire protocol reference](wire-protocol.md) — every operation, field, and error code.
 - [Claude Code integration](../integrations/claude-code/) — an MCP server and hooks
-  that give Claude Code long-term memory backed by AegisDB.
+  that give Claude Code long-term memory backed by AegisDB, published on PyPI as
+  [`aegisdb-mcp`](https://pypi.org/project/aegisdb-mcp/) (`uvx aegisdb-mcp`).
