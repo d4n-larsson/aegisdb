@@ -2,12 +2,15 @@
 
 Builds a search from the user's prompt, ranks and filters hits, and formats a
 compact context block. The whole pass is bounded by ``recall_time_budget_ms``:
-the AegisDB read timeout is set to the budget, and an overall deadline guards
-against the pass exceeding it, so recall never blocks the turn (FR-005, SC-002).
-On any failure or timeout it returns an empty, ``degraded`` result.
+the search — query embedding included — runs in a daemon worker joined for at
+most the budget, and the AegisDB read timeout is also set to the budget, so
+neither a slow/hung backend nor a slow/cold embedder can make recall block the
+turn (FR-005, SC-002). On any failure or timeout it returns an empty,
+``degraded`` result.
 """
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -106,13 +109,31 @@ def run_recall(prompt: str, config, provider: EmbeddingProvider,
         return RecallResult(degraded=False, elapsed_ms=0)
 
     tools = MemoryTools(config, client, provider)
-    res = tools.search(query=prompt, top_k=config.recall_top_k)
+
+    # The whole pass must fit the budget — including provider.embed_query(),
+    # which for the voyage provider makes a network call and for the local
+    # provider loads a model on first use. That runs BEFORE the socket (whose own
+    # timeout is the budget), so bounding only the socket would let a slow or cold
+    # embedder stall the turn. Run the work in a daemon thread and wait at most
+    # the budget: if it overruns we abandon it (it dies with this short-lived hook
+    # process) and degrade to injecting nothing.
+    box: dict = {}
+
+    def _work():
+        try:
+            box["res"] = tools.search(query=prompt, top_k=config.recall_top_k)
+        except BaseException as exc:  # noqa: BLE001 — must never reach the turn
+            box["exc"] = exc
+
+    worker = threading.Thread(target=_work, daemon=True)
+    worker.start()
+    worker.join(timeout=budget_ms / 1000.0)
     elapsed_ms = int((clock() - start) * 1000)
 
-    # Over budget (even if the call returned) -> treat as degraded, inject nothing.
-    if elapsed_ms > budget_ms and not res.get("ok"):
-        return RecallResult(degraded=True, elapsed_ms=elapsed_ms)
-    if not res.get("ok"):
+    res = box.get("res")
+    # No result means the pass exceeded the budget (worker still running) or the
+    # search raised — either way inject nothing rather than block or error.
+    if res is None or not res.get("ok"):
         return RecallResult(degraded=True, elapsed_ms=elapsed_ms)
 
     memories = res.get("memories", [])
