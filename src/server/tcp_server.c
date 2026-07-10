@@ -25,17 +25,27 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "aegisdb/json_request.h"
 #include "aegisdb/json_response.h"
 #include "aegisdb/logging.h"
 
-#define POLL_TIMEOUT_MS 200 /* re-check g_stop at least this often */
+#define POLL_TIMEOUT_MS 200 /* re-check g_stop + idle-reap at least this often */
 
 /* Set from a signal handler and read by every loop thread; atomic for both
  * (lock-free atomic_int store is async-signal-safe). */
 static atomic_int g_stop;
+
+/* Total live client connections across all loop threads, for --max-connections. */
+static atomic_int g_conns;
+
+static uint64_t mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+}
 
 void tcp_server_request_stop(void) {
     atomic_store_explicit(&g_stop, 1, memory_order_relaxed);
@@ -56,6 +66,7 @@ typedef struct {
     int want_write;     /* a response is staged and not yet fully sent */
     int close_after_write; /* close once wbuf drains (e.g. oversized-line error) */
     unsigned long requests;
+    uint64_t last_activity; /* mono_ms() of last byte progress; for idle reaping */
 } Conn;
 
 /* Maximum accepted request line: payload limit plus JSON envelope slack. */
@@ -69,6 +80,7 @@ static void conn_free(Conn *c) {
     free(c->rbuf);
     free(c->wbuf);
     free(c);
+    atomic_fetch_sub_explicit(&g_conns, 1, memory_order_relaxed);
 }
 
 /* Flush staged response bytes. Returns 0 to keep the connection, -1 to close
@@ -82,6 +94,7 @@ static int conn_flush(Conn *c) {
             return -1;
         }
         c->woff += (size_t)w;
+        c->last_activity = mono_ms(); /* progress: not idle */
     }
     free(c->wbuf);
     c->wbuf = NULL;
@@ -163,11 +176,14 @@ static int conn_read(Conn *c, size_t limit) {
             return -1;
         }
         c->rlen += (size_t)r;
+        c->last_activity = mono_ms(); /* progress: not idle */
     }
 }
 
-/* Accept all pending connections on the listener into the loop's conn set. */
-static void loop_accept(int lfd, Conn ***conns, size_t *n, size_t *cap) {
+/* Accept all pending connections on the listener into the loop's conn set.
+ * `maxconn` (0 = unlimited) caps total concurrent connections across all loops. */
+static void loop_accept(int lfd, Conn ***conns, size_t *n, size_t *cap,
+                        int maxconn) {
     for (;;) {
         struct sockaddr_in paddr;
         socklen_t plen = sizeof(paddr);
@@ -176,6 +192,13 @@ static void loop_accept(int lfd, Conn ***conns, size_t *n, size_t *cap) {
             if (errno == EINTR) continue;
             break; /* EAGAIN/EWOULDBLOCK: drained, or a transient accept error */
         }
+        /* Refuse past the hard cap: an accepted-then-immediately-closed socket
+         * is a cheap, bounded response to a flood. */
+        if (maxconn > 0 &&
+            atomic_load_explicit(&g_conns, memory_order_relaxed) >= maxconn) {
+            close(cfd);
+            continue;
+        }
         int one = 1;
         setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
         Conn *c = calloc(1, sizeof(*c));
@@ -183,7 +206,9 @@ static void loop_accept(int lfd, Conn ***conns, size_t *n, size_t *cap) {
             close(cfd);
             continue;
         }
+        atomic_fetch_add_explicit(&g_conns, 1, memory_order_relaxed);
         c->fd = cfd;
+        c->last_activity = mono_ms();
         char ip[INET_ADDRSTRLEN];
         if (inet_ntop(AF_INET, &paddr.sin_addr, ip, sizeof(ip)))
             snprintf(c->peer, sizeof(c->peer), "%s:%u", ip,
@@ -215,6 +240,8 @@ static void *loop_main(void *arg) {
     AegisDB *db = L->db;
     int lfd = L->lfd;
     const size_t limit = max_line(db);
+    const int maxconn = db->config.max_connections;
+    const uint64_t idle_ms = (uint64_t)db->config.idle_timeout_sec * 1000ULL;
 
     Conn **conns = NULL;
     size_t nconns = 0, ccap = 0;
@@ -243,37 +270,59 @@ static void *loop_main(void *arg) {
             if (errno == EINTR) continue;
             break;
         }
-        if (pr == 0) continue; /* timeout: re-check g_stop */
 
-        /* Only these connections were in the poll set. loop_accept may append
-         * more below; those have no revents yet and are processed next poll. */
-        size_t polled = nconns;
+        /* pr == 0 is a timeout: no I/O to service, but still fall through to the
+         * idle-reap pass below so slow-loris / stalled sockets are collected. */
+        if (pr > 0) {
+            /* Only these connections were in the poll set. loop_accept may append
+             * more below; those have no revents yet and are processed next poll. */
+            size_t polled = nconns;
 
-        if (pfds[0].revents & POLLIN) loop_accept(lfd, &conns, &nconns, &ccap);
+            if (pfds[0].revents & POLLIN)
+                loop_accept(lfd, &conns, &nconns, &ccap, maxconn);
 
-        for (size_t i = 0; i < polled; i++) {
-            Conn *c = conns[i];
-            short re = pfds[i + 1].revents;
-            if (re == 0) continue;
-            int closeit = 0;
-            if (re & POLLIN) {
-                int rr = conn_read(c, limit);
-                if (rr < 0) closeit = 1;
-                else if (conn_advance(c, db, limit) == -1) closeit = 1;
-                else if (rr == 1) closeit = 1; /* EOF: buffered lines processed */
-            }
-            if (!closeit && (re & POLLOUT)) {
-                if (conn_flush(c) == -1) closeit = 1;
-                else if (conn_advance(c, db, limit) == -1) closeit = 1;
-            }
-            if (re & (POLLERR | POLLHUP | POLLNVAL)) closeit = 1;
-            if (closeit) {
-                LOG_DEBUG("connection from %s closed after %lu request(s)",
-                          c->peer, c->requests);
-                conn_free(c);
-                conns[i] = NULL;
+            for (size_t i = 0; i < polled; i++) {
+                Conn *c = conns[i];
+                short re = pfds[i + 1].revents;
+                if (re == 0) continue;
+                int closeit = 0;
+                if (re & POLLIN) {
+                    int rr = conn_read(c, limit);
+                    if (rr < 0) closeit = 1;
+                    else if (conn_advance(c, db, limit) == -1) closeit = 1;
+                    else if (rr == 1) closeit = 1; /* EOF: buffered lines processed */
+                }
+                if (!closeit && (re & POLLOUT)) {
+                    if (conn_flush(c) == -1) closeit = 1;
+                    else if (conn_advance(c, db, limit) == -1) closeit = 1;
+                }
+                if (re & (POLLERR | POLLHUP | POLLNVAL)) closeit = 1;
+                if (closeit) {
+                    LOG_DEBUG("connection from %s closed after %lu request(s)",
+                              c->peer, c->requests);
+                    conn_free(c);
+                    conns[i] = NULL;
+                }
             }
         }
+
+        /* Reap connections that have moved no bytes for idle_ms (slow-loris,
+         * abandoned sockets). last_activity is stamped on accept and on every
+         * read/write that makes progress, so an active peer is never reaped. */
+        if (idle_ms) {
+            uint64_t now = mono_ms();
+            for (size_t i = 0; i < nconns; i++) {
+                Conn *c = conns[i];
+                if (!c) continue;
+                if (now - c->last_activity > idle_ms) {
+                    LOG_DEBUG("connection from %s reaped: idle %llu ms", c->peer,
+                              (unsigned long long)(now - c->last_activity));
+                    conn_free(c);
+                    conns[i] = NULL;
+                }
+            }
+        }
+
         /* compact out closed connections */
         size_t w = 0;
         for (size_t i = 0; i < nconns; i++)
