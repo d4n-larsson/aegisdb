@@ -680,6 +680,54 @@ def test_restore(binary, port):
     check(run_restore(notsnap, dest3) == 1, "restore rejects a non-snapshot dir")
 
 
+def test_encrypted_backup_restore(binary, port):
+    print("[backup: encrypted snapshot restores only with the matching key]")
+    datadir = tempfile.mkdtemp(prefix="aegis_encbk_")
+    keyfile = os.path.join(datadir, "key.hex")
+    with open(keyfile, "w") as fh:
+        fh.write("0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+                 "0f1e2d3c4b5a69788796a5b4c3d2e1f0\n")
+    badkey = os.path.join(datadir, "bad.hex")
+    with open(badkey, "w") as fh:
+        fh.write("11" * 32 + "\n")
+
+    def run_restore(snap, dest, extra=None):
+        args = [binary, "--restore", snap, "--data-dir", dest] + (extra or [])
+        return subprocess.run(args, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL).returncode
+
+    enc = ["--encryption-key-file", keyfile]
+    with Server(binary, port, datadir=datadir, extra_args=enc) as srv:
+        for i in range(3):
+            srv.req({"operation": "insert", "type": "episodic", "data": f"e{i}"})
+        snap = srv.req({"operation": "snapshot", "name": "snap"})["snapshot"]
+
+    # the manifest marks the snapshot encrypted and names the key fingerprint
+    with open(os.path.join(snap, "manifest.json")) as fh:
+        man = json.load(fh)
+    check(man.get("encrypted") is True and isinstance(man.get("key_fingerprint"),
+          str), "manifest records encrypted + key fingerprint")
+
+    # restore with the matching key succeeds; the records recover under the key
+    dest = tempfile.mkdtemp(prefix="aegis_encbk_r_")
+    shutil.rmtree(dest)
+    check(run_restore(snap, dest, enc) == 0, "restore with the matching key -> 0")
+    s2 = Server(binary, port + 1, datadir=dest, extra_args=enc)
+    with s2:
+        r = s2.req({"operation": "search", "top_k": 100})
+        check(r.get("ok") is True and r.get("total") == 3,
+              "restored encrypted db has all records")
+
+    # restore without a key, or with the wrong key, is refused (nothing installed)
+    d_nokey = tempfile.mkdtemp(prefix="aegis_encbk_n_"); shutil.rmtree(d_nokey)
+    check(run_restore(snap, d_nokey) == 1, "restore of an encrypted snapshot needs a key")
+    check(not os.path.exists(os.path.join(d_nokey, "memory.log")),
+          "refused (no key) leaves the target empty")
+    d_bad = tempfile.mkdtemp(prefix="aegis_encbk_b_"); shutil.rmtree(d_bad)
+    check(run_restore(snap, d_bad, ["--encryption-key-file", badkey]) == 1,
+          "restore with the wrong key is refused")
+
+
 def test_multivector(binary, port):
     print("[multi-vector: embeddings array round-trip]")
     with Server(binary, port, phase=4) as srv:  # --embedding-dim 384
@@ -1236,6 +1284,7 @@ def main():
     test_snapshot(binary, 19483)
     test_snapshot_admin_only(binary, 19485)
     test_restore(binary, 19486)
+    test_encrypted_backup_restore(binary, 19494)
 
     print()
     if FAILURES:

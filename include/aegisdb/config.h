@@ -133,6 +133,11 @@ int config_add_token(Config *cfg, const char *tok, const char *ns, int scope);
  * without exposing the secret. */
 void config_token_fingerprint(const AuthToken *t, char out[13]);
 
+/* A stable public fingerprint of an encryption key: the first 12 hex chars of
+ * SHA-256(key). Lets a snapshot manifest / handshake name which key is needed
+ * without exposing it. Writes 13 bytes (12 + NUL). */
+void config_key_fingerprint(const uint8_t key[AEAD_KEY_LEN], char out[13]);
+
 /* Remove the token whose fingerprint equals `id12`. Returns 1 if removed, 0 if
  * no match. */
 int config_remove_token(Config *cfg, const char *id12);

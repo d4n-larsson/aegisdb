@@ -43,19 +43,13 @@ int main(int argc, char **argv) {
      * docs/encryption-at-rest-design.md). The log is encrypted; wiring the
      * checkpoints, backup/restore, and replication paths lands in later PRs, so
      * refuse the combinations that are not yet safe rather than run them wrong. */
-    if (cfg.encryption_enabled) {
-        if (cfg.replication_port > 0 || cfg.replicate_from_host[0] != '\0') {
-            fprintf(stderr, "encryption at rest is not yet supported together "
-                            "with replication\n");
-            config_free(&cfg);
-            return 1;
-        }
-        if (cfg.restore_from) {
-            fprintf(stderr, "encryption at rest is not yet supported together "
-                            "with --restore\n");
-            config_free(&cfg);
-            return 1;
-        }
+    if (cfg.encryption_enabled &&
+        (cfg.replication_port > 0 || cfg.replicate_from_host[0] != '\0')) {
+        fprintf(stderr,
+                "encryption at rest is not yet supported together with "
+                "replication\n");
+        config_free(&cfg);
+        return 1;
     }
 
     /* One-shot: print the hashed form of a token for the token file, then exit. */
@@ -116,11 +110,10 @@ int main(int argc, char **argv) {
                  (unsigned long long)cfg.fsync_interval_ms);
 
     if (cfg.encryption_enabled) {
-        uint8_t d[SHA256_DIGEST_LEN];
-        sha256(cfg.encryption_key, AEAD_KEY_LEN, d);
+        char fp[13];
+        config_key_fingerprint(cfg.encryption_key, fp);
         LOG_INFO("encryption at rest: ENABLED (log + checkpoints sealed with "
-                 "XChaCha20-Poly1305; key fingerprint %02x%02x%02x%02x%02x%02x)",
-                 d[0], d[1], d[2], d[3], d[4], d[5]);
+                 "XChaCha20-Poly1305; key fingerprint %s)", fp);
     }
     if (cfg.checkpoint_sec)
         LOG_INFO("index checkpoint every %us (recovery replays only the tail "

@@ -112,6 +112,34 @@ int restore_run(const Config *cfg) {
         goto done;
     }
 
+    /* An encrypted snapshot can only be restored by a server configured with the
+     * key it was sealed with — fail fast on a mismatch rather than after a
+     * confusing decrypt failure on the next start. */
+    const cJSON *enc = cJSON_GetObjectItemCaseSensitive(man, "encrypted");
+    if (cJSON_IsTrue(enc)) {
+        if (!cfg->encryption_enabled) {
+            LOG_ERROR("restore: snapshot is encrypted; restore with the matching "
+                      "--encryption-key-file");
+            goto done;
+        }
+        char fp[13];
+        config_key_fingerprint(cfg->encryption_key, fp);
+        const cJSON *mfp =
+            cJSON_GetObjectItemCaseSensitive(man, "key_fingerprint");
+        if (!cJSON_IsString(mfp) || strcmp(mfp->valuestring, fp) != 0) {
+            LOG_ERROR("restore: --encryption-key-file (fingerprint %s) does not "
+                      "match the snapshot's key (%s)", fp,
+                      cJSON_IsString(mfp) ? mfp->valuestring : "?");
+            goto done;
+        }
+    } else if (cfg->encryption_enabled) {
+        /* Plaintext snapshot but a key was given: the restored plaintext log
+         * would be refused on the next start. Guide the operator. */
+        LOG_ERROR("restore: snapshot is plaintext but --encryption-key-file was "
+                  "given; restore without a key, then run --encrypt-migrate");
+        goto done;
+    }
+
     /* Never clobber a live database. */
     char dst_log[1300], dst_meta[1300];
     snprintf(dst_log, sizeof(dst_log), "%s/memory.log", cfg->data_dir);
