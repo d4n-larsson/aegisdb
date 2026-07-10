@@ -22,6 +22,7 @@ JSON-over-TCP wire protocol.
   agent-namespace isolation
 - **Multi-tenant auth** — optional bearer tokens (constant-time check; `ping` exempt), each bound to a namespace + scope (`ro`/`rw`/admin) so one server safely isolates many tenants
 - **Per-tenant limits** — optional storage quotas (records/bytes) and a request rate limit per namespace, so one team member's runaway agent can't fill the disk or monopolize the shared server
+- **Encryption at rest** — optional XChaCha20-Poly1305 (vendored, no crypto dependency) over the log + checkpoints; opt-in via `--encryption-key-file`, with an offline migrator and encrypted backups/replicas
 - **Operations** — `stats` for monitoring and online `snapshot`/restore backups
 - **Concurrency** — sharded `poll()` event-loop threads (`--io-threads`); selectable `fsync` durability (`sync` / `batch` / `interval`)
 
@@ -191,6 +192,8 @@ token: 9f3c…              # give to the client (AEGIS_TOKEN); not recoverable
 | `--auth-token <token>` | — | Accept this global **admin** token (repeatable) |
 | `--auth-token-file <path>` | — | Accept tokens, one per line: `<token> [namespace] [ro\|rw\|admin]`; a token may be `sha256$<hex>` (hashed at rest) |
 | `--hash-token <token>` | | Print the token's `sha256$<hex>` form and exit (paste into the token file) |
+| `--encryption-key-file <path>` | — | Encrypt the log + checkpoints at rest with the 32-byte key (64 hex chars) in `<path>` ([Encryption at rest](#encryption-at-rest)) |
+| `--encrypt-migrate` | | Rewrite `--data-dir`'s plaintext log encrypted (needs `--encryption-key-file`) and exit |
 | `--health-check` | | Probe a local server on `--port`, print nothing, exit 0 if healthy / 1 otherwise |
 | `--help` | | Show usage |
 
@@ -232,6 +235,34 @@ Tokens are sent in plaintext, so run the server behind an encrypted channel — 
 TLS-terminating reverse proxy (nginx/Caddy), `stunnel`, or a private network.
 TLS is intentionally kept out of the binary to preserve the single,
 dependency-free build.
+
+### Encryption at rest
+
+The log and index checkpoints can be encrypted on disk with
+XChaCha20-Poly1305 (vendored — no crypto dependency added), so a stolen disk,
+volume snapshot, or backup tarball reveals nothing without the key. Mint a key
+and start with it:
+
+```sh
+aegisdb gen-key > key.hex           # 32-byte key, 64 hex chars; store it 0600
+aegisdb --data-dir ./data --encryption-key-file key.hex
+```
+
+- **Opt-in and per-directory.** A data dir created without a key stays
+  plaintext. On a *new* dir the key encrypts from the first write; to convert an
+  *existing* plaintext dir, run the offline one-shot
+  `aegisdb --encrypt-migrate --data-dir ./data --encryption-key-file key.hex`.
+- **Fail-closed.** The server refuses to start if the key does not match the dir
+  (wrong key, or a key given for a plaintext dir / no key for an encrypted one).
+- **Backups** stay encrypted; `--restore` requires the same key (the snapshot
+  manifest records a non-secret key fingerprint and is checked before restoring).
+- **Replicas** must be configured with the **same** `--encryption-key-file`; the
+  subscribe handshake rejects a key mismatch. Each node encrypts its own log with
+  the key.
+- **Scope.** This protects data *at rest*. It is not a transport control (the
+  wire, including replication, is still plaintext — front it with a proxy as
+  above) and does not protect a running process's memory. Keep the key safe and
+  separate from the data dir; without it the data is unrecoverable.
 
 ## Wire Protocol
 

@@ -801,6 +801,62 @@ def test_include_embeddings(binary, port):
               "include_embeddings=true includes the embedding")
 
 
+def test_replication_encrypted(binary, port):
+    print("[read replica: encrypted primary -> encrypted replica (shared key)]")
+    repl_port = port + 1
+    replica_port = port + 2
+    tok = "repl-secret"
+    keydir = tempfile.mkdtemp(prefix="aegis_replenc_")
+    keyfile = os.path.join(keydir, "key.hex")
+    with open(keyfile, "w") as fh:
+        fh.write("cafebabecafebabecafebabecafebabe"
+                 "cafebabecafebabecafebabecafebabe\n")
+    badkey = os.path.join(keydir, "bad.hex")
+    with open(badkey, "w") as fh:
+        fh.write("22" * 32 + "\n")
+    enc = ["--encryption-key-file", keyfile]
+
+    with Server(binary, port, extra_args=[
+            "--replication-port", str(repl_port),
+            "--replication-token", tok] + enc) as primary:
+        with Server(binary, replica_port, extra_args=[
+                "--replicate-from", f"127.0.0.1:{repl_port}",
+                "--replication-token", tok] + enc) as replica:
+            r = primary.req({"operation": "insert", "type": "semantic",
+                             "tags": ["e"], "data": "encrypted-replica-data"})
+            check(r.get("ok") is True, "primary (encrypted) insert ok")
+            rid = r["record"]["id"]
+            got = None
+            for _ in range(60):
+                got = replica.req({"operation": "get", "id": rid})
+                if got.get("ok"):
+                    break
+                time.sleep(0.1)
+            check(got.get("ok") is True
+                  and got["record"]["data"] == "encrypted-replica-data",
+                  "record replicated to the encrypted replica")
+
+        # both on-disk logs are ciphertext (no plaintext marker)
+        for who in ("primary", "replica"):
+            dd = primary.datadir if who == "primary" else replica.datadir
+            with open(os.path.join(dd, "memory.log"), "rb") as fh:
+                check(b"encrypted-replica-data" not in fh.read(),
+                      f"{who} log is ciphertext on disk")
+
+        # a replica with the WRONG key is rejected and never converges
+        with Server(binary, replica_port + 10, extra_args=[
+                "--replicate-from", f"127.0.0.1:{repl_port}",
+                "--replication-token", tok,
+                "--encryption-key-file", badkey]) as bad:
+            converged = False
+            for _ in range(15):
+                if bad.req({"operation": "get", "id": rid}).get("ok"):
+                    converged = True
+                    break
+                time.sleep(0.1)
+            check(not converged, "wrong-key replica is rejected, does not converge")
+
+
 def test_replication(binary, port):
     print("[read replica: log shipping]")
     repl_port = port + 1      # primary's replication stream port
@@ -1280,6 +1336,7 @@ def main():
     test_tenant_rate_limit(binary, 19489)
     test_token_admin(binary, 19490)
     test_replication(binary, 19520)  # uses port, +1 (repl stream), +2 (replica)
+    test_replication_encrypted(binary, 19525)  # uses port, +1, +2, +12
     test_replication_preauth(binary, 19523)  # uses port, +1 (repl stream)
     test_snapshot(binary, 19483)
     test_snapshot_admin_only(binary, 19485)

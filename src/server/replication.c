@@ -221,7 +221,9 @@ static void *streamer(void *arg) {
     const cJSON *jtok = cJSON_GetObjectItemCaseSensitive(req, "token");
     const cJSON *joff = cJSON_GetObjectItemCaseSensitive(req, "from_offset");
     const cJSON *jgen = cJSON_GetObjectItemCaseSensitive(req, "generation");
+    const cJSON *jfp = cJSON_GetObjectItemCaseSensitive(req, "key_fingerprint");
     const char *tok = cJSON_IsString(jtok) ? jtok->valuestring : "";
+    const char *req_fp = cJSON_IsString(jfp) ? jfp->valuestring : "";
     uint64_t from_off = cJSON_IsNumber(joff) ? (uint64_t)joff->valuedouble : 0;
     uint64_t req_gen = cJSON_IsNumber(jgen) ? (uint64_t)jgen->valuedouble : 0;
 
@@ -235,6 +237,22 @@ static void *streamer(void *arg) {
         (void)write_all(fd, "{\"ok\":false}\n", 13);
         cJSON_Delete(req);
         LOG_WARN("replication: subscriber rejected (bad token)");
+        goto done;
+    }
+    /* Encryption at rest re-frames the log per mode, and the follower re-appends
+     * shipped payloads into its own log at byte-identical offsets — which only
+     * stays in lockstep if both sides use the same framing (same key/mode). The
+     * replica must therefore be configured with the SAME encryption key; reject a
+     * mismatch (which includes a plaintext/encrypted mode difference) up front,
+     * comparing non-secret fingerprints ("" when unencrypted). */
+    char own_fp[13] = "";
+    if (db->config.encryption_enabled)
+        config_key_fingerprint(db->config.encryption_key, own_fp);
+    if (strcmp(req_fp, own_fp) != 0) {
+        (void)write_all(fd, "{\"ok\":false,\"error\":\"encryption key mismatch\"}\n",
+                        47);
+        cJSON_Delete(req);
+        LOG_WARN("replication: subscriber rejected (encryption key/mode mismatch)");
         goto done;
     }
     cJSON_Delete(req);
@@ -299,7 +317,9 @@ static void *streamer(void *arg) {
                 goto done;
             }
             free(payload);
-            cursor += LOG_FRAME_HEADER + (uint64_t)plen;
+            /* Step by the actual on-disk frame size (v2 vs encrypted v3 differ),
+             * so tailing stays aligned on an encrypted primary log. */
+            cursor += (uint64_t)log_frame_overhead(&db->log) + (uint64_t)plen;
             sent_any = 1;
         }
         /* Heartbeat carries the current log size so an idle replica can measure
@@ -477,11 +497,18 @@ static void follow_session(ReplicationFollower *f) {
     set_timeouts(fd, 5);
 
     uint64_t from_off = log_size_locked(db);
-    char hs[256];
+    /* Advertise our encryption key fingerprint ("" when unencrypted) so the
+     * primary can reject a key/mode mismatch before streaming (see the source
+     * side). Both sides must share the key for offsets to stay in lockstep. */
+    char own_fp[13] = "";
+    if (db->config.encryption_enabled)
+        config_key_fingerprint(db->config.encryption_key, own_fp);
+    char hs[320];
     int hl = snprintf(hs, sizeof hs,
-                      "{\"from_offset\":%llu,\"generation\":%llu,\"token\":\"%s\"}\n",
+                      "{\"from_offset\":%llu,\"generation\":%llu,\"token\":\"%s\","
+                      "\"key_fingerprint\":\"%s\"}\n",
                       (unsigned long long)from_off, (unsigned long long)f->gen,
-                      f->token);
+                      f->token, own_fp);
     if (write_all(fd, hs, (size_t)hl) != 0) { close(fd); return; }
 
     char resp[256];
@@ -491,10 +518,15 @@ static void follow_session(ReplicationFollower *f) {
     int ok = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "ok"));
     int reset = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "reset"));
     const cJSON *jg = cJSON_GetObjectItemCaseSensitive(r, "generation");
+    const cJSON *jerr = cJSON_GetObjectItemCaseSensitive(r, "error");
+    char err[64] = "check token";
+    if (cJSON_IsString(jerr))
+        snprintf(err, sizeof err, "%s", jerr->valuestring);
     if (cJSON_IsNumber(jg)) f->gen = (uint64_t)jg->valuedouble;
+    int rejected = !ok;
     cJSON_Delete(r);
-    if (!ok) {
-        LOG_ERROR("replication: primary rejected subscription (check token)");
+    if (rejected) {
+        LOG_ERROR("replication: primary rejected subscription (%s)", err);
         close(fd);
         return;
     }
