@@ -13,7 +13,18 @@
  * frame and recovers the good frames that follow.
  *
  * The MAGIC also versions the format: a legacy v1 log (8-byte [CRC][LEN] header,
- * no magic) is detected on open and migrated in place to v2. */
+ * no magic) is detected on open and migrated in place to v2.
+ *
+ * When a key is supplied (encryption at rest, see docs/encryption-at-rest-design.md)
+ * frames use a v3 layout instead — a distinct magic, so the two are told apart
+ * the same way v1/v2 are:
+ *   [MAGIC_ENC: u32][LEN: u32][NONCE: 24B][HEADER_CRC: u32]
+ *   [CIPHERTEXT: LEN bytes][TAG: 16B]
+ * LEN is the plaintext length (XChaCha20 is a stream cipher, so ciphertext is
+ * the same length), so offset arithmetic is unchanged apart from the larger
+ * per-frame overhead. HEADER_CRC covers magic+len+nonce for keyless resync; the
+ * AEAD authenticates the ciphertext with that same prefix as associated data,
+ * superseding the payload CRC. A log is uniformly plaintext or encrypted. */
 #ifndef AEGISDB_LOG_H
 #define AEGISDB_LOG_H
 
@@ -23,7 +34,9 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-#define LOG_FRAME_HEADER 16 /* magic(4) + len(4) + payload_crc(4) + hdr_crc(4) */
+#include "aegisdb/aead.h"
+
+#define LOG_FRAME_HEADER 16 /* v2: magic(4) + len(4) + payload_crc(4) + hdr_crc(4) */
 
 typedef struct {
     int fd;
@@ -33,11 +46,26 @@ typedef struct {
     /* atomic: mutated under wlock, but log_flush_pending reads it lock-free. */
     _Atomic size_t since_fsync;
     size_t fsync_batch;     /* fsync after this many appends (0 = every append) */
+    int encrypted;          /* 1: frames are v3 AEAD frames sealed with `key` */
+    uint8_t key[AEAD_KEY_LEN]; /* frame-encryption key; valid iff encrypted */
 } LogFile;
 
-/* Open (creating if needed) the log at `path`. A legacy v1 log is migrated to
- * the v2 frame format in place before returning. Returns 0/-1. */
-int log_open(LogFile *lf, const char *path, size_t fsync_batch);
+/* Reason a log failed to open, for a clear operator message (log_open logs it). */
+typedef enum {
+    LOG_OPEN_OK = 0,
+    LOG_OPEN_ERR_IO,            /* filesystem / migration failure */
+    LOG_OPEN_ERR_KEY_ON_PLAIN,  /* key supplied but the log is plaintext */
+    LOG_OPEN_ERR_PLAIN_ON_ENC,  /* encrypted log but no key supplied */
+    LOG_OPEN_ERR_WRONG_KEY,     /* key supplied does not decrypt the log */
+} LogOpenStatus;
+
+/* Open (creating if needed) the log at `path`. `key` (AEAD_KEY_LEN bytes) enables
+ * encryption at rest; NULL leaves the log plaintext. A legacy v1 log is migrated
+ * to v2 in place. The plaintext/encrypted mode of an existing log must match the
+ * key argument (fail-closed) — see LogOpenStatus. Returns 0 on success, -1 on
+ * failure; on failure *status (may be NULL) carries the reason. */
+int log_open(LogFile *lf, const char *path, size_t fsync_batch,
+             const uint8_t *key, LogOpenStatus *status);
 void log_close(LogFile *lf);
 
 /* Append a payload frame. On success sets *out_offset to the frame start and

@@ -29,12 +29,33 @@ int main(int argc, char **argv) {
         return client_main(argc - 1, argv + 1);
     if (argc >= 2 && strcmp(argv[1], "gen-token") == 0)
         return gen_token_main(argc - 1, argv + 1);
+    if (argc >= 2 && strcmp(argv[1], "gen-key") == 0)
+        return gen_key_main(argc - 1, argv + 1);
 
     Config cfg;
     config_defaults(&cfg);
     int pr = config_parse_args(&cfg, argc, argv);
     if (pr != 0) { config_free(&cfg); return pr < 0 ? 1 : 0; } /* -1 err, 1 help */
     aegis_log_set_level((AegisLogLevel)cfg.log_level);
+
+    /* Encryption at rest is being rolled out incrementally (see
+     * docs/encryption-at-rest-design.md). The log is encrypted; wiring the
+     * checkpoints, backup/restore, and replication paths lands in later PRs, so
+     * refuse the combinations that are not yet safe rather than run them wrong. */
+    if (cfg.encryption_enabled) {
+        if (cfg.replication_port > 0 || cfg.replicate_from_host[0] != '\0') {
+            fprintf(stderr, "encryption at rest is not yet supported together "
+                            "with replication\n");
+            config_free(&cfg);
+            return 1;
+        }
+        if (cfg.restore_from) {
+            fprintf(stderr, "encryption at rest is not yet supported together "
+                            "with --restore\n");
+            config_free(&cfg);
+            return 1;
+        }
+    }
 
     /* One-shot: print the hashed form of a token for the token file, then exit. */
     if (cfg.hash_token) {
@@ -85,7 +106,15 @@ int main(int argc, char **argv) {
                  "acknowledged writes within that window may be lost on crash",
                  (unsigned long long)cfg.fsync_interval_ms);
 
-    if (cfg.checkpoint_sec)
+    if (cfg.encryption_enabled) {
+        uint8_t d[SHA256_DIGEST_LEN];
+        sha256(cfg.encryption_key, AEAD_KEY_LEN, d);
+        LOG_INFO("encryption at rest: ENABLED (log sealed with XChaCha20-Poly1305; "
+                 "key fingerprint %02x%02x%02x%02x%02x%02x)", d[0], d[1], d[2],
+                 d[3], d[4], d[5]);
+        LOG_WARN("encrypted mode: index checkpoints are disabled for now, so "
+                 "recovery full-scans the log (slower startup on a large log)");
+    } else if (cfg.checkpoint_sec)
         LOG_INFO("index checkpoint every %us (recovery replays only the tail "
                  "written since the last checkpoint)",
                  cfg.checkpoint_sec);

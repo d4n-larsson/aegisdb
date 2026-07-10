@@ -16,4 +16,8 @@ int client_main(int argc, char **argv);
  * line and the plaintext token. Returns a process exit code. */
 int gen_token_main(int argc, char **argv);
 
+/* Run the `gen-key` subcommand. argv[0] is "gen-key". Prints a fresh random
+ * 32-byte encryption key as 64 hex chars for --encryption-key-file. */
+int gen_key_main(int argc, char **argv);
+
 #endif /* AEGISDB_CLIENT_H */

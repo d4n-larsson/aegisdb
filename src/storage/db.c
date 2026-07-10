@@ -52,6 +52,10 @@ int db_save_metadata(AegisDB *db) {
 }
 
 int db_checkpoint(AegisDB *db) {
+    /* Checkpoints are written plaintext; until the checkpoint files are
+     * themselves encrypted (a later PR), an encrypted log skips them and
+     * recovery full-scans the (encrypted) log instead — correct, just slower. */
+    if (db->config.encryption_enabled) return 0;
     /* Capture a consistent (hash, covered offset, next_id) tuple under the read
      * lock, then write it. Readers proceed; writers pause only for the write. */
     pthread_rwlock_rdlock(&db->index_lock);
@@ -443,8 +447,12 @@ int db_open(AegisDB *db, const Config *cfg) {
         db->config.auth_tokens = NULL;
     }
 
-    if (log_open(&db->log, db->path_log, config_effective_fsync_batch(cfg)) !=
-        0) {
+    const uint8_t *log_key = cfg->encryption_enabled ? cfg->encryption_key : NULL;
+    LogOpenStatus log_st;
+    if (log_open(&db->log, db->path_log, config_effective_fsync_batch(cfg),
+                 log_key, &log_st) != 0) {
+        /* log_open already logged the specific reason (wrong key, mode
+         * mismatch, I/O). */
         LOG_ERROR("cannot open log: %s", db->path_log);
         goto fail_locks;
     }

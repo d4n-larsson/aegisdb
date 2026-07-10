@@ -353,3 +353,22 @@ int gen_token_main(int argc, char **argv) {
     printf("token: %s\n", tok);
     return 0;
 }
+
+int gen_key_main(int argc, char **argv) {
+    (void)argv;
+    if (argc > 1) {
+        fprintf(stderr, "Usage: aegisdb gen-key\n");
+        return 2;
+    }
+    char key[2 * 32 + 1];
+    if (random_hex(key, 32) != 0) {
+        fprintf(stderr, "gen-key: cannot read /dev/urandom\n");
+        return 1;
+    }
+    fprintf(stderr,
+            "Write this 32-byte key to a 0600 file and pass it with "
+            "--encryption-key-file.\nStore it safely and separately from the "
+            "data dir; without it the log cannot be read.\n\n");
+    printf("%s\n", key);
+    return 0;
+}

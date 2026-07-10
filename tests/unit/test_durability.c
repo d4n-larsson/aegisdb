@@ -68,7 +68,7 @@ static void test_effective_fsync_batch(void) {
  * (batch == 1) a single append is immediately due, so the flush clears it. */
 static void test_sync_batch_leaves_nothing_pending(void) {
     LogFile lf;
-    TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 1));
+    TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 1, NULL, NULL));
     uint64_t off;
     TEST_ASSERT_EQUAL_INT(0, log_append(&lf, (const uint8_t *)"x", 1, &off));
     TEST_ASSERT_TRUE(log_flush_pending(&lf)); /* append defers the fsync */
@@ -81,7 +81,7 @@ static void test_sync_batch_leaves_nothing_pending(void) {
  * explicit fsync clears them — this is what the maintenance thread drives. */
 static void test_interval_pending_until_explicit_fsync(void) {
     LogFile lf;
-    TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, SIZE_MAX));
+    TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, SIZE_MAX, NULL, NULL));
     uint64_t off;
     TEST_ASSERT_EQUAL_INT(0, log_append(&lf, (const uint8_t *)"a", 1, &off));
     TEST_ASSERT_EQUAL_INT(0, log_append(&lf, (const uint8_t *)"b", 1, &off));
