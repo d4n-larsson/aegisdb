@@ -260,8 +260,12 @@ static void usage(const char *prog) {
             "  --query-scan-cap <n>     max most-recent records a broad/filterless\n"
             "                           search or count loads (default 100000; 0=off)\n"
             "  --encryption-key-file <path>  encrypt the log at rest with the 32-byte\n"
-            "                           key (64 hex chars) in <path>. Only for a NEW\n"
-            "                           data dir; not yet combinable with replication\n"
+            "                           key (64 hex chars) in <path>. On a NEW data dir\n"
+            "                           it encrypts from the first write; on an existing\n"
+            "                           plaintext dir run --encrypt-migrate first. Not\n"
+            "                           yet combinable with replication\n"
+            "  --encrypt-migrate        rewrite --data-dir's plaintext log encrypted\n"
+            "                           (needs --encryption-key-file) and exit\n"
 
             "  --max-payload <bytes>    max data size (default 1048576)\n"
             "  --embedding-dim <n>      expected vector length (default 384)\n"
@@ -340,6 +344,8 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
         } else if (strcmp(a, "--restore") == 0) {
             NEXT("--restore");
             cfg->restore_from = val; /* borrows argv; handled and exits in main */
+        } else if (strcmp(a, "--encrypt-migrate") == 0) {
+            cfg->encrypt_migrate = 1; /* handled and exits in main */
         } else if (strcmp(a, "--data-dir") == 0) {
             NEXT("--data-dir");
             strncpy(cfg->data_dir, val, sizeof(cfg->data_dir) - 1);

@@ -9,6 +9,7 @@
 #include "aegisdb/compaction.h"
 #include "aegisdb/config.h"
 #include "aegisdb/db.h"
+#include "aegisdb/encrypt_migrate.h"
 #include "aegisdb/health.h"
 #include "aegisdb/logging.h"
 #include "aegisdb/replication.h"
@@ -83,6 +84,14 @@ int main(int argc, char **argv) {
         int rr = restore_run(&cfg);
         config_free(&cfg);
         return rr == 0 ? 0 : 1;
+    }
+
+    /* One-shot: rewrite the plaintext log encrypted, then exit; a normal start
+     * with the same key afterwards runs on the encrypted data. */
+    if (cfg.encrypt_migrate) {
+        int mr = encrypt_migrate_run(&cfg);
+        config_free(&cfg);
+        return mr == 0 ? 0 : 1;
     }
 
     LOG_INFO("AegisDB %s starting (log level: %s)", AEGIS_VERSION_STRING,

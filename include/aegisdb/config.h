@@ -99,6 +99,7 @@ typedef struct {
     int run_health_check;       /* 1 if --health-check: probe a server and exit */
     const char *hash_token;     /* --hash-token <tok>: print sha256$<hex> & exit */
     const char *restore_from;   /* --restore <dir>: install a snapshot into --data-dir & exit */
+    int encrypt_migrate;        /* --encrypt-migrate: rewrite the plaintext log encrypted & exit */
     int log_level;              /* AegisLogLevel; default AEGIS_LOG_INFO (2) */
 
     /* Accepted bearer tokens. When auth_token_count == 0 authentication is
