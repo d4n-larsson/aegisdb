@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "aegisdb/log.h"
@@ -91,6 +92,29 @@ static int read_line(int fd, char *buf, size_t cap) {
     buf[i] = '\0';
     return (int)i;
 }
+static uint64_t mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+}
+/* read_line with an absolute wall-clock deadline. A per-recv SO_RCVTIMEO alone
+ * doesn't bound the handshake: a slow-loris that drips one byte just under the
+ * timeout keeps resetting it. The deadline caps the whole read regardless. */
+static int read_line_deadline(int fd, char *buf, size_t cap,
+                              uint64_t deadline_ms) {
+    size_t i = 0;
+    while (i + 1 < cap) {
+        if (mono_ms() >= deadline_ms) return -1;
+        char c;
+        ssize_t n = read(fd, &c, 1);
+        if (n < 0) { if (errno == EINTR) continue; return -1; }
+        if (n == 0) return -1;
+        if (c == '\n') break;
+        buf[i++] = c;
+    }
+    buf[i] = '\0';
+    return (int)i;
+}
 static void set_timeouts(int fd, int secs) {
     struct timeval tv = {.tv_sec = secs, .tv_usec = 0};
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
@@ -102,6 +126,15 @@ static void set_timeouts(int fd, int secs) {
 /* ============================================================ SOURCE ======= */
 
 #define MAX_REPLICAS 128
+/* Concurrent un-authenticated handshakes. A small cap kept separate from the
+ * replica slots so a flood of connections that never (or slowly) authenticate
+ * can neither starve real replicas of their 128 slots nor spawn unbounded
+ * threads before proving the token. */
+#define MAX_PENDING 16
+#define HANDSHAKE_TIMEOUT_SEC 5 /* hard bound on the pre-auth handshake read */
+#define STREAM_TIMEOUT_SEC 30   /* post-auth recv/send timeout while streaming */
+/* The registry holds every live connection fd (pending + established). */
+#define REPL_CONN_SLOTS (MAX_REPLICAS + MAX_PENDING)
 
 struct ReplicationSource {
     AegisDB *db;
@@ -109,11 +142,13 @@ struct ReplicationSource {
     uint8_t token_hash[SHA256_DIGEST_LEN]; /* sha256 of the subscribe token */
     pthread_t acceptor;
     atomic_int stop;
-    atomic_int replicas;
-    /* Live streamer sockets, so stop() can wake them (shutdown) and wait for
-     * them to exit before the source — and then the log — is freed. */
+    atomic_int replicas; /* authenticated, streaming (what replica_count reports) */
+    atomic_int pending;  /* accepted, not yet authenticated */
+    /* Live connection sockets (pending + established), so stop() can wake them
+     * (shutdown) and wait for them to exit before the source — and then the log
+     * — is freed. */
     pthread_mutex_t lock;
-    int conn_fds[MAX_REPLICAS];
+    int conn_fds[REPL_CONN_SLOTS];
     int conn_n;
 };
 
@@ -121,7 +156,7 @@ struct ReplicationSource {
 static int src_track(ReplicationSource *s, int fd) {
     int ok = 0;
     pthread_mutex_lock(&s->lock);
-    if (s->conn_n < MAX_REPLICAS) { s->conn_fds[s->conn_n++] = fd; ok = 1; }
+    if (s->conn_n < REPL_CONN_SLOTS) { s->conn_fds[s->conn_n++] = fd; ok = 1; }
     pthread_mutex_unlock(&s->lock);
     return ok;
 }
@@ -167,13 +202,20 @@ static void *streamer(void *arg) {
     AegisDB *db = s->db;
     int fd = c->fd;
     free(c);
-    /* The acceptor already tracked this fd and incremented s->replicas; every
-     * exit path goes through `done` to untrack + close + decrement, so stop()
-     * can reliably wait for all streamers before the source is freed. */
-    set_timeouts(fd, 30);
+    /* The acceptor tracked this fd and incremented s->pending. The thread stays
+     * counted in exactly one of pending/replicas until `done`, and every exit
+     * path goes through `done` to untrack + close + decrement, so stop() can
+     * reliably wait for all connections before the source is freed. `authed`
+     * selects which counter `done` releases. */
+    int authed = 0;
+    /* Bound the handshake hard: a short per-recv timeout AND an absolute deadline
+     * so an un-authenticated peer cannot hold a slot open. */
+    set_timeouts(fd, HANDSHAKE_TIMEOUT_SEC);
 
     char line[512];
-    if (read_line(fd, line, sizeof line) < 0) goto done;
+    if (read_line_deadline(fd, line, sizeof line,
+                           mono_ms() + HANDSHAKE_TIMEOUT_SEC * 1000ULL) < 0)
+        goto done;
     cJSON *req = cJSON_Parse(line);
     if (!req) goto done;
     const cJSON *jtok = cJSON_GetObjectItemCaseSensitive(req, "token");
@@ -196,6 +238,21 @@ static void *streamer(void *arg) {
         goto done;
     }
     cJSON_Delete(req);
+
+    /* Token verified: only now claim a replica slot (bounded by MAX_REPLICAS).
+     * Increment replicas BEFORE dropping pending so the thread is never
+     * momentarily uncounted (keeps stop() correct). */
+    if (atomic_fetch_add(&s->replicas, 1) >= MAX_REPLICAS) {
+        atomic_fetch_sub(&s->replicas, 1);
+        (void)write_all(fd, "{\"ok\":false,\"error\":\"at capacity\"}\n", 35);
+        LOG_WARN("replication: replica rejected (at capacity)");
+        goto done; /* still pending-counted; `done` releases it */
+    }
+    authed = 1;
+    atomic_fetch_sub(&s->pending, 1);
+    /* Streaming can legitimately block on a slow replica's backpressure, so use
+     * the longer post-auth timeout rather than the tight handshake one. */
+    set_timeouts(fd, STREAM_TIMEOUT_SEC);
 
     uint64_t cur_gen = atomic_load_explicit(&db->log_generation, memory_order_relaxed);
     uint64_t logsz = log_size_locked(db);
@@ -253,7 +310,10 @@ static void *streamer(void *arg) {
 done:
     src_untrack(s, fd);
     close(fd);
-    atomic_fetch_sub(&s->replicas, 1); /* last: stop() waits on this hitting 0 */
+    /* Release whichever counter still holds this thread; stop() waits on both
+     * hitting 0. */
+    if (authed) atomic_fetch_sub(&s->replicas, 1);
+    else atomic_fetch_sub(&s->pending, 1);
     LOG_INFO("replication: replica stream ended");
     return NULL;
 }
@@ -269,18 +329,25 @@ static void *acceptor(void *arg) {
             continue;
         }
         if (atomic_load_explicit(&s->stop, memory_order_relaxed)) { close(fd); break; }
+        /* Throttle un-authenticated connections: refuse a new one once
+         * MAX_PENDING handshakes are already in flight, so a flood can't consume
+         * replica slots or threads before proving the token. */
+        if (atomic_load_explicit(&s->pending, memory_order_relaxed) >= MAX_PENDING) {
+            close(fd);
+            continue;
+        }
         struct stream_ctx *c = malloc(sizeof *c);
-        /* Count + track before creating the thread so stop() (which joins the
-         * acceptor first, then waits for the count) never races a starting
-         * streamer. */
+        /* Count (as pending) + track before creating the thread so stop() (which
+         * joins the acceptor first, then waits for the counts) never races a
+         * starting streamer. The streamer flips pending->replicas on auth. */
         if (!c || !src_track(s, fd)) { free(c); close(fd); continue; }
-        atomic_fetch_add(&s->replicas, 1);
+        atomic_fetch_add(&s->pending, 1);
         c->s = s;
         c->fd = fd;
         pthread_t t;
         if (pthread_create(&t, NULL, streamer, c) != 0) {
             src_untrack(s, fd);
-            atomic_fetch_sub(&s->replicas, 1);
+            atomic_fetch_sub(&s->pending, 1);
             close(fd);
             free(c);
             continue;
@@ -340,9 +407,11 @@ void replication_source_stop(ReplicationSource *s) {
     pthread_mutex_lock(&s->lock);
     for (int i = 0; i < s->conn_n; i++) shutdown(s->conn_fds[i], SHUT_RDWR);
     pthread_mutex_unlock(&s->lock);
-    /* Wait for all streamers to finish before freeing the source (and, in the
-     * caller, before db_close closes the log they read via pread). */
-    while (atomic_load(&s->replicas) > 0) usleep(1000);
+    /* Wait for all connections — established replicas AND in-flight handshakes —
+     * to finish before freeing the source (and, in the caller, before db_close
+     * closes the log they read via pread). The shutdown() above wakes any thread
+     * blocked in recv/send so this drains promptly. */
+    while (atomic_load(&s->replicas) + atomic_load(&s->pending) > 0) usleep(1000);
     pthread_mutex_destroy(&s->lock);
     free(s);
 }

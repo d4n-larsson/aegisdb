@@ -795,6 +795,47 @@ def test_replication(binary, port):
                   "primary stats report a connected replica")
 
 
+def test_replication_preauth(binary, port):
+    print("[read replica: pre-auth handshake is bounded and slot-gated]")
+    repl_port = port + 1
+    handshake_timeout = 5  # mirrors HANDSHAKE_TIMEOUT_SEC in replication.c
+    tok = "repl-secret"
+    with Server(binary, port, extra_args=[
+            "--replication-port", str(repl_port),
+            "--replication-token", tok]) as primary:
+
+        # a wrong token is rejected with ok:false before any log is streamed
+        c = socket.create_connection(("127.0.0.1", repl_port), timeout=5)
+        c.sendall(b'{"token":"wrong","from_offset":0,"generation":0}\n')
+        c.settimeout(5)
+        data = c.recv(256)
+        check(b'"ok":false' in data, "bad replication token -> ok:false, no stream")
+        c.close()
+
+        # connections that never complete the handshake must NOT occupy a replica
+        # slot — the fix counts them as pending until the token is verified.
+        silent = [socket.create_connection(("127.0.0.1", repl_port), timeout=5)
+                  for _ in range(4)]
+        time.sleep(0.5)
+        st = primary.req({"operation": "stats"})
+        check(st.get("replication", {}).get("replicas", -1) == 0,
+              "un-authenticated connections are not counted as replicas")
+
+        # and such a connection is dropped within the handshake bound, not held
+        # open indefinitely (slow-loris).
+        silent[0].settimeout(handshake_timeout + 4)
+        start = time.monotonic()
+        try:
+            closed = silent[0].recv(64) == b""  # server close -> EOF
+        except socket.timeout:
+            closed = False
+        elapsed = time.monotonic() - start
+        check(closed and elapsed < handshake_timeout + 3,
+              "silent pre-auth connection dropped within the handshake bound")
+        for s in silent:
+            s.close()
+
+
 def test_token_admin(binary, port):
     print("[runtime token administration]")
     tokfile = None  # Server writes it under its datadir
@@ -1060,6 +1101,7 @@ def main():
     test_tenant_rate_limit(binary, 19489)
     test_token_admin(binary, 19490)
     test_replication(binary, 19520)  # uses port, +1 (repl stream), +2 (replica)
+    test_replication_preauth(binary, 19523)  # uses port, +1 (repl stream)
     test_snapshot(binary, 19483)
     test_snapshot_admin_only(binary, 19485)
     test_restore(binary, 19486)
