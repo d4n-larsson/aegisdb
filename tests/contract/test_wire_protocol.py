@@ -1076,6 +1076,57 @@ def test_encryption_at_rest(binary, port):
               "missing key on an encrypted dir -> server exits nonzero")
 
 
+def test_encrypt_migrate(binary, port):
+    print("[encrypt-migrate: plaintext dir -> encrypted, data survives]")
+    datadir = tempfile.mkdtemp(prefix="aegis_mig_")
+    keyfile = os.path.join(datadir, "key.hex")
+    with open(keyfile, "w") as fh:
+        fh.write("a1b2c3d4e5f60718293a4b5c6d7e8f90"
+                 "a1b2c3d4e5f60718293a4b5c6d7e8f90\n")
+    marker = "MIGRATE-ME-MARKER-88"
+
+    # write plaintext, then stop cleanly
+    with Server(binary, port, datadir=datadir) as srv:
+        r = srv.req({"operation": "insert", "type": "episodic",
+                     "tags": ["mig"], "data": marker})
+        check(r.get("ok") is True, "plaintext insert ok")
+        rid = r["record"]["id"]
+        srv.graceful_stop()
+
+    with open(os.path.join(datadir, "memory.log"), "rb") as fh:
+        check(marker.encode() in fh.read(), "marker present in the plaintext log")
+
+    # run the offline migration one-shot
+    mig = subprocess.run(
+        [binary, "--data-dir", datadir, "--encrypt-migrate",
+         "--encryption-key-file", keyfile],
+        capture_output=True, text=True)
+    check(mig.returncode == 0, "--encrypt-migrate exits 0")
+
+    with open(os.path.join(datadir, "memory.log"), "rb") as fh:
+        check(marker.encode() not in fh.read(),
+              "marker gone from the log after migration (now ciphertext)")
+
+    # a second migrate is a no-op refusal (already encrypted)
+    again = subprocess.run(
+        [binary, "--data-dir", datadir, "--encrypt-migrate",
+         "--encryption-key-file", keyfile],
+        capture_output=True, text=True)
+    check(again.returncode != 0, "re-migrating an encrypted dir is refused")
+
+    # start with the key -> the migrated record is intact
+    with Server(binary, port, datadir=datadir,
+                extra_args=["--encryption-key-file", keyfile]) as srv:
+        r = srv.req({"operation": "get", "id": rid})
+        check(r.get("ok") is True and r["record"]["data"] == marker,
+              "record survives the migration and reads back under the key")
+
+    # starting the migrated dir WITHOUT the key is refused
+    with Server(binary, port, datadir=datadir, expect_exit=True) as srv:
+        check(srv.rc is not None and srv.rc != 0,
+              "migrated dir without a key -> server exits nonzero")
+
+
 def test_phase_gating(binary, port):
     print("[phase 1: gating]")
     with Server(binary, port, phase=1) as srv:
@@ -1171,6 +1222,7 @@ def main():
     test_search_limits(binary, 19478)
     test_query_scan_cap(binary, 19491)
     test_encryption_at_rest(binary, 19492)
+    test_encrypt_migrate(binary, 19493)
     test_concurrency(binary, 19479)
     test_bulk_ops(binary, 19480)
     test_consolidate(binary, 19481)
