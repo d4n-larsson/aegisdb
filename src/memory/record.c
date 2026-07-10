@@ -195,6 +195,10 @@ int record_encode(const MemoryRecord *r, uint8_t **out, size_t *out_len) {
     for (size_t i = 0; i < r->vec_count * r->embedding_dim; i++)
         put_f32(&b, r->embedding[i]);
 
+    /* The wire count is u16; truncation here would produce an undecodable frame
+     * (durable data loss). qe_relate caps rel_count far below this, so tripping
+     * it means a caller built a pathological record — refuse to encode it. */
+    if (r->rel_count > UINT16_MAX) { free(b.p); return -1; }
     put_u16(&b, (uint16_t)r->rel_count);
     for (size_t i = 0; i < r->rel_count; i++) {
         put_u64(&b, r->relationships[i].from_id);

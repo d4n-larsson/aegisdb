@@ -20,6 +20,10 @@
 #include "aegisdb/sha256.h"
 
 #define MAX_TAGS 32     /* max tags per record (also enforced in validate_common) */
+#define MAX_RELATIONSHIPS 4096 /* max relationships per record. Kept well below
+                                * UINT16_MAX so the u16 wire count in record_encode
+                                * can never truncate (which would render the record
+                                * undecodable = durable data loss). */
 #define MAX_TOP_K 1000  /* clamp untrusted top_k to bound work/allocations */
 #define SEARCH_FETCH_CAP 8192 /* upper bound on semantic over-fetch when widening
                                * to satisfy a selective filter (bounds worst-case
@@ -912,10 +916,20 @@ aegis_status_t qe_promote(AegisDB *db, const char *session_id,
     return st;
 }
 
+/* Two relationships are the same edge when they point at the same target with
+ * the same kind (kind may be NULL). */
+static int rel_same(const Relationship *e, uint64_t to_id, const char *kind) {
+    if (e->to_id != to_id) return 0;
+    if (!e->kind || !kind) return e->kind == kind; /* both NULL == equal */
+    return strcmp(e->kind, kind) == 0;
+}
+
 aegis_status_t qe_relate(AegisDB *db, uint64_t from_id, uint64_t to_id,
                          const char *kind, const char *ns) {
     aegis_status_t st = require_phase(db, 4);
     if (st != AEGIS_OK) return st;
+    /* A self-edge carries no graph information and would still consume a slot. */
+    if (from_id == to_id) return AEGIS_ERR_INVALID_REQUEST;
 
     pthread_rwlock_wrlock(&db->index_lock);
     MemoryRecord from;
@@ -942,6 +956,21 @@ aegis_status_t qe_relate(AegisDB *db, uint64_t from_id, uint64_t to_id,
         record_free(&from);
         pthread_rwlock_unlock(&db->index_lock);
         return AEGIS_ERR_NOT_FOUND;
+    }
+    /* Idempotent: an identical (to_id, kind) edge already present is a no-op, so
+     * repeated relate calls cannot grow the record without bound. */
+    for (size_t i = 0; i < from.rel_count; i++) {
+        if (rel_same(&from.relationships[i], to_id, kind)) {
+            record_free(&from);
+            pthread_rwlock_unlock(&db->index_lock);
+            return AEGIS_OK;
+        }
+    }
+    /* Hard cap keeps rel_count well under the u16 wire limit (see record_encode). */
+    if (from.rel_count >= MAX_RELATIONSHIPS) {
+        record_free(&from);
+        pthread_rwlock_unlock(&db->index_lock);
+        return AEGIS_ERR_QUOTA_EXCEEDED;
     }
     if (record_add_relationship(&from, from_id, to_id, kind) != 0) {
         record_free(&from);

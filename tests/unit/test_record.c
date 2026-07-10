@@ -231,6 +231,31 @@ static void test_multivector_roundtrip(void) {
     record_free(&r);
 }
 
+/* A record whose rel_count exceeds the u16 wire field must be refused by
+ * record_encode rather than silently truncated (which would emit a frame that
+ * record_decode cannot parse -> durable data loss). The relationship array is
+ * built directly (not via record_add_relationship) to avoid O(n^2) reallocs. */
+static void test_encode_rejects_relationship_overflow(void) {
+    MemoryRecord r;
+    record_init(&r);
+    r.id = 1;
+    r.type = MEM_SEMANTIC;
+    r.created = r.updated = 1;
+    r.data = strdup("d");
+    r.data_len = 1;
+    size_t n = 65536 + 1; /* one past UINT16_MAX */
+    r.relationships = calloc(n, sizeof(Relationship)); /* kind=NULL, ids=0 */
+    TEST_ASSERT_NOT_NULL(r.relationships);
+    r.rel_count = n;
+
+    uint8_t *buf = NULL;
+    size_t len = 0;
+    TEST_ASSERT_EQUAL_INT(-1, record_encode(&r, &buf, &len));
+    TEST_ASSERT_NULL(buf);
+
+    record_free(&r); /* frees the (NULL-kind) relationship array */
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_init_defaults);
@@ -239,6 +264,7 @@ int main(void) {
     RUN_TEST(test_encode_decode_with_relationship);
     RUN_TEST(test_decode_rejects_truncated);
     RUN_TEST(test_decode_rejects_embedding_overflow);
+    RUN_TEST(test_encode_rejects_relationship_overflow);
     RUN_TEST(test_clone_is_deep);
     RUN_TEST(test_multivector_roundtrip);
     return UNITY_END();
