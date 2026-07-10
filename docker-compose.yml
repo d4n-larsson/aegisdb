@@ -11,9 +11,12 @@ services:
     image: aegisdb:latest
     container_name: aegisdb
     ports:
-      # host:container — both track AEGIS_PORT; set AEGIS_HOST_PORT to publish on
-      # a different host port.
-      - "${AEGIS_HOST_PORT:-9470}:${AEGIS_PORT:-9470}"
+      # host_ip:host_port:container_port. Publishes on loopback only by default:
+      # the wire protocol is unauthenticated + plaintext out of the box, so it
+      # must not be reachable off-box until you enable auth (AEGIS_EXTRA_ARGS)
+      # and/or a TLS proxy. Set AEGIS_BIND=0.0.0.0 to expose it deliberately.
+      # AEGIS_HOST_PORT changes only the published host port.
+      - "${AEGIS_BIND:-127.0.0.1}:${AEGIS_HOST_PORT:-9470}:${AEGIS_PORT:-9470}"
     volumes:
       # Named volume keeps memory durable across container restarts.
       - aegis-data:/data
