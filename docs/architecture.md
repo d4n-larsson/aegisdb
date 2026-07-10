@@ -33,7 +33,10 @@ means a corrupt length is detected as a header fault distinct from a payload
 fault, and the magic lets recovery resynchronize to the next frame after damage.
 The magic also versions the format: a legacy log written by an earlier build
 (8-byte `[crc][len]` header, no magic) is detected on open and migrated in place
-to the current format (logged as `INFO … migrated N legacy frame(s)`). Writes are
+to the current format (logged as `INFO … migrated N legacy frame(s)`). When
+encryption at rest is enabled, frames instead use a v3 layout — a distinct
+magic, a per-frame random nonce, and an AEAD tag in place of the payload CRC —
+but the framing and offset model are otherwise the same. Writes are
 append-only — an `update` or `delete` appends a new frame rather than mutating
 prior bytes.
 
@@ -237,10 +240,20 @@ Tokens travel in plaintext, so run the server behind an encrypted channel (a
 TLS-terminating reverse proxy, `stunnel`, or a private network) when auth is
 enabled. TLS is deliberately kept out of the binary — see Non-goals.
 
+**Encryption at rest.** Optionally, the log and index checkpoints are encrypted
+on disk with XChaCha20-Poly1305 (a vendored cipher — no crypto dependency),
+enabled per data directory with `--encryption-key-file`. Frames use a distinct
+v3 layout carrying a per-frame random nonce + auth tag; a wrong key or mismatched
+mode is refused at startup (fail-closed). Backups stay encrypted and replicas
+share the key. This protects data at rest (stolen disk / snapshot / backup), not
+the transport. See [encryption-at-rest-design.md](encryption-at-rest-design.md).
+
 ## Non-goals
 
 - No SQL, no relational joins — retrieval is by id, time, tag, vector, and graph.
-- No built-in replication or sharding; AegisDB is a single-node server. (A
-  proposed async read-replica that follows the log is sketched in
-  [read-replica-design.md](read-replica-design.md) — not implemented.)
+- No sharding; AegisDB is a single-node server for writes. Async read replicas
+  that follow the log are supported for read availability/scaling with manual
+  failover ([read-replica-design.md](read-replica-design.md)); there is no
+  consensus/auto-failover.
 - No transport-level encryption; that is delegated to the surrounding channel.
+  (Data *at rest* can be encrypted — see above.)

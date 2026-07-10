@@ -286,6 +286,12 @@ namespaced token counts only its own.
 → { "ok": true, "count": 42 }
 ```
 
+A broad, filterless count (no selective filter, or a wide-open time range) is
+bounded to the most-recent `--query-scan-cap` records (default 100000) so it
+can't load the whole dataset into memory. When that cap truncates the scan the
+count is a floor and the response adds `"capped": true`; add a selective filter
+(e.g. tags) for an exact count.
+
 ---
 
 ### `consolidate`
