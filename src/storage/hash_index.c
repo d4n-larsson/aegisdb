@@ -8,39 +8,13 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "aegisdb/ckpt_crypt.h"
 #include "aegisdb/crc32.h"
 #include "aegisdb/hash_mix.h"
 
 #define IDX_VERSION 4u
 #define IDX_HDR 36   /* "AIDX"(4) ver(4) count(8) covered(8) next_id(8) crc(4) */
 #define IDX_ENTRY 30 /* id(8) offset(8) length(4) type(1) deleted(1) expires_at(8) */
-
-static int write_all(int fd, const uint8_t *buf, size_t n) {
-    size_t put = 0;
-    while (put < n) {
-        ssize_t w = write(fd, buf + put, n - put);
-        if (w < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        put += (size_t)w;
-    }
-    return 0;
-}
-
-static int read_all(int fd, uint8_t *buf, size_t n) {
-    size_t got = 0;
-    while (got < n) {
-        ssize_t r = read(fd, buf + got, n - got);
-        if (r == 0) return 1; /* short file */
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        got += (size_t)r;
-    }
-    return 0;
-}
 
 #define INITIAL_CAP 1024
 #define MAX_LOAD 0.7
@@ -158,82 +132,61 @@ uint8_t *hash_index_serialize(const HashIndex *h, uint64_t covered_log_size,
 }
 
 int hash_index_save(const HashIndex *h, const char *path,
-                    uint64_t covered_log_size, uint64_t next_id) {
+                    uint64_t covered_log_size, uint64_t next_id,
+                    const uint8_t *key) {
     size_t len = 0;
     uint8_t *buf = hash_index_serialize(h, covered_log_size, next_id, &len);
     if (!buf) return -1;
-
-    char tmp[1200];
-    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        free(buf);
-        return -1;
-    }
-    int ok = write_all(fd, buf, len) == 0 && fsync(fd) == 0;
-    close(fd);
+    int rv = ckpt_write(path, key, buf, len);
     free(buf);
-    if (!ok) {
-        unlink(tmp);
-        return -1;
-    }
-    if (rename(tmp, path) != 0) {
-        unlink(tmp);
-        return -1;
-    }
-    return 0;
+    return rv;
 }
 
 int hash_index_load(HashIndex *h, const char *path,
-                    uint64_t *out_covered_log_size, uint64_t *out_next_id) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return -1;
-
-    uint8_t hdr[IDX_HDR];
-    uint32_t ver;
-    if (read_all(fd, hdr, IDX_HDR) != 0 || memcmp(hdr, "AIDX", 4) != 0) {
-        close(fd);
+                    uint64_t *out_covered_log_size, uint64_t *out_next_id,
+                    const uint8_t *key) {
+    /* ckpt_read yields the plaintext checkpoint (decrypting first when keyed);
+     * a wrong key / tamper / missing file all return -1, so recovery falls back
+     * to a full log scan. */
+    uint8_t *file = NULL;
+    size_t flen = 0;
+    if (ckpt_read(path, key, &file, &flen) != 0) return -1;
+    if (flen < IDX_HDR || memcmp(file, "AIDX", 4) != 0) {
+        free(file);
         return -1;
     }
-    memcpy(&ver, hdr + 4, 4);
+    uint32_t ver;
+    memcpy(&ver, file + 4, 4);
     if (ver != IDX_VERSION) { /* older/unknown checkpoint: force a full scan */
-        close(fd);
+        free(file);
         return -1;
     }
     uint64_t cnt, covered, next_id;
     uint32_t want_crc;
-    memcpy(&cnt, hdr + 8, 8);
-    memcpy(&covered, hdr + 16, 8);
-    memcpy(&next_id, hdr + 24, 8);
-    memcpy(&want_crc, hdr + 32, 4);
+    memcpy(&cnt, file + 8, 8);
+    memcpy(&covered, file + 16, 8);
+    memcpy(&next_id, file + 24, 8);
+    memcpy(&want_crc, file + 32, 4);
     if (cnt > (uint64_t)((SIZE_MAX - 1) / IDX_ENTRY)) { /* overflow guard */
-        close(fd);
+        free(file);
         return -1;
     }
-
     size_t body = (size_t)cnt * IDX_ENTRY;
-    uint8_t *buf = malloc(body ? body : 1);
-    if (!buf) {
-        close(fd);
+    if (flen != IDX_HDR + body) { /* declared count must match the file size */
+        free(file);
         return -1;
     }
-    if (read_all(fd, buf, body) != 0) {
-        free(buf);
-        close(fd);
-        return -1;
-    }
+    const uint8_t *entries = file + IDX_HDR;
     /* CRC over the header fields [0,32) then the entries — matching serialize. */
-    uint32_t crc = crc32_compute(hdr, 32);
-    crc = crc32_update(crc, buf, body);
+    uint32_t crc = crc32_compute(file, 32);
+    crc = crc32_update(crc, entries, body);
     if (crc != want_crc) {
-        free(buf);
-        close(fd);
+        free(file);
         return -1;
     }
-    close(fd);
 
     for (uint64_t i = 0; i < cnt; i++) {
-        const uint8_t *r = buf + i * IDX_ENTRY;
+        const uint8_t *r = entries + i * IDX_ENTRY;
         uint64_t id, offset, expires_at;
         uint32_t length;
         memcpy(&id, r, 8);
@@ -242,7 +195,7 @@ int hash_index_load(HashIndex *h, const char *path,
         memcpy(&expires_at, r + 22, 8);
         hash_index_put(h, id, offset, length, r[20], r[21], expires_at);
     }
-    free(buf);
+    free(file);
     if (out_covered_log_size) *out_covered_log_size = covered;
     if (out_next_id) *out_next_id = next_id;
     return 0;

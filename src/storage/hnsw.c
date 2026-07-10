@@ -18,6 +18,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "aegisdb/ckpt_crypt.h"
 #include "aegisdb/crc32.h"
 #include "aegisdb/vecmath.h"
 #include "aegisdb/hash_mix.h"
@@ -789,7 +790,8 @@ static void rd_get(Rd *r, void *dst, size_t len) {
 static uint32_t rd_u32(Rd *r) { uint32_t v = 0; rd_get(r, &v, sizeof v); return v; }
 static uint64_t rd_u64(Rd *r) { uint64_t v = 0; rd_get(r, &v, sizeof v); return v; }
 
-int hnsw_save(const Hnsw *h, const char *path, uint64_t covered_log_size) {
+int hnsw_save(const Hnsw *h, const char *path, uint64_t covered_log_size,
+              const uint8_t *key) {
     Buf b = {0};
     buf_put(&b, HNSW_FORMAT_MAGIC, 4);
     buf_u32(&b, HNSW_FORMAT_VERSION);
@@ -826,40 +828,19 @@ int hnsw_save(const Hnsw *h, const char *path, uint64_t covered_log_size) {
     buf_u32(&b, crc32_compute(b.p, b.n)); /* trailing CRC over everything above */
     if (b.err) { free(b.p); return -1; }
 
-    char tmp[1300];
-    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) { free(b.p); return -1; }
-    int ok = 1;
-    for (size_t off = 0; off < b.n;) {
-        ssize_t w = write(fd, b.p + off, b.n - off);
-        if (w < 0) { if (errno == EINTR) continue; ok = 0; break; }
-        off += (size_t)w;
-    }
-    if (ok) ok = (fsync(fd) == 0);
-    close(fd);
+    int rv = ckpt_write(path, key, b.p, b.n);
     free(b.p);
-    if (!ok || rename(tmp, path) != 0) {
-        unlink(tmp);
-        return -1;
-    }
-    return 0;
+    return rv;
 }
 
 Hnsw *hnsw_load(const char *path, size_t expected_dim,
-                uint64_t *out_covered_log_size) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return NULL;
-    off_t size = lseek(fd, 0, SEEK_END);
-    if (size < 4 + 4 || lseek(fd, 0, SEEK_SET) != 0) { close(fd); return NULL; }
-    uint8_t *buf = malloc((size_t)size);
-    if (!buf) { close(fd); return NULL; }
-    for (size_t off = 0; off < (size_t)size;) {
-        ssize_t r = read(fd, buf + off, (size_t)size - off);
-        if (r <= 0) { if (r < 0 && errno == EINTR) continue; close(fd); free(buf); return NULL; }
-        off += (size_t)r;
-    }
-    close(fd);
+                uint64_t *out_covered_log_size, const uint8_t *key) {
+    /* ckpt_read decrypts first when keyed; wrong key / tamper / missing -> NULL,
+     * so recovery rebuilds the graph from the log. */
+    uint8_t *buf = NULL;
+    size_t size = 0;
+    if (ckpt_read(path, key, &buf, &size) != 0) return NULL;
+    if (size < 4 + 4) { free(buf); return NULL; }
 
     size_t body = (size_t)size - 4; /* trailing CRC */
     uint32_t want;

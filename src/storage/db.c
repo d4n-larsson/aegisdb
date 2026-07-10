@@ -52,10 +52,11 @@ int db_save_metadata(AegisDB *db) {
 }
 
 int db_checkpoint(AegisDB *db) {
-    /* Checkpoints are written plaintext; until the checkpoint files are
-     * themselves encrypted (a later PR), an encrypted log skips them and
-     * recovery full-scans the (encrypted) log instead — correct, just slower. */
-    if (db->config.encryption_enabled) return 0;
+    /* Checkpoints are encrypted with the same key as the log when encryption is
+     * enabled, so recovery can trust and load them (and full-scan only the
+     * tail) instead of rebuilding from the whole encrypted log. */
+    const uint8_t *key =
+        db->config.encryption_enabled ? db->config.encryption_key : NULL;
     /* Capture a consistent (hash, covered offset, next_id) tuple under the read
      * lock, then write it. Readers proceed; writers pause only for the write. */
     pthread_rwlock_rdlock(&db->index_lock);
@@ -63,11 +64,11 @@ int db_checkpoint(AegisDB *db) {
     uint64_t nid = db->next_id;
     pthread_mutex_unlock(&db->id_lock);
     uint64_t covered = (uint64_t)db->log.size;
-    int rv = hash_index_save(db->hash, db->path_index, covered, nid);
+    int rv = hash_index_save(db->hash, db->path_index, covered, nid, key);
     /* Persist the HNSW graph at the same covered offset so recovery can load it
      * and replay only the tail. No-op (drops any stale file) below the ANN
      * threshold, where search is the exact scan. */
-    int rv2 = semantic_index_save(db->sem, db->path_sem, covered);
+    int rv2 = semantic_index_save(db->sem, db->path_sem, covered, key);
     pthread_rwlock_unlock(&db->index_lock);
     return (rv == 0 && rv2 == 0) ? 0 : -1;
 }

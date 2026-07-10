@@ -862,8 +862,9 @@ int semantic_index_search(const SemanticIndex *s, const float *query,
 /* ----------------------------------------------------------- persistence -- */
 
 int semantic_index_save(const SemanticIndex *s, const char *path,
-                        uint64_t covered_log_size) {
-    if (s->nshards == 1) return hnsw_save(s->shards[0], path, covered_log_size);
+                        uint64_t covered_log_size, const uint8_t *key) {
+    if (s->nshards == 1)
+        return hnsw_save(s->shards[0], path, covered_log_size, key);
     /* No graph yet, or a multi-shard graph: the checkpoint format holds a single
      * graph, so a sharded index is not checkpointed — recovery rebuilds it from
      * the log, which is fast now that the build is parallel. Drop any stale file
@@ -892,9 +893,9 @@ static int rc_rebuild_cb(uint64_t synid, const float *vec, void *ctx) {
 }
 
 int semantic_index_load(SemanticIndex *s, const char *path,
-                        uint64_t *out_covered_log_size) {
+                        uint64_t *out_covered_log_size, const uint8_t *key) {
     if (graph_present(s) || s->n != 0) return -1; /* must be a fresh index */
-    Hnsw *g = hnsw_load(path, s->dim, out_covered_log_size);
+    Hnsw *g = hnsw_load(path, s->dim, out_covered_log_size, key);
     if (!g) return -1;
     /* A checkpoint saved in a different quantization mode than we're configured
      * for is rejected, so recovery rebuilds it in the configured mode. */

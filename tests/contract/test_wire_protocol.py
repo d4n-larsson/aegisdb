@@ -80,8 +80,15 @@ class Server:
                 time.sleep(0.1)
         raise RuntimeError("server did not start")
 
+    def graceful_stop(self):
+        """SIGTERM + wait, so the server runs its clean shutdown (which writes a
+        checkpoint). Safe to call once; __exit__ then no-ops."""
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+            self.proc.wait(timeout=10)
+
     def __exit__(self, *a):
-        if self.proc:
+        if self.proc and self.proc.poll() is None:
             self.proc.kill()
             self.proc.wait()
 
@@ -1027,7 +1034,7 @@ def test_encryption_at_rest(binary, port):
     marker = "TOP-SECRET-MEMORY-MARKER-42"
     enc_args = ["--encryption-key-file", keyfile]
 
-    # write under encryption
+    # write under encryption, then stop gracefully so a checkpoint is written
     with Server(binary, port, datadir=datadir, extra_args=enc_args) as srv:
         r = srv.req({"operation": "insert", "type": "semantic",
                      "tags": ["enc"], "data": marker})
@@ -1036,11 +1043,17 @@ def test_encryption_at_rest(binary, port):
         r = srv.req({"operation": "get", "id": rid})
         check(r.get("ok") is True and r["record"]["data"] == marker,
               "read back within the same session")
+        srv.graceful_stop()  # clean shutdown -> encrypted checkpoint on disk
 
-    # the on-disk log must not contain the plaintext marker
+    # neither the log nor the checkpoint may contain the plaintext marker
     with open(os.path.join(datadir, "memory.log"), "rb") as fh:
         blob = fh.read()
     check(marker.encode() not in blob, "plaintext marker absent from the log file")
+    idx = os.path.join(datadir, "memory.index")
+    if os.path.exists(idx):
+        with open(idx, "rb") as fh:
+            head = fh.read(4)
+        check(head != b"AIDX", "checkpoint is encrypted (not the plaintext header)")
 
     # restart with the right key -> recovery decrypts and the record is present
     with Server(binary, port, datadir=datadir, extra_args=enc_args) as srv:

@@ -67,15 +67,16 @@ int hnsw_foreach_live(const Hnsw *h,
                       void *ctx);
 
 /* Persist the graph to `path` (atomic .tmp + rename, CRC-protected), tagging it
- * with the log offset it reflects so recovery can replay only the tail. Returns
- * 0/-1. */
-int hnsw_save(const Hnsw *h, const char *path, uint64_t covered_log_size);
+ * with the log offset it reflects so recovery can replay only the tail. `key`
+ * (AEAD_KEY_LEN bytes, or NULL) encrypts the checkpoint at rest. Returns 0/-1. */
+int hnsw_save(const Hnsw *h, const char *path, uint64_t covered_log_size,
+              const uint8_t *key);
 
 /* Load a graph previously written by hnsw_save. Returns NULL if the file is
- * missing, truncated/corrupt (bad CRC), a different format version, or built
- * for a different `expected_dim` — the caller then falls back to a full
- * rebuild. On success writes the tagged offset to *out_covered_log_size. */
+ * missing, truncated/corrupt (bad CRC), a different format version, built for a
+ * different `expected_dim`, or `key` does not decrypt it — the caller then falls
+ * back to a full rebuild. On success writes the tagged offset. */
 Hnsw *hnsw_load(const char *path, size_t expected_dim,
-                uint64_t *out_covered_log_size);
+                uint64_t *out_covered_log_size, const uint8_t *key);
 
 #endif /* AEGISDB_HNSW_H */

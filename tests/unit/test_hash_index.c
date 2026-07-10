@@ -3,8 +3,10 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
+#include "aegisdb/aead.h"
 #include "aegisdb/hash_index.h"
 #include "unity.h"
 
@@ -69,12 +71,12 @@ static void test_save_load_roundtrip(void) {
     HashIndex *h = hash_index_create();
     hash_index_put(h, 10, 1000, 5, 1, 0, 0);
     hash_index_put(h, 20, 2000, 6, 2, 1, 0); /* tombstoned entry */
-    TEST_ASSERT_EQUAL_INT(0, hash_index_save(h, path, 4096, 21));
+    TEST_ASSERT_EQUAL_INT(0, hash_index_save(h, path, 4096, 21, NULL));
     hash_index_free(h);
 
     HashIndex *h2 = hash_index_create();
     uint64_t covered = 0, next_id = 0;
-    TEST_ASSERT_EQUAL_INT(0, hash_index_load(h2, path, &covered, &next_id));
+    TEST_ASSERT_EQUAL_INT(0, hash_index_load(h2, path, &covered, &next_id, NULL));
     TEST_ASSERT_EQUAL_UINT64(4096, covered);
     TEST_ASSERT_EQUAL_UINT64(21, next_id);
     const HashEntry *e = hash_index_get(h2, 10);
@@ -83,6 +85,47 @@ static void test_save_load_roundtrip(void) {
     TEST_ASSERT_EQUAL_UINT32(5, e->length);
     TEST_ASSERT_NULL(hash_index_get(h2, 20)); /* tombstone stays deleted */
     hash_index_free(h2);
+    remove(path);
+}
+
+/* An encrypted checkpoint round-trips with the right key, is ciphertext on disk
+ * (not the plaintext "AIDX" header), and is refused with a wrong or absent key. */
+static void test_save_load_encrypted(void) {
+    char path[256];
+    tmp_path(path, sizeof(path), "hashidx_enc");
+    uint8_t key[AEAD_KEY_LEN], key2[AEAD_KEY_LEN];
+    for (int i = 0; i < AEAD_KEY_LEN; i++) {
+        key[i] = (uint8_t)(i + 1);
+        key2[i] = (uint8_t)(200 - i);
+    }
+
+    HashIndex *h = hash_index_create();
+    hash_index_put(h, 10, 1000, 5, 1, 0, 0);
+    TEST_ASSERT_EQUAL_INT(0, hash_index_save(h, path, 4096, 21, key));
+    hash_index_free(h);
+
+    /* On disk it is the encrypted envelope, not the plaintext "AIDX" header. */
+    int fd = open(path, O_RDONLY);
+    TEST_ASSERT_TRUE(fd >= 0);
+    char magic[4] = {0};
+    TEST_ASSERT_EQUAL_INT(4, (int)read(fd, magic, 4));
+    close(fd);
+    TEST_ASSERT_TRUE(memcmp(magic, "AIDX", 4) != 0);
+
+    HashIndex *h2 = hash_index_create();
+    uint64_t covered = 0, next_id = 0;
+    TEST_ASSERT_EQUAL_INT(0, hash_index_load(h2, path, &covered, &next_id, key));
+    TEST_ASSERT_EQUAL_UINT64(4096, covered);
+    TEST_ASSERT_NOT_NULL(hash_index_get(h2, 10));
+    hash_index_free(h2);
+
+    HashIndex *h3 = hash_index_create();
+    TEST_ASSERT_EQUAL_INT(-1, hash_index_load(h3, path, &covered, &next_id, key2));
+    hash_index_free(h3);
+
+    HashIndex *h4 = hash_index_create(); /* NULL key on encrypted file -> refuse */
+    TEST_ASSERT_EQUAL_INT(-1, hash_index_load(h4, path, &covered, &next_id, NULL));
+    hash_index_free(h4);
     remove(path);
 }
 
@@ -95,7 +138,7 @@ static void test_load_rejects_corrupt(void) {
     HashIndex *h = hash_index_create();
     hash_index_put(h, 1, 16, 4, 0, 0, 0);
     hash_index_put(h, 2, 36, 4, 0, 0, 0);
-    TEST_ASSERT_EQUAL_INT(0, hash_index_save(h, path, 64, 3));
+    TEST_ASSERT_EQUAL_INT(0, hash_index_save(h, path, 64, 3, NULL));
     hash_index_free(h);
 
     /* Flip a byte in the entry region so the body CRC no longer matches. */
@@ -109,7 +152,7 @@ static void test_load_rejects_corrupt(void) {
 
     HashIndex *h2 = hash_index_create();
     uint64_t covered = 0, next_id = 0;
-    TEST_ASSERT_EQUAL_INT(-1, hash_index_load(h2, path, &covered, &next_id));
+    TEST_ASSERT_EQUAL_INT(-1, hash_index_load(h2, path, &covered, &next_id, NULL));
     hash_index_free(h2);
     remove(path);
 }
@@ -122,7 +165,7 @@ static void test_load_rejects_corrupt_header(void) {
 
     HashIndex *h = hash_index_create();
     hash_index_put(h, 1, 16, 4, 0, 0, 0);
-    TEST_ASSERT_EQUAL_INT(0, hash_index_save(h, path, 4096, 7));
+    TEST_ASSERT_EQUAL_INT(0, hash_index_save(h, path, 4096, 7, NULL));
     hash_index_free(h);
 
     /* covered_log_size lives at header offset 16; flip a byte. */
@@ -136,7 +179,7 @@ static void test_load_rejects_corrupt_header(void) {
 
     HashIndex *h2 = hash_index_create();
     uint64_t covered = 0, next_id = 0;
-    TEST_ASSERT_EQUAL_INT(-1, hash_index_load(h2, path, &covered, &next_id));
+    TEST_ASSERT_EQUAL_INT(-1, hash_index_load(h2, path, &covered, &next_id, NULL));
     hash_index_free(h2);
     remove(path);
 }
@@ -147,6 +190,7 @@ int main(void) {
     RUN_TEST(test_update_overwrites);
     RUN_TEST(test_many_entries);
     RUN_TEST(test_save_load_roundtrip);
+    RUN_TEST(test_save_load_encrypted);
     RUN_TEST(test_load_rejects_corrupt_header);
     RUN_TEST(test_load_rejects_corrupt);
     return UNITY_END();
