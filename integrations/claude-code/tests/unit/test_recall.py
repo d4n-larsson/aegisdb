@@ -1,15 +1,61 @@
 """Unit tests for recall context formatting: per-memory truncation + budget."""
 import os
 import sys
+import time
 import unittest
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from aegis_mcp.recall import format_context
+from aegis_mcp.embeddings import FakeProvider
+from aegis_mcp.recall import format_context, run_recall
 
 
 def _mems(*texts):
     return [{"id": i + 1, "text": t, "tags": []} for i, t in enumerate(texts)]
+
+
+def _cfg(budget_ms):
+    return SimpleNamespace(
+        recall_time_budget_ms=budget_ms, recall_top_k=3, recall_min_score=0.0,
+        recall_max_chars_per_memory=0, recall_char_budget=0,
+        embedding_dimensions=16, namespace="t")
+
+
+class _InstantClient:
+    """A fake AegisClient that replies immediately (no socket)."""
+    def __init__(self, resp=None):
+        self._resp = resp if resp is not None else {"ok": True, "records": []}
+
+    def request(self, payload, read_timeout_ms=None):
+        return self._resp
+
+
+class TestRunRecallBudget(unittest.TestCase):
+    def test_slow_embedder_is_bounded_by_budget(self):
+        # embed_query runs before the socket; a slow/cold embedder must not be
+        # able to stall the turn past the recall budget.
+        class SlowProvider(FakeProvider):
+            def embed_query(self, text):
+                time.sleep(2.0)  # far exceeds the 200ms budget
+                return super().embed_query(text)
+
+        start = time.monotonic()
+        result = run_recall("deploy?", _cfg(200), SlowProvider(16),
+                            client=_InstantClient())
+        elapsed = time.monotonic() - start
+
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.memories, [])
+        # Bounded by the 200ms budget, NOT the 2s embed call.
+        self.assertLess(elapsed, 1.0)
+
+    def test_fast_path_returns_result_not_degraded(self):
+        # When the work finishes within budget, the worker's result propagates.
+        result = run_recall("hello", _cfg(1000), FakeProvider(16),
+                            client=_InstantClient({"ok": True, "records": []}))
+        self.assertFalse(result.degraded)
+        self.assertEqual(result.memories, [])
 
 
 class TestFormatContext(unittest.TestCase):
