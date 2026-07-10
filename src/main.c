@@ -109,12 +109,11 @@ int main(int argc, char **argv) {
     if (cfg.encryption_enabled) {
         uint8_t d[SHA256_DIGEST_LEN];
         sha256(cfg.encryption_key, AEAD_KEY_LEN, d);
-        LOG_INFO("encryption at rest: ENABLED (log sealed with XChaCha20-Poly1305; "
-                 "key fingerprint %02x%02x%02x%02x%02x%02x)", d[0], d[1], d[2],
-                 d[3], d[4], d[5]);
-        LOG_WARN("encrypted mode: index checkpoints are disabled for now, so "
-                 "recovery full-scans the log (slower startup on a large log)");
-    } else if (cfg.checkpoint_sec)
+        LOG_INFO("encryption at rest: ENABLED (log + checkpoints sealed with "
+                 "XChaCha20-Poly1305; key fingerprint %02x%02x%02x%02x%02x%02x)",
+                 d[0], d[1], d[2], d[3], d[4], d[5]);
+    }
+    if (cfg.checkpoint_sec)
         LOG_INFO("index checkpoint every %us (recovery replays only the tail "
                  "written since the last checkpoint)",
                  cfg.checkpoint_sec);

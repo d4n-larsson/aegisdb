@@ -41,11 +41,14 @@ size_t hash_index_count(const HashIndex *h);
  * log size it reflects (`covered_log_size`) and the id allocator (`next_id`) so
  * recovery can trust [0, covered) and replay only the log tail. The log remains
  * the authoritative source; a missing/corrupt checkpoint just forces a full
- * scan. Returns 0/-1. */
+ * scan. `key` (AEAD_KEY_LEN bytes, or NULL for plaintext) encrypts the
+ * checkpoint at rest; loading with the wrong key returns -1. Returns 0/-1. */
 int hash_index_save(const HashIndex *h, const char *path,
-                    uint64_t covered_log_size, uint64_t next_id);
+                    uint64_t covered_log_size, uint64_t next_id,
+                    const uint8_t *key);
 int hash_index_load(HashIndex *h, const char *path,
-                    uint64_t *out_covered_log_size, uint64_t *out_next_id);
+                    uint64_t *out_covered_log_size, uint64_t *out_next_id,
+                    const uint8_t *key);
 
 /* Serialize the index into a freshly malloc'd checkpoint image (caller frees).
  * Lets a caller build the image under a lock and write it without one. Returns

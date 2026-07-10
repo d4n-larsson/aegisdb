@@ -224,10 +224,10 @@ static void test_hnsw_save_load(void) {
     char path[256];
     snprintf(path, sizeof(path), "/tmp/aegis_hnsw_%d.bin", (int)getpid());
     uint64_t covered = 123456;
-    TEST_ASSERT_EQUAL_INT(0, hnsw_save(h, path, covered));
+    TEST_ASSERT_EQUAL_INT(0, hnsw_save(h, path, covered, NULL));
 
     uint64_t got_covered = 0;
-    Hnsw *h2 = hnsw_load(path, DIM, &got_covered);
+    Hnsw *h2 = hnsw_load(path, DIM, &got_covered, NULL);
     TEST_ASSERT_NOT_NULL(h2);
     TEST_ASSERT_EQUAL_UINT64(covered, got_covered);
     TEST_ASSERT_EQUAL_size_t(live, hnsw_count(h2));
@@ -259,11 +259,11 @@ static void test_hnsw_save_load(void) {
     hnsw_free(h2);
 
     /* rejection paths */
-    TEST_ASSERT_NULL(hnsw_load(path, DIM + 1, &got_covered)); /* dim mismatch */
-    TEST_ASSERT_NULL(hnsw_load("/tmp/aegis_hnsw_does_not_exist.bin", DIM, &got_covered));
+    TEST_ASSERT_NULL(hnsw_load(path, DIM + 1, &got_covered, NULL)); /* dim mismatch */
+    TEST_ASSERT_NULL(hnsw_load("/tmp/aegis_hnsw_does_not_exist.bin", DIM, &got_covered, NULL));
     /* truncate -> bad CRC -> reject */
     TEST_ASSERT_EQUAL_INT(0, truncate(path, 64));
-    TEST_ASSERT_NULL(hnsw_load(path, DIM, &got_covered));
+    TEST_ASSERT_NULL(hnsw_load(path, DIM, &got_covered, NULL));
     unlink(path);
     free(vecs);
 }
@@ -351,8 +351,8 @@ static void test_hnsw_quantized(void) {
     char path[256];
     snprintf(path, sizeof(path), "/tmp/aegis_hnswq_%d.bin", (int)getpid());
     uint64_t cov = 0;
-    TEST_ASSERT_EQUAL_INT(0, hnsw_save(h, path, 42));
-    Hnsw *h2 = hnsw_load(path, DIM, &cov);
+    TEST_ASSERT_EQUAL_INT(0, hnsw_save(h, path, 42, NULL));
+    Hnsw *h2 = hnsw_load(path, DIM, &cov, NULL);
     TEST_ASSERT_NOT_NULL(h2);
     TEST_ASSERT_TRUE(hnsw_is_quantized(h2));
     TEST_ASSERT_EQUAL_size_t(hnsw_count(h), hnsw_count(h2));

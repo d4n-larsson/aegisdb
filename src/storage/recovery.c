@@ -39,7 +39,10 @@ long recovery_run(AegisDB *db) {
      * falls back to a full scan from offset 0. */
     uint64_t covered = 0, snap_next_id = 0;
     int have_checkpoint = 0;
-    if (hash_index_load(db->hash, db->path_index, &covered, &snap_next_id) == 0) {
+    const uint8_t *ckey =
+        db->config.encryption_enabled ? db->config.encryption_key : NULL;
+    if (hash_index_load(db->hash, db->path_index, &covered, &snap_next_id,
+                        ckey) == 0) {
         if (covered <= (uint64_t)db->log.size) {
             have_checkpoint = 1;
             LOG_DEBUG("recovery: loaded checkpoint (%zu entries, covers %llu of "
@@ -97,7 +100,7 @@ long recovery_run(AegisDB *db) {
      * leaves the index empty and falls back to a full rebuild in pass 2. */
     uint64_t sem_covered = 0;
     int sem_loaded = 0;
-    if (semantic_index_load(db->sem, db->path_sem, &sem_covered) == 0) {
+    if (semantic_index_load(db->sem, db->path_sem, &sem_covered, ckey) == 0) {
         if (sem_covered <= (uint64_t)db->log.size) {
             sem_loaded = 1;
             LOG_DEBUG("recovery: loaded semantic checkpoint (%zu vectors, covers "
