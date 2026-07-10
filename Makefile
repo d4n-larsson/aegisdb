@@ -72,6 +72,21 @@ test: $(TEST_BIN)
 integration: $(BIN)
 	$(PYTHON) tests/contract/test_wire_protocol.py $(BIN)
 
+# Line-coverage report (gcov; no lcov/gcovr needed). Rebuilds everything
+# instrumented, runs the unit tests AND the contract suite, and aggregates.
+# AEGIS_COV=1 makes the contract harness shut servers down gracefully (SIGTERM)
+# so gcov flushes their data — SIGKILL (the normal fast path) would drop it.
+# The unit-test and server binaries share the same instrumented core objects, so
+# .gcda counts accumulate across both into a combined figure.
+COV_CFLAGS := -O0 -g -fprofile-arcs -ftest-coverage -Wall -Wextra -Wno-unused-parameter
+.PHONY: coverage
+coverage:
+	$(MAKE) clean
+	CFLAGS="$(COV_CFLAGS)" LDFLAGS="-fprofile-arcs -ftest-coverage" $(MAKE) -k test || true
+	AEGIS_COV=1 CFLAGS="$(COV_CFLAGS)" LDFLAGS="-fprofile-arcs -ftest-coverage" \
+	  $(MAKE) integration || true
+	$(PYTHON) scripts/coverage.py
+
 # HNSW recall/latency benchmark (not part of `test` — too heavy for CI). Runs a
 # default config; pass args to the binary for other dims/sizes, e.g.
 #   ./build/bench/hnsw_bench 1024 50000 200
