@@ -74,7 +74,7 @@ docker compose up --build        # serves on localhost:9470
 
 # Or build and run the image directly
 docker build -t aegisdb .
-docker run -p 9470:9470 -v aegis-data:/data aegisdb
+docker run -p 127.0.0.1:9470:9470 -v aegis-data:/data aegisdb
 ```
 
 Compose is configured by an optional `.env` file — copy the template and edit:
@@ -97,13 +97,17 @@ The image ships a `HEALTHCHECK` that uses the binary's built-in `--health-check`
 probe (no extra tooling in the image), so `docker ps` and Compose
 `depends_on: condition: service_healthy` reflect real server liveness.
 
-The container runs as an unprivileged user and listens on `0.0.0.0:9470`.
-Override the default flags by appending them to the run command, e.g.
-`docker run aegisdb --embedding-dim 1024`, or (with Compose) via `.env`. To
-enable authentication, mount a token file into `/data` and add
+The container runs as an unprivileged user. The server listens on `0.0.0.0:9470`
+*inside* the container, but Compose publishes that port on the host's loopback
+(`127.0.0.1`) only by default — because the wire protocol is unauthenticated and
+plaintext out of the box, it must not be reachable off-box until you secure it.
+To expose it deliberately, set `AEGIS_BIND=0.0.0.0` (or a specific host IP) in
+`.env`, and first enable authentication: mount a token file into `/data` and add
 `--auth-token-file /data/tokens.txt` (to `AEGIS_EXTRA_ARGS` under Compose; see
-[Authentication](#authentication)); the wire
-protocol is plaintext, so keep the port on a trusted network.
+[Authentication](#authentication)). Even with auth, tokens travel in plaintext,
+so terminate TLS at a trusted proxy for any non-loopback exposure. Override other
+flags by appending them to the run command, e.g. `docker run aegisdb
+--embedding-dim 1024`, or (with Compose) via `.env`.
 
 ## Run
 
