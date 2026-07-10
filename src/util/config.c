@@ -608,6 +608,12 @@ void config_token_fingerprint(const AuthToken *t, char out[13]) {
     hex_encode(d, 6, out); /* first 6 bytes -> 12 hex chars */
 }
 
+void config_key_fingerprint(const uint8_t key[AEAD_KEY_LEN], char out[13]) {
+    uint8_t d[SHA256_DIGEST_LEN];
+    sha256(key, AEAD_KEY_LEN, d);
+    hex_encode(d, 6, out); /* first 6 bytes of SHA-256(key) -> 12 hex chars */
+}
+
 int config_remove_token(Config *cfg, const char *id12) {
     for (size_t i = 0; i < cfg->auth_token_count; i++) {
         char fp[13];

@@ -332,14 +332,25 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
     }
 
     uint64_t created = db_now_ms();
+    /* An encrypted snapshot is a byte copy of the encrypted log, so it stays
+     * encrypted; record the key fingerprint (not the key) so restore can check
+     * the operator supplied the right one. */
+    char enc_fields[80] = "";
+    if (db->config.encryption_enabled) {
+        char fp[13];
+        config_key_fingerprint(db->config.encryption_key, fp);
+        snprintf(enc_fields, sizeof(enc_fields),
+                 ",\"encrypted\":true,\"key_fingerprint\":\"%s\"", fp);
+    }
     char manifest[1400], man[768];
     int mn = snprintf(man, sizeof(man),
                       "{\"format\":1,\"created_ms\":%llu,\"version\":\"%s\","
                       "\"log_size\":%llu,\"record_count\":%zu,\"next_id\":%llu,"
-                      "\"embedding_dim\":%zu}\n",
+                      "\"embedding_dim\":%zu%s}\n",
                       (unsigned long long)created, AEGIS_VERSION_STRING,
                       (unsigned long long)covered, live,
-                      (unsigned long long)nid, db->config.embedding_dimensions);
+                      (unsigned long long)nid, db->config.embedding_dimensions,
+                      enc_fields);
     snprintf(manifest, sizeof(manifest), "%s/manifest.json", dir);
     FILE *mf = fopen(manifest, "wb");
     if (!mf || mn < 0 || fwrite(man, 1, (size_t)mn, mf) != (size_t)mn) {
