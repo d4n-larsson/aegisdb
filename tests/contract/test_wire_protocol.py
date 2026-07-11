@@ -1032,6 +1032,9 @@ def test_token_admin(binary, port):
             body = fh.read()
         check("acme" not in body, "revoked token removed from the token file")
         check(body.count("sha256$") == 1, "token file rewritten (hashed) with 1 token")
+        # the rewritten token file is owner-only (created 0600, no world-readable window)
+        check((os.stat(tokfile).st_mode & 0o777) == 0o600,
+              "persisted token file is mode 0600")
 
 
 def test_tenant_quota(binary, port):

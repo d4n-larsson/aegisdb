@@ -2,6 +2,7 @@
 #include "aegisdb/config.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -585,7 +586,11 @@ int config_add_token(Config *cfg, const char *tok, const char *ns, int scope) {
     return append_token(cfg, tok, ns, scope);
 }
 
-/* SHA-256 of a token: its stored digest if hashed, else computed from plaintext. */
+/* SHA-256 of a token: its stored digest if hashed, else computed from plaintext.
+ * The hash is unsalted — sufficient only because tokens are expected to be
+ * high-entropy random secrets (see sha256.h; `gen-token` produces such tokens,
+ * and the docs direct operators to `openssl rand -hex 32`). A low-entropy token
+ * would be vulnerable to precomputation; salting is not a substitute for entropy. */
 static void token_digest(const AuthToken *t, uint8_t out[32]) {
     if (t->hashed)
         memcpy(out, t->hash, 32);
@@ -638,8 +643,18 @@ static const char *scope_name(int scope) {
 int config_write_token_file(const Config *cfg, const char *path) {
     char tmp[1100];
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    FILE *f = fopen(tmp, "w");
-    if (!f) return -1;
+    /* Create the temp file 0600 from the start (not fopen's umask-dependent mode
+     * then a later chmod, which leaves a world-readable window). Clear any stale
+     * .tmp first so O_EXCL then refuses to follow a pre-planted symlink. */
+    unlink(tmp);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) return -1;
+    FILE *f = fdopen(fd, "w");
+    if (!f) {
+        close(fd);
+        unlink(tmp);
+        return -1;
+    }
     int ok = 1;
     for (size_t i = 0; i < cfg->auth_token_count && ok; i++) {
         const AuthToken *t = &cfg->auth_tokens[i];
@@ -654,8 +669,7 @@ int config_write_token_file(const Config *cfg, const char *path) {
         if (n < 0) ok = 0;
     }
     if (fflush(f) != 0) ok = 0;
-    if (fclose(f) != 0) ok = 0;
-    if (ok) chmod(tmp, 0600); /* secrets: owner-only */
+    if (fclose(f) != 0) ok = 0; /* closes fd; file was created 0600 */
     if (ok && rename(tmp, path) != 0) ok = 0;
     if (!ok) unlink(tmp);
     return ok ? 0 : -1;
