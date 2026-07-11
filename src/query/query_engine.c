@@ -31,6 +31,7 @@
                                * fewer than top_k — inherent to filtered ANN) */
 #define MAX_OFFSET 100000 /* clamp pagination offset to bound ranking work/allocs */
 #define MAX_VECS_PER_RECORD 64 /* cap embeddings per record (#85) */
+#define MAX_TRAVERSE_DEPTH 64 /* clamp graph-traversal depth (bounds work + the int cast) */
 #define MIN_HALF_LIFE_MS 1000 /* floor recency half-life at 1s (avoid absurd decay) */
 
 /* ----- phase gating (T055) --------------------------------------------- */
@@ -52,6 +53,21 @@ static int valid_tag(const char *t) {
     return 1;
 }
 
+/* A client-supplied agent_id (namespace) is only reachable with no auth or an
+ * admin token — a namespaced token pins it. Bound its length and reject control
+ * characters (which could corrupt logs or the token file's line format);
+ * otherwise permissive, since operator-defined namespaces vary. 1..128 bytes. */
+#define MAX_AGENT_ID 128
+static int valid_agent_id(const char *a) {
+    size_t n = strlen(a);
+    if (n < 1 || n > MAX_AGENT_ID) return 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)a[i];
+        if (c < 0x20 || c == 0x7f) return 0; /* no control chars */
+    }
+    return 1;
+}
+
 static aegis_status_t validate_common(AegisDB *db, const MemoryRecord *r) {
     if (r->data_len > db->config.max_payload_bytes)
         return AEGIS_ERR_PAYLOAD_TOO_LARGE;
@@ -62,6 +78,8 @@ static aegis_status_t validate_common(AegisDB *db, const MemoryRecord *r) {
     if (r->tag_count > MAX_TAGS) return AEGIS_ERR_INVALID_REQUEST;
     for (size_t i = 0; i < r->tag_count; i++)
         if (!valid_tag(r->tags[i])) return AEGIS_ERR_INVALID_REQUEST;
+    if (r->agent_id && !valid_agent_id(r->agent_id))
+        return AEGIS_ERR_INVALID_REQUEST;
     if (r->embedding_dim &&
         r->embedding_dim != db->config.embedding_dimensions)
         return AEGIS_ERR_INVALID_REQUEST;
@@ -210,8 +228,11 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
     rec->deleted = 0;
     /* Opt-in TTL (#73): a positive ttl_ms archives the record after the horizon
      * — hidden from recall immediately, reclaimed by the expiry sweep. 0 (the
-     * default) means never, preserving the durable/audit-log behaviour. */
-    rec->expires_at = ttl_ms ? now + ttl_ms : 0;
+     * default) means never, preserving the durable/audit-log behaviour. A huge
+     * ttl_ms is saturated to "never" rather than wrapping now+ttl_ms into the
+     * past (which would make the record expire immediately). */
+    rec->expires_at =
+        ttl_ms ? (ttl_ms > UINT64_MAX - now ? UINT64_MAX : now + ttl_ms) : 0;
 
     pthread_rwlock_wrlock(&db->index_lock);
     st = append_and_hash(db, rec);
@@ -1687,6 +1708,10 @@ static cJSON *handle_traverse(AegisDB *db, const cJSON *req, const char *ns) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     uint64_t depth = 1;
     jr_u64(req, "depth", &depth);
+    /* Clamp before the cast to int: an untrusted u64 depth would otherwise cast
+     * to a garbage (possibly negative) value, and a huge depth is pathological
+     * work regardless. A graph walk deeper than this isn't useful. */
+    if (depth > MAX_TRAVERSE_DEPTH) depth = MAX_TRAVERSE_DEPTH;
     const char *agent = ns ? ns : jr_str(req, "agent_id", NULL);
     MemoryRecord *recs = NULL;
     size_t n = 0;
