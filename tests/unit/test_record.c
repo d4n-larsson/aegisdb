@@ -256,6 +256,26 @@ static void test_encode_rejects_relationship_overflow(void) {
     record_free(&r); /* frees the (NULL-kind) relationship array */
 }
 
+/* record_clone must refuse a record whose vec_count*dim (or *sizeof(float))
+ * would overflow rather than under-allocate and overflow the heap on memcpy. */
+static void test_clone_rejects_embedding_overflow(void) {
+    MemoryRecord r;
+    record_init(&r);
+    r.id = 1;
+    r.type = MEM_SEMANTIC;
+    r.created = r.updated = 1;
+    r.embedding = malloc(sizeof(float)); /* real 1-float buffer; guard trips first */
+    TEST_ASSERT_NOT_NULL(r.embedding);
+    r.embedding[0] = 1.0f;
+    r.vec_count = (size_t)-1 / 2; /* vec_count * dim overflows size_t */
+    r.embedding_dim = 4;
+
+    MemoryRecord *c = record_clone(&r);
+    TEST_ASSERT_NULL(c); /* refused, no allocation/overflow */
+
+    record_free(&r); /* frees the 1-float buffer (record_free ignores vec_count) */
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_init_defaults);
@@ -265,6 +285,7 @@ int main(void) {
     RUN_TEST(test_decode_rejects_truncated);
     RUN_TEST(test_decode_rejects_embedding_overflow);
     RUN_TEST(test_encode_rejects_relationship_overflow);
+    RUN_TEST(test_clone_rejects_embedding_overflow);
     RUN_TEST(test_clone_is_deep);
     RUN_TEST(test_multivector_roundtrip);
     return UNITY_END();

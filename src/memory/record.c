@@ -94,6 +94,12 @@ MemoryRecord *record_clone(const MemoryRecord *src) {
         record_set_tags(r, (const char *const *)src->tags, src->tag_count))
         goto fail;
     if (src->embedding_dim && src->vec_count) {
+        /* Overflow-safe: bound vec_count*dim and the *sizeof(float) allocation
+         * before multiplying (division form, like record_decode). Records reach
+         * clone already validated, so this is defense in depth — but it keeps a
+         * pathological in-memory record from turning into a heap overflow. */
+        if (src->vec_count > (SIZE_MAX / sizeof(float)) / src->embedding_dim)
+            goto fail;
         size_t n = src->vec_count * src->embedding_dim;
         r->embedding = malloc(n * sizeof(float));
         if (!r->embedding) goto fail;

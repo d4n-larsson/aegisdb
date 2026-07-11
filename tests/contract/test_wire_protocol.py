@@ -1240,6 +1240,41 @@ def test_encrypt_migrate(binary, port):
               "migrated dir without a key -> server exits nonzero")
 
 
+def test_input_validation(binary, port):
+    print("[input validation: agent_id, ttl_ms overflow, traverse depth]")
+    with Server(binary, port, phase=4) as srv:
+        # agent_id with a control char is rejected (would corrupt logs/token file)
+        r = srv.req({"operation": "insert", "type": "episodic", "data": "x",
+                     "agent_id": "bad\nid"})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "agent_id with a control char -> INVALID_REQUEST")
+        # an over-long agent_id is rejected
+        r = srv.req({"operation": "insert", "type": "episodic", "data": "x",
+                     "agent_id": "a" * 200})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "over-long agent_id -> INVALID_REQUEST")
+        # a normal agent_id is accepted
+        r = srv.req({"operation": "insert", "type": "episodic", "data": "x",
+                     "agent_id": "team-alpha"})
+        check(r.get("ok") is True, "well-formed agent_id accepted")
+
+        # a huge ttl_ms saturates to "never" instead of wrapping into the past
+        r = srv.req({"operation": "insert", "type": "episodic", "data": "ttl",
+                     "ttl_ms": 18446744073709551615})
+        check(r.get("ok") is True, "insert with a huge ttl_ms ok")
+        rid = r["record"]["id"]
+        r = srv.req({"operation": "get", "id": rid})
+        check(r.get("ok") is True,
+              "record with an overflowing ttl_ms is not immediately expired")
+
+        # a huge traverse depth is clamped, not fatal (no int-cast garbage)
+        r = srv.req({"operation": "insert", "type": "semantic", "data": "n"})
+        nid = r["record"]["id"]
+        r = srv.req({"operation": "traverse", "id": nid,
+                     "depth": 9223372036854775807})
+        check(r.get("ok") is True, "huge traverse depth is clamped, not an error")
+
+
 def test_phase_gating(binary, port):
     print("[phase 1: gating]")
     with Server(binary, port, phase=1) as srv:
@@ -1334,6 +1369,7 @@ def main():
     test_cli(binary, 19477)
     test_search_limits(binary, 19478)
     test_query_scan_cap(binary, 19491)
+    test_input_validation(binary, 19495)
     test_encryption_at_rest(binary, 19492)
     test_encrypt_migrate(binary, 19493)
     test_concurrency(binary, 19479)
