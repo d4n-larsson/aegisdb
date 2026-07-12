@@ -223,3 +223,11 @@ class MemoryTools:
         if err:
             return err
         return results.ok(relationship=resp.get("relationship"))
+
+    def delete(self, id: int) -> dict:
+        """Tombstone a record: dropped from recall, reclaimed by compaction, but
+        recoverable from the log until then. Used to archive summarized sources."""
+        resp, err = self._send({"operation": "delete", "id": id})
+        if err:
+            return err
+        return results.ok(id=id, deleted=resp.get("deleted", True))

@@ -171,6 +171,29 @@ running on the configured host/port; the agent stays usable either way.
 > Tools surface to the model as `mcp__memory__memory_save`, etc. The reference
 > sections below cover every configuration option and the exact tool/hook contracts.
 
+### 7. (Optional) Background summarization
+
+Over months a namespace accumulates thousands of low-value episodic events. The
+`aegisdb-summarize` job distils clusters of related, aging memories into a single
+semantic fact, links it to its sources (`summarizes` edges), and archives the
+sources — so recall stays small and cheap. It is **off by default** and runs on a
+schedule you control (cron / systemd timer / the compose sidecar), **never** on
+the per-turn hot path.
+
+```sh
+# preview what it would do — writes nothing
+AEGIS_SUMMARY_MODE=claude-code uvx --from aegisdb-mcp aegisdb-summarize --dry-run
+
+# run it (e.g. from a nightly cron)
+AEGIS_SUMMARY_MODE=claude-code uvx --from aegisdb-mcp aegisdb-summarize
+```
+
+The `claude-code` backend distils via the `claude` CLI in headless mode, reusing
+your existing Claude Code auth — no API key. Summaries are conservative and
+reversible: sources are tombstoned (recoverable from the log until compaction),
+provenance is a graph edge, and `--dry-run` shows the plan first. See
+[`docs/summarization-design.md`](https://github.com/d4n-larsson/aegisdb/blob/main/docs/summarization-design.md).
+
 ## Requirements
 
 - A running **AegisDB** server, started with the embedding dimension you intend to
@@ -227,6 +250,15 @@ explicit overrides.
 | `AEGIS_CAPTURE_ENABLED` | `true` | toggle automatic capture |
 | `AEGIS_CAPTURE_SCOPE` | `session` | `session` (SessionEnd) \| `turn` (Stop) |
 | `AEGIS_CAPTURE_MIN_SALIENCE` | `0.5` | below this, nothing is captured |
+| `AEGIS_SUMMARY_MODE` | `none` | `aegisdb-summarize` backend: `none` (off) \| `fake` (tests) \| `claude-code` |
+| `AEGIS_SUMMARY_MODEL` | — | optional model override for the `claude-code` backend |
+| `AEGIS_SUMMARY_MIN_AGE_MS` | `604800000` | only distil memories older than this (7 days) |
+| `AEGIS_SUMMARY_MAX_IMPORTANCE` | `0.6` | leave higher-importance memories alone |
+| `AEGIS_SUMMARY_MIN_CLUSTER` | `3` | min related memories before a cluster is summarized |
+| `AEGIS_SUMMARY_MAX_CLUSTER` | `20` | max memories folded into one summary |
+| `AEGIS_SUMMARY_MAX_CLUSTERS_PER_RUN` | `20` | bound work/cost per run |
+| `AEGIS_SUMMARY_MIN_CONFIDENCE` | `0.0` | skip a summary below this confidence |
+| `AEGIS_SUMMARY_SCAN_TOP_K` | `1000` | candidate records pulled per run |
 
 > **Embedding dimension must match.** AegisDB validates that a stored vector's
 > length equals its configured `embedding_dimensions`. Keep
