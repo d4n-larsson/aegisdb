@@ -153,7 +153,9 @@ class MemoryTools:
 
     def search(self, query: str | None = None, tags=None, match: str = "any",
                start_time: int | None = None, end_time: int | None = None,
-               top_k: int | None = None) -> dict:
+               top_k: int | None = None, kind: str | None = None,
+               max_importance: float | None = None,
+               order: str | None = None) -> dict:
         top_k = top_k or self.config.recall_top_k
         tags = list(tags or [])
         if not query and not tags and start_time is None and end_time is None:
@@ -167,6 +169,14 @@ class MemoryTools:
             payload["start_time"] = start_time
         if end_time is not None:
             payload["end_time"] = end_time
+        # Server-side candidate-selection filters (ignored by older servers, which
+        # is safe: callers that rely on them also filter client-side).
+        if kind is not None:
+            payload["type"] = kind
+        if max_importance is not None:
+            payload["max_importance"] = max_importance
+        if order is not None:
+            payload["order"] = order
 
         query_embedding = None
         usable = self._embeddings_usable()

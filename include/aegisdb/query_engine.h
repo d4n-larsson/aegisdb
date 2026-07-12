@@ -66,6 +66,11 @@ typedef struct {
     int has_min_score;  /* semantic only: drop matches below min_score */
     float min_score;    /* cosine-similarity floor in [-1, 1] */
     uint64_t half_life_ms; /* semantic only: recency half-life; 0 = no decay */
+    int has_max_importance; /* filter: keep only records with importance <= max */
+    float max_importance;
+    int oldest_first;   /* non-semantic: when a bounded time scan truncates, keep
+                         * the OLDEST rather than the most recent (candidate
+                         * selection for summarization). Ignored for semantic. */
 } SearchParams;
 
 /* Search. Allocates *out_records (array of MemoryRecord; record_free each then

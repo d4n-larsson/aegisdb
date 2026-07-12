@@ -76,8 +76,15 @@ def run_summarize(config, client, summary_provider, embed_provider, *,
     now = now_ms if now_ms is not None else int(time.time() * 1000)
     cutoff = max(0, now - int(config.summary_min_age_ms))
 
+    # Push candidate selection to the server: oldest-first, episodic only, at or
+    # below the importance ceiling. This narrows the fetch (and, on a large
+    # namespace, guarantees the aging tail isn't hidden by the scan cap). The
+    # client-side _clusters() re-applies the same predicates, so an older server
+    # that ignores these fields still yields correct results.
     res = tools.search(start_time=0, end_time=cutoff,
-                       top_k=config.summary_scan_top_k)
+                       top_k=config.summary_scan_top_k, kind="episodic",
+                       max_importance=config.summary_max_importance,
+                       order="oldest")
     if not res.get("ok"):
         return {"ok": False, "clusters": 0, "summarized": 0, "archived": 0,
                 "error": res.get("error", "candidate search failed")}
