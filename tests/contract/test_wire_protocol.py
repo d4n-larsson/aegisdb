@@ -1293,6 +1293,38 @@ def test_input_validation(binary, port):
         check(r.get("ok") is True, "huge traverse depth is clamped, not an error")
 
 
+def test_memory_cap(binary, port):
+    print("[memory cap: inserts backpressure with MEMORY_LIMIT past --max-index-bytes]")
+    # Cap just above the empty-index baseline (~41 KB); default --embedding-dim 384,
+    # so a few dozen vector inserts cross it.
+    with Server(binary, port, phase=4,
+                extra_args=["--max-index-bytes", "55000"]) as srv:
+        vec = [0.05] * 384
+
+        def ins(i):
+            return srv.req({"operation": "insert", "type": "semantic",
+                            "tags": [f"m{i}"], "data": f"d{i}", "embedding": vec})
+
+        check(ins(1).get("ok") is True, "insert under the cap succeeds")
+        for i in range(2, 40):
+            ins(i)
+        total = srv.req({"operation": "stats"})["memory"]["index_bytes_total"]
+        check(total > 55000, "index memory has crossed the cap")
+
+        # the maintenance thread samples index memory every few seconds; wait for it
+        time.sleep(3.5)
+        r = ins(999)
+        check(r.get("ok") is False and r["error"]["code"] == "MEMORY_LIMIT",
+              "insert past the cap -> MEMORY_LIMIT")
+
+        # backpressure is insert-only: working memory (bounded) and reads still work
+        r = srv.req({"operation": "insert", "type": "working",
+                     "session_id": "s", "data": "w"})
+        check(r.get("ok") is True, "working-memory insert exempt from the cap")
+        r = srv.req({"operation": "get", "id": 1})
+        check(r.get("ok") is True, "reads still work when over the cap")
+
+
 def test_phase_gating(binary, port):
     print("[phase 1: gating]")
     with Server(binary, port, phase=1) as srv:
@@ -1388,6 +1420,7 @@ def main():
     test_search_limits(binary, 19478)
     test_query_scan_cap(binary, 19491)
     test_input_validation(binary, 19495)
+    test_memory_cap(binary, 19496)
     test_encryption_at_rest(binary, 19492)
     test_encrypt_migrate(binary, 19493)
     test_concurrency(binary, 19479)

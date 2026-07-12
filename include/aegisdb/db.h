@@ -50,6 +50,9 @@ typedef struct {
 
     uint64_t started_ms;     /* server start time (epoch ms) for uptime stats */
     Metrics metrics;         /* operational counters (see stats op) */
+    /* Cached total in-RAM index bytes, sampled by the maintenance thread and
+     * read lock-free on the write path to enforce --max-index-bytes. */
+    atomic_uint_fast64_t index_bytes;
     uint64_t next_id;        /* monotonic id allocator for persisted records */
     pthread_mutex_t id_lock; /* guards next_id */
     /* Bumped whenever compaction rewrites the log (offsets change). Replicas
@@ -93,6 +96,12 @@ int db_save_metadata(AegisDB *db);
  * next_id) so recovery can skip the covered prefix and replay only the tail.
  * Thread-safe. Returns 0/-1. */
 int db_checkpoint(AegisDB *db);
+
+/* Sum the approximate resident bytes of all in-RAM indexes (hash + time + tag +
+ * semantic). Takes the index read lock and walks the indexes, so it is O(index
+ * size) — call it off the hot path (the maintenance thread samples it into
+ * db->index_bytes for the write path to read lock-free). */
+uint64_t db_index_bytes(AegisDB *db);
 
 /* Build the HNSW graph off-lock if the live vector count has crossed the ANN
  * threshold and no graph exists yet. Driven by the maintenance thread so the

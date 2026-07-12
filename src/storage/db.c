@@ -51,6 +51,15 @@ int db_save_metadata(AegisDB *db) {
     return rename(tmp, db->path_meta);
 }
 
+uint64_t db_index_bytes(AegisDB *db) {
+    pthread_rwlock_rdlock(&db->index_lock);
+    uint64_t total = (uint64_t)hash_index_bytes(db->hash) +
+                     time_index_bytes(db->time) + tag_index_bytes(db->tags) +
+                     semantic_index_bytes(db->sem);
+    pthread_rwlock_unlock(&db->index_lock);
+    return total;
+}
+
 int db_checkpoint(AegisDB *db) {
     /* Checkpoints are encrypted with the same key as the log when encryption is
      * enabled, so recovery can trust and load them (and full-scan only the

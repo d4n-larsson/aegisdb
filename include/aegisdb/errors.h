@@ -18,6 +18,7 @@ typedef enum {
     AEGIS_ERR_QUOTA_EXCEEDED,    /* tenant storage quota reached -> QUOTA_EXCEEDED */
     AEGIS_ERR_RATE_LIMITED,      /* tenant request rate exceeded -> RATE_LIMITED */
     AEGIS_ERR_READ_ONLY,         /* write attempted on a read-only replica -> READ_ONLY */
+    AEGIS_ERR_MEMORY_LIMIT,      /* server index-memory cap reached -> MEMORY_LIMIT */
     AEGIS_ERR_INTERNAL           /* unexpected failure          -> INTERNAL */
 } aegis_status_t;
 

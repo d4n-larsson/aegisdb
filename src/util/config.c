@@ -54,6 +54,7 @@ void config_defaults(Config *cfg) {
     cfg->idle_timeout_sec = 60; /* reap connections idle (no byte progress) 60s */
     cfg->max_connections = 0;   /* 0 = unlimited */
     cfg->query_scan_cap = 100000; /* cap broad/filterless search+count loads */
+    cfg->max_index_bytes = 0;     /* 0 = unlimited index RAM */
     cfg->enabled_phase = 4; /* all features enabled by default */
     cfg->log_level = AEGIS_LOG_INFO;
 
@@ -260,6 +261,8 @@ static void usage(const char *prog) {
             "                           (default 0 = unlimited)\n"
             "  --query-scan-cap <n>     max most-recent records a broad/filterless\n"
             "                           search or count loads (default 100000; 0=off)\n"
+            "  --max-index-bytes <n>    soft cap on in-RAM index bytes; inserts get\n"
+            "                           MEMORY_LIMIT past it (accepts K/M/G; 0=off)\n"
             "  --encryption-key-file <path>  encrypt the log at rest with the 32-byte\n"
             "                           key (64 hex chars) in <path>. On a NEW data dir\n"
             "                           it encrypts from the first write; on an existing\n"
@@ -393,6 +396,12 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
                 return -1;
             }
             cfg->query_scan_cap = (size_t)v;
+        } else if (strcmp(a, "--max-index-bytes") == 0) {
+            NEXT("--max-index-bytes");
+            if (parse_size(val, &cfg->max_index_bytes)) {
+                fprintf(stderr, "%s: invalid max-index-bytes '%s'\n", prog, val);
+                return -1;
+            }
         } else if (strcmp(a, "--encryption-key-file") == 0) {
             NEXT("--encryption-key-file");
             if (load_key_file(val, cfg->encryption_key) != 0) {

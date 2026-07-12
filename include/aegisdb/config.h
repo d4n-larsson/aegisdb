@@ -81,6 +81,12 @@ typedef struct {
      * (amplification DoS). Selective filters (tags) are unaffected. Default
      * 100000; 0 = unlimited. */
     size_t query_scan_cap;
+    /* Soft cap on total in-RAM index bytes (hash+time+tag+semantic). Inserts are
+     * refused with MEMORY_LIMIT once the sampled index size reaches this, so a
+     * growing dataset backpressures instead of getting OOM-killed. Sampled
+     * periodically by the maintenance thread, so it is approximate (enforced
+     * within the sample interval). 0 = unlimited (default). */
+    size_t max_index_bytes;
     int enabled_phase;          /* default 4: gate operations above this phase */
     /* Encryption at rest (see docs/encryption-at-rest-design.md). Set from
      * --encryption-key-file: when enabled, the log is sealed with `encryption_key`

@@ -182,6 +182,7 @@ token: 9f3c…              # give to the client (AEGIS_TOKEN); not recoverable
 | `--tenant-max-records <n>` | `0` | Per-namespace live-record cap (`0` = unlimited); enforced only when auth is enabled |
 | `--tenant-max-bytes <n>` | `0` | Per-namespace live-byte cap (`0` = unlimited) |
 | `--tenant-rate-qps <n>` | `0` | Per-namespace request rate limit in req/s, burst = 1s (`0` = unlimited) |
+| `--max-index-bytes <n>` | `0` | Soft cap on in-RAM index size; inserts return `MEMORY_LIMIT` past it so a growing dataset backpressures instead of getting OOM-killed (accepts `K`/`M`/`G`; `0` = unlimited). Watch `stats.memory`. |
 | `--replication-port <n>` | — | Serve the read-replica log stream on this port (primary; requires `--replication-token`) |
 | `--replication-token <t>` | — | Token to subscribe to / follow the replication stream |
 | `--replicate-from <h:p>` | — | Follow this primary's replication port as a read-only replica (implies `--read-only`) |
