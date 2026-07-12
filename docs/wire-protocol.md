@@ -279,8 +279,8 @@ only deletes its own records. The response reports the count:
 ### `count`
 
 Count live records matching the filters (`tags`/`type`/`start_time`+`end_time`/
-`agent_id`, same semantics as `search`), without returning the records. A
-namespaced token counts only its own.
+`agent_id`/`max_importance`, same semantics as `search`), without returning the
+records. A namespaced token counts only its own.
 
 ```json
 { "operation": "count", "tags": ["user"], "match": "all" }
@@ -357,6 +357,13 @@ when **both** `start_time` and `end_time` are present.
 | `offset` | integer | Skip this many top-ranked results (pagination); default 0 |
 | `min_score` | number | Semantic only: drop matches below this cosine similarity ([-1, 1]) |
 | `half_life_ms` | integer | Semantic only: recency half-life — multiply each score by `0.5^(age/half_life)`, age measured from `updated`; 0/absent = no decay |
+| `max_importance` | number | Keep only records with `importance` ≤ this value (candidate selection) |
+| `order` | string | `oldest` \| `recent` (default). Non-semantic only: when a bounded time scan truncates, `oldest` keeps the aging tail instead of the most-recent records — so a large namespace still surfaces its oldest candidates |
+
+`max_importance` combined with `type` + a time range and `order: "oldest"` is how
+a summarization/maintenance job selects the oldest, lowest-value records to
+distill (server-side, so the client doesn't over-fetch and filter). `order` has
+no effect on semantic (embedding) queries, which rank by similarity.
 
 **Response (success)**:
 

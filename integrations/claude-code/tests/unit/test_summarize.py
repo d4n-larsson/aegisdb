@@ -12,6 +12,16 @@ from aegis_mcp.summary import (AnthropicSummaryProvider, FakeSummaryProvider,
 from aegis_mcp.summarize import _clusters
 
 
+class _CapturingClient:
+    """Fake AegisClient that records the last payload and replies empty."""
+    def __init__(self):
+        self.payload = None
+
+    def request(self, payload, read_timeout_ms=None):
+        self.payload = payload
+        return {"ok": True, "records": []}
+
+
 def _cfg(**kw):
     base = dict(summary_mode="fake", summary_model="", summary_max_importance=0.6,
                 summary_min_cluster=2, summary_max_cluster=20,
@@ -129,6 +139,33 @@ class TestClustering(unittest.TestCase):
         clusters = _clusters(mems, _cfg(summary_min_cluster=2,
                                         summary_max_clusters_per_run=3))
         self.assertLessEqual(len(clusters), 3)
+
+
+class TestCandidateSelectionPassthrough(unittest.TestCase):
+    """tools.search forwards the server-side candidate-selection filters."""
+
+    def _tools(self, client):
+        from aegis_mcp.embeddings import FakeProvider
+        from aegis_mcp.tools import MemoryTools
+        cfg = SimpleNamespace(recall_top_k=5, recall_min_score=0.0,
+                              recall_dedup_threshold=0.95, embedding_mode="fake",
+                              embedding_dimensions=16, namespace="t")
+        return MemoryTools(cfg, client, FakeProvider(16))
+
+    def test_forwards_kind_importance_order(self):
+        cap = _CapturingClient()
+        self._tools(cap).search(start_time=0, end_time=123, top_k=50,
+                                kind="episodic", max_importance=0.6, order="oldest")
+        self.assertEqual(cap.payload["type"], "episodic")
+        self.assertEqual(cap.payload["max_importance"], 0.6)
+        self.assertEqual(cap.payload["order"], "oldest")
+        self.assertEqual(cap.payload["end_time"], 123)
+
+    def test_omits_filters_when_absent(self):
+        cap = _CapturingClient()
+        self._tools(cap).search(tags=["x"])
+        for k in ("type", "max_importance", "order"):
+            self.assertNotIn(k, cap.payload)
 
 
 if __name__ == "__main__":

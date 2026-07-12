@@ -397,6 +397,7 @@ static int rec_has_tag(const MemoryRecord *r, const char *tag) {
 static int passes_filters(const MemoryRecord *r, const SearchParams *p) {
     if (r->deleted) return 0;
     if (p->has_type && r->type != p->type) return 0;
+    if (p->has_max_importance && r->importance > p->max_importance) return 0;
     if (p->agent_id &&
         (!r->agent_id || strcmp(r->agent_id, p->agent_id) != 0))
         return 0;
@@ -487,16 +488,25 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
         }
         *exhausted = (nids < fetch); /* fewer returned than asked -> saw them all */
     } else if (p->has_time) {
-        /* A wide-open time range is effectively a full scan, so bound it to the
-         * most-recent `load_cap` (0 = unlimited); *exhausted stays set only if
-         * nothing was dropped. */
+        /* A wide-open time range is effectively a full scan, so bound it to
+         * `load_cap` (0 = unlimited); *exhausted stays set only if nothing was
+         * dropped. Default keeps the most-recent cap-worth so fresh writes are
+         * never hidden; `oldest_first` keeps the OLDEST instead (candidate
+         * selection wants the aging tail, not the recent one). */
         int trunc = 0;
-        if (time_index_range_recent(db->time, p->start_time, p->end_time,
-                                    load_cap, &ids, &nids, &trunc) != 0) {
+        int rc = p->oldest_first
+            ? time_index_range(db->time, p->start_time, p->end_time,
+                               load_cap, &ids, &nids)
+            : time_index_range_recent(db->time, p->start_time, p->end_time,
+                                      load_cap, &ids, &nids, &trunc);
+        if (rc != 0) {
             pthread_rwlock_unlock(&db->index_lock);
             return AEGIS_ERR_INTERNAL;
         }
-        *exhausted = !trunc;
+        /* time_index_range caps to the oldest `load_cap` and returns nids==cap
+         * when it truncates; treat a full load as "possibly more". */
+        *exhausted = p->oldest_first ? (load_cap == 0 || nids < load_cap)
+                                     : !trunc;
     } else if (p->tag_count) {
         if (tag_index_query(db->tags, p->tags, p->tag_count, p->match_all, &ids,
                             &nids) != 0) {
@@ -1594,6 +1604,11 @@ static int parse_filters(const cJSON *req, const char *ns, SearchParams *p,
         p->has_time = 1;
     const char *type = jr_str(req, "type", NULL);
     if (type && memory_type_from_string(type, &p->type) == 0) p->has_type = 1;
+    double ms;
+    if (jr_f64(req, "max_importance", &ms) == 0) {
+        p->has_max_importance = 1;
+        p->max_importance = (float)ms;
+    }
     p->agent_id = ns ? ns : jr_str(req, "agent_id", NULL);
     const char *match = jr_str(req, "match", "all");
     p->match_all = (strcmp(match, "any") != 0);
@@ -1664,6 +1679,13 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req, const char *ns) {
     }
     if (jr_u64(req, "half_life_ms", &v) == 0 && v > 0)
         p.half_life_ms = v < MIN_HALF_LIFE_MS ? MIN_HALF_LIFE_MS : v; /* 0/absent = off */
+    if (jr_f64(req, "max_importance", &ms) == 0) {
+        p.has_max_importance = 1;
+        p.max_importance = (float)ms;
+    }
+    /* order=oldest keeps the aging tail when a bounded scan truncates (candidate
+     * selection); absent/anything else = default recent-biased scan. */
+    p.oldest_first = (strcmp(jr_str(req, "order", ""), "oldest") == 0);
 
     const char **tags = NULL;
     size_t tn = 0;

@@ -1403,6 +1403,44 @@ def test_concurrency(binary, port):
                 s.close()
 
 
+def test_search_candidate_selection(binary, port):
+    print("[search: max_importance ceiling + order=oldest (candidate selection)]")
+    with Server(binary, port, phase=4) as srv:
+        ids = []
+        for imp in (0.1, 0.2, 0.9, 0.3, 0.95):
+            r = srv.req({"operation": "insert", "type": "episodic",
+                         "tags": ["c"], "data": f"m{imp}", "importance": imp})
+            ids.append(r["record"]["id"])
+
+        # Baseline: no ceiling -> all five come back (backward compatible).
+        r = srv.req({"operation": "search", "type": "episodic",
+                     "start_time": 0, "end_time": 9999999999999, "top_k": 100})
+        check(r.get("ok") and r.get("total") == 5,
+              "search without max_importance returns all records")
+
+        # Ceiling filters out the high-importance records (0.9, 0.95).
+        r = srv.req({"operation": "search", "type": "episodic",
+                     "start_time": 0, "end_time": 9999999999999,
+                     "max_importance": 0.5, "order": "oldest", "top_k": 100})
+        recs = r.get("records", [])
+        check(r.get("ok") and len(recs) == 3,
+              "max_importance=0.5 keeps only the 3 low-importance records")
+        check(all(rec["importance"] <= 0.5 + 1e-6 for rec in recs),
+              "every returned record is at or below the importance ceiling")
+
+        # order=oldest -> ascending by (created, id) == insertion order, and only
+        # the eligible ids (0.1, 0.2, 0.3 -> ids[0], ids[1], ids[3]).
+        got = [rec["id"] for rec in recs]
+        check(got == sorted(got), "order=oldest returns records oldest-first")
+        check(got == [ids[0], ids[1], ids[3]],
+              "oldest-first yields the eligible records in insertion order")
+
+        # The shared filter flows to count for free.
+        n = srv.req({"operation": "count", "type": "episodic", "max_importance": 0.5})
+        check(n.get("ok") and n.get("count") == 3,
+              "count honors max_importance (shared filter struct)")
+
+
 def main():
     binary = sys.argv[1] if len(sys.argv) > 1 else "build/aegisdb"
     if not os.path.exists(binary):
@@ -1421,6 +1459,7 @@ def main():
     test_query_scan_cap(binary, 19491)
     test_input_validation(binary, 19495)
     test_memory_cap(binary, 19496)
+    test_search_candidate_selection(binary, 19497)
     test_encryption_at_rest(binary, 19492)
     test_encrypt_migrate(binary, 19493)
     test_concurrency(binary, 19479)
