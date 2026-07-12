@@ -1,6 +1,12 @@
 # Design: Background Summarization (memory distillation)
 
-**Status:** Proposed. Not implemented. Design of record to review before any code.
+**Status:** PR 1 implemented (this PR). The provider seam (`none`/`fake`/
+`claude-code`), the core distiller, `--dry-run`, and the operator-scheduled
+`aegisdb-summarize` entry point are in the Claude Code integration; the C server
+is unchanged. Decisions taken: the trigger is **operator-scheduled** (not a
+per-turn hook), and the first real backend is **`claude-code`** (shells to the
+`claude` CLI — the agent's own model, no API key). Remaining: a direct
+API backend (`anthropic`/`openai`) and scheduling/docs polish.
 **Scope:** Periodically fold clusters of related, aging memories into a single
 distilled fact, so recall stays small and cheap as memory accumulates — and the
 in-RAM indexes stop growing without bound. This is the LLM-powered complement to
@@ -94,9 +100,12 @@ operator-scheduled, budgeted, dry-runnable job is the safe shape for v1.
      namespace).
    - `relate` the summary to each source id (`kind: "summarizes"`) so provenance
      is a graph edge — traversable, auditable.
-   - **Archive** the sources: set a short TTL (or tombstone) so they drop out of
-     recall and get reclaimed by compaction, but remain in the log tail for
-     audit/rollback until then. Never hard-delete episodic events immediately.
+   - **Archive** the sources. *(v1: tombstone them via `delete`.* In this
+     log-structured store a delete is a soft tombstone — dropped from recall,
+     reclaimed by compaction, but still in the log tail for audit/rollback until
+     then, so it is not a hard delete. A TTL-on-existing-record path would be
+     tidier but `update` has no TTL field today; that's a possible small server
+     addition later.)
 4. **Report.** Log clusters found / summarized / records archived; support
    `--dry-run` that does steps 1–2 and prints the proposed summaries without
    writing anything.
@@ -145,16 +154,17 @@ pass is convergent and re-runnable.
 The C server is unchanged; everything here is integration config.
 
 ## 9. Rollout (PR sequence)
-1. **`SummaryProvider` abstraction + `none`/`fake` backends + `summarize` core
-   (candidate selection, cluster→summary→write-back with provenance/archive) +
-   `--dry-run`.** Testable end-to-end with a deterministic fake summarizer and a
-   real server; no external dependency. This is the bulk of the value and risk.
-2. **A real chat backend** (`anthropic` / openai-compatible), lazy-imported,
-   behind a key. Small once the seam exists.
-3. **Scheduling glue** — the `aegisdb-mcp summarize` entry point + a compose
-   sidecar / cron example + docs.
-4. **(Optional) `claude-code` trigger** — a slash-command/skill that distills via
-   the agent's own model, no external key.
+1. ✅ **(this PR)** `SummaryProvider` abstraction + `none`/`fake`/`claude-code`
+   backends + the `summarize` core (candidate selection, cluster→summary→
+   write-back with provenance + tombstone archive) + `--dry-run` + the
+   operator-scheduled `aegisdb-summarize` entry point. Testable end-to-end with
+   the deterministic fake summarizer against a real server; no external
+   dependency. The `claude-code` backend shells to the `claude` CLI, so the first
+   *real* summarizer needs no API key.
+2. **A direct chat backend** (`anthropic` / openai-compatible), lazy-imported,
+   behind a key — for environments without the Claude Code CLI.
+3. **Scheduling polish** — a compose `summarize` sidecar / cron + systemd-timer
+   examples, and docs.
 
 ## 10. Open questions
 - **Server help for candidate selection?** Selection is doable today with

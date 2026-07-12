@@ -47,6 +47,19 @@ class Config:
     capture_scope: str = "session"  # "session" | "turn"
     capture_min_salience: float = 0.5
 
+    # Background summarization (opt-in; see docs/summarization-design.md). Run by
+    # `aegisdb-summarize` on an operator schedule — NOT a per-turn hook. Default
+    # `none` = off, no dependency. `claude-code` distills via the `claude` CLI.
+    summary_mode: str = "none"  # "none" | "fake" | "claude-code"
+    summary_model: str = ""  # optional model override for the claude-code backend
+    summary_min_age_ms: int = 604800000  # only distill memories older than 7 days
+    summary_max_importance: float = 0.6  # leave high-importance memories alone
+    summary_min_cluster: int = 3  # min related memories to bother summarizing
+    summary_max_cluster: int = 20  # max memories folded into one summary
+    summary_max_clusters_per_run: int = 20  # bound work/cost per run
+    summary_min_confidence: float = 0.0  # skip a summary below this confidence
+    summary_scan_top_k: int = 1000  # candidate records pulled per run
+
 
 # Map each config field to its environment variable name.
 _ENV = {
@@ -69,6 +82,15 @@ _ENV = {
     "capture_enabled": "AEGIS_CAPTURE_ENABLED",
     "capture_scope": "AEGIS_CAPTURE_SCOPE",
     "capture_min_salience": "AEGIS_CAPTURE_MIN_SALIENCE",
+    "summary_mode": "AEGIS_SUMMARY_MODE",
+    "summary_model": "AEGIS_SUMMARY_MODEL",
+    "summary_min_age_ms": "AEGIS_SUMMARY_MIN_AGE_MS",
+    "summary_max_importance": "AEGIS_SUMMARY_MAX_IMPORTANCE",
+    "summary_min_cluster": "AEGIS_SUMMARY_MIN_CLUSTER",
+    "summary_max_cluster": "AEGIS_SUMMARY_MAX_CLUSTER",
+    "summary_max_clusters_per_run": "AEGIS_SUMMARY_MAX_CLUSTERS_PER_RUN",
+    "summary_min_confidence": "AEGIS_SUMMARY_MIN_CONFIDENCE",
+    "summary_scan_top_k": "AEGIS_SUMMARY_SCAN_TOP_K",
 }
 
 _BOOL = {"recall_enabled", "capture_enabled"}
@@ -76,8 +98,11 @@ _INT = {
     "aegis_port", "connect_timeout_ms", "read_timeout_ms",
     "embedding_dimensions", "recall_time_budget_ms", "recall_top_k",
     "recall_max_chars_per_memory", "recall_char_budget",
+    "summary_min_age_ms", "summary_min_cluster", "summary_max_cluster",
+    "summary_max_clusters_per_run", "summary_scan_top_k",
 }
-_FLOAT = {"recall_min_score", "recall_dedup_threshold", "capture_min_salience"}
+_FLOAT = {"recall_min_score", "recall_dedup_threshold", "capture_min_salience",
+          "summary_max_importance", "summary_min_confidence"}
 
 
 def _coerce(name: str, value):

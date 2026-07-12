@@ -33,6 +33,7 @@ dev = ["pytest>=7"]
 aegisdb-mcp = "aegis_mcp.server:main"
 aegisdb-recall-hook = "aegis_mcp.hooks:recall"
 aegisdb-capture-hook = "aegis_mcp.hooks:capture"
+aegisdb-summarize = "aegis_mcp.summarize:main"
 
 [tool.setuptools]
 packages = ["aegis_mcp"]
