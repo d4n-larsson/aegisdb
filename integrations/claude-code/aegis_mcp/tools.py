@@ -50,6 +50,26 @@ def score_record(rec: dict, query_embedding, *, semantic: bool) -> float | None:
     return sim * (0.5 + 0.5 * importance) * confidence
 
 
+def _suppress_near_duplicates(scored, threshold):
+    """Drop a memory whose embedding is >= `threshold` cosine to an already-kept,
+    higher-ranked one, so recall doesn't spend tokens re-injecting the same fact
+    phrased several ways. `scored` is a list of (score, record) sorted best-first;
+    the highest-scored member of each near-duplicate cluster is the one kept.
+    A threshold outside (0, 1) disables the filter (returns the input unchanged).
+    Records without an embedding are always kept (nothing to compare)."""
+    if not 0.0 < threshold < 1.0:
+        return scored
+    kept, kept_vecs = [], []
+    for s, r in scored:
+        vec = r.get("embedding") or []
+        if vec and any(cosine(vec, kv) >= threshold for kv in kept_vecs):
+            continue
+        kept.append((s, r))
+        if vec:
+            kept_vecs.append(vec)
+    return kept
+
+
 class MemoryTools:
     def __init__(self, config, client: AegisClient, provider: EmbeddingProvider):
         self.config = config
@@ -173,6 +193,8 @@ class MemoryTools:
                         reverse=True)
             scored = [(s, r) for (s, r) in scored
                       if (s or 0.0) >= self.config.recall_min_score]
+            scored = _suppress_near_duplicates(
+                scored, self.config.recall_dedup_threshold)
         scored = scored[:top_k]
         memories = [record_to_memory(r, score=s) for (s, r) in scored]
         return results.ok(total=len(memories), memories=memories, degraded=degraded)

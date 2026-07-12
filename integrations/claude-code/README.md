@@ -36,10 +36,12 @@ so you spend tokens on the work, not on re-establishing context.
   learned earlier are injected automatically, so you stop re-pasting them every
   session and the model stops re-deriving them.
 - **A relevant slice, not a dump.** Recall ranks by similarity × importance ×
-  confidence and injects only the top matches — capped by `AEGIS_RECALL_TOP_K`
-  and filtered by `AEGIS_RECALL_MIN_SCORE`, within `AEGIS_RECALL_TIME_BUDGET_MS`.
-  The *selection* happens in AegisDB, so the model never sees (or pays to sift)
-  the rest.
+  confidence and injects only the top matches — capped by `AEGIS_RECALL_TOP_K`,
+  filtered by `AEGIS_RECALL_MIN_SCORE`, and de-duplicated by
+  `AEGIS_RECALL_DEDUP_THRESHOLD` (so the same fact phrased several ways isn't
+  injected repeatedly), within `AEGIS_RECALL_TIME_BUDGET_MS`. The *selection*
+  happens client-side after AegisDB ranks, so the model never sees (or pays to
+  sift) the rest.
 - **A bounded block, not a runaway one.** The injected context is size-capped:
   each memory is truncated at `AEGIS_RECALL_MAX_CHARS_PER_MEMORY` (on a word
   boundary, marked `[…]`) and the whole block at `AEGIS_RECALL_CHAR_BUDGET` (a
@@ -219,6 +221,7 @@ explicit overrides.
 | `AEGIS_RECALL_TIME_BUDGET_MS` | `800` | hard ceiling for recall |
 | `AEGIS_RECALL_TOP_K` | `5` | max memories injected per turn |
 | `AEGIS_RECALL_MIN_SCORE` | `0.2` | drop weak semantic matches |
+| `AEGIS_RECALL_DEDUP_THRESHOLD` | `0.95` | drop a memory ≥ this cosine to a higher-ranked one, so near-duplicates don't waste tokens (semantic only; 0 or ≥1 disables) |
 | `AEGIS_RECALL_MAX_CHARS_PER_MEMORY` | `500` | truncate each injected memory's text (0 = unlimited) |
 | `AEGIS_RECALL_CHAR_BUDGET` | `2000` | total chars of injected memory text per turn; keeps the top-ranked slice, drops the rest (0 = unlimited) |
 | `AEGIS_CAPTURE_ENABLED` | `true` | toggle automatic capture |

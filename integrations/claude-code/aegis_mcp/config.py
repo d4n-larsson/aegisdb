@@ -31,6 +31,12 @@ class Config:
     recall_time_budget_ms: int = 800
     recall_top_k: int = 5
     recall_min_score: float = 0.2
+    # Diversity gate: drop a recalled memory whose embedding is >= this cosine to
+    # an already-kept, higher-ranked one, so recall doesn't spend tokens
+    # re-injecting the same fact several ways. Semantic recall only. 0 or >= 1
+    # disables. (Complements the server's `consolidate`, which merges duplicates
+    # destructively; this is non-destructive and applies even before it runs.)
+    recall_dedup_threshold: float = 0.95
     # Token-cost guard rails for the injected context block. A few long memories
     # can otherwise dominate a turn; cap each memory's rendered text and the
     # block's total size (both measured in characters; 0 = unlimited).
@@ -57,6 +63,7 @@ _ENV = {
     "recall_time_budget_ms": "AEGIS_RECALL_TIME_BUDGET_MS",
     "recall_top_k": "AEGIS_RECALL_TOP_K",
     "recall_min_score": "AEGIS_RECALL_MIN_SCORE",
+    "recall_dedup_threshold": "AEGIS_RECALL_DEDUP_THRESHOLD",
     "recall_max_chars_per_memory": "AEGIS_RECALL_MAX_CHARS_PER_MEMORY",
     "recall_char_budget": "AEGIS_RECALL_CHAR_BUDGET",
     "capture_enabled": "AEGIS_CAPTURE_ENABLED",
@@ -70,7 +77,7 @@ _INT = {
     "embedding_dimensions", "recall_time_budget_ms", "recall_top_k",
     "recall_max_chars_per_memory", "recall_char_budget",
 }
-_FLOAT = {"recall_min_score", "capture_min_salience"}
+_FLOAT = {"recall_min_score", "recall_dedup_threshold", "capture_min_salience"}
 
 
 def _coerce(name: str, value):

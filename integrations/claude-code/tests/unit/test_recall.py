@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from aegis_mcp.embeddings import FakeProvider
 from aegis_mcp.recall import format_context, run_recall
+from aegis_mcp.tools import MemoryTools, _suppress_near_duplicates
 
 
 def _mems(*texts):
@@ -18,8 +19,8 @@ def _mems(*texts):
 def _cfg(budget_ms):
     return SimpleNamespace(
         recall_time_budget_ms=budget_ms, recall_top_k=3, recall_min_score=0.0,
-        recall_max_chars_per_memory=0, recall_char_budget=0,
-        embedding_dimensions=16, namespace="t")
+        recall_dedup_threshold=0.95, recall_max_chars_per_memory=0,
+        recall_char_budget=0, embedding_dimensions=16, namespace="t")
 
 
 class _InstantClient:
@@ -29,6 +30,49 @@ class _InstantClient:
 
     def request(self, payload, read_timeout_ms=None):
         return self._resp
+
+
+class TestDedup(unittest.TestCase):
+    def test_suppress_near_duplicates_keeps_top_and_distinct(self):
+        a = (0.9, {"id": 1, "embedding": [1.0, 0.0, 0.0]})
+        b = (0.8, {"id": 2, "embedding": [1.0, 0.0, 0.0]})  # identical to a
+        c = (0.7, {"id": 3, "embedding": [0.0, 1.0, 0.0]})  # distinct
+        kept = _suppress_near_duplicates([a, b, c], 0.95)
+        ids = [r["id"] for _, r in kept]
+        self.assertEqual(ids, [1, 3])  # highest-scored dup + the distinct one
+
+    def test_threshold_out_of_range_disables(self):
+        a = (0.9, {"id": 1, "embedding": [1.0, 0.0]})
+        b = (0.8, {"id": 2, "embedding": [1.0, 0.0]})
+        self.assertEqual(len(_suppress_near_duplicates([a, b], 1.0)), 2)
+        self.assertEqual(len(_suppress_near_duplicates([a, b], 0.0)), 2)
+
+    def test_records_without_embeddings_are_kept(self):
+        a = (0.9, {"id": 1})  # no embedding
+        b = (0.8, {"id": 2})
+        self.assertEqual(len(_suppress_near_duplicates([a, b], 0.95)), 2)
+
+    def test_search_drops_near_duplicate_memories(self):
+        # Two records with identical embeddings + one distinct; semantic search
+        # should return the top dup and the distinct one, not both dups.
+        fp = FakeProvider(16)
+        same = fp.embed_document("the deploy command is make ship")
+        diff = fp.embed_document("the mascot is an otter")
+        recs = [
+            {"id": 1, "type": "semantic", "data": "deploy with make ship",
+             "importance": 0.9, "confidence": 1.0, "embedding": same},
+            {"id": 2, "type": "semantic", "data": "to deploy run make ship",
+             "importance": 0.5, "confidence": 1.0, "embedding": same},
+            {"id": 3, "type": "semantic", "data": "otter mascot",
+             "importance": 0.5, "confidence": 1.0, "embedding": diff},
+        ]
+        cfg = SimpleNamespace(
+            recall_top_k=10, recall_min_score=0.0, recall_dedup_threshold=0.95,
+            embedding_mode="fake", embedding_dimensions=16, namespace="t")
+        tools = MemoryTools(cfg, _InstantClient({"ok": True, "records": recs}), fp)
+        res = tools.search(query="how do I deploy")
+        ids = sorted(m["id"] for m in res["memories"])
+        self.assertEqual(ids, [1, 3])  # id 2 (near-dup of 1) suppressed
 
 
 class TestRunRecallBudget(unittest.TestCase):
