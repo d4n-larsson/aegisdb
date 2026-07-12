@@ -199,6 +199,21 @@ def test_stats(binary, port):
         check(isinstance(r.get("indexes"), dict)
               and {"time", "tags", "semantic", "working"} <= set(r["indexes"]),
               "stats reports per-index counts")
+        # per-index memory estimates, for OOM monitoring
+        mem = r.get("memory")
+        check(isinstance(mem, dict)
+              and {"hash_bytes", "time_bytes", "tag_bytes", "semantic_bytes",
+                   "index_bytes_total"} <= set(mem),
+              "stats reports per-index memory bytes")
+        check(mem["index_bytes_total"]
+              >= mem["hash_bytes"] + mem["semantic_bytes"],
+              "index_bytes_total sums the per-index figures")
+        # inserting a vector grows the semantic memory estimate
+        sem0 = srv.req({"operation": "stats"})["memory"]["semantic_bytes"]
+        srv.req({"operation": "insert", "type": "semantic", "data": "vec",
+                 "embedding": [0.1] * 384})  # default --embedding-dim 384
+        sem1 = srv.req({"operation": "stats"})["memory"]["semantic_bytes"]
+        check(sem1 > sem0, "semantic memory grows after inserting a vector")
 
         base = srv.req({"operation": "stats"})["records"]
         srv.req({"operation": "insert", "type": "episodic",

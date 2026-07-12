@@ -88,6 +88,10 @@ const HashEntry *hash_index_get(const HashIndex *h, uint64_t id) {
     return NULL;
 }
 
+size_t hash_index_bytes(const HashIndex *h) {
+    return h ? sizeof(*h) + h->cap * sizeof(HashEntry) : 0;
+}
+
 size_t hash_index_count(const HashIndex *h) { return h->count; }
 
 /* Checkpoint v3: a 36-byte header followed by `count` 22-byte entries.

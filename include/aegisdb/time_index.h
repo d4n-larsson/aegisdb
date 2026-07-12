@@ -25,6 +25,9 @@ typedef struct {
 TimeIndex *time_index_create(void);
 void time_index_free(TimeIndex *t);
 
+/* Approximate resident bytes of the index (the sorted entry array). */
+size_t time_index_bytes(const TimeIndex *t);
+
 int time_index_add(TimeIndex *t, uint64_t created, uint64_t id);
 void time_index_remove(TimeIndex *t, uint64_t created, uint64_t id);
 

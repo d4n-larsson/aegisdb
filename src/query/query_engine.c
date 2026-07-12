@@ -1261,6 +1261,23 @@ static cJSON *handle_stats(AegisDB *db) {
         cJSON_AddNumberToObject(idx, "working",
                                 (double)working_store_count(db->working));
     }
+
+    /* Approximate resident bytes per index. Indexes are held in RAM, so this is
+     * the figure to watch/alert on — memory grows with the dataset, and the
+     * semantic vectors usually dominate. Excludes allocator overhead. */
+    cJSON *mem = cJSON_AddObjectToObject(o, "memory");
+    if (mem) {
+        size_t hb = hash_index_bytes(db->hash);
+        size_t tb = time_index_bytes(db->time);
+        size_t gb = tag_index_bytes(db->tags);
+        size_t sb = semantic_index_bytes(db->sem);
+        cJSON_AddNumberToObject(mem, "hash_bytes", (double)hb);
+        cJSON_AddNumberToObject(mem, "time_bytes", (double)tb);
+        cJSON_AddNumberToObject(mem, "tag_bytes", (double)gb);
+        cJSON_AddNumberToObject(mem, "semantic_bytes", (double)sb);
+        cJSON_AddNumberToObject(mem, "index_bytes_total",
+                                (double)(hb + tb + gb + sb));
+    }
     pthread_rwlock_unlock(&db->index_lock);
 
     pthread_mutex_lock(&db->id_lock);

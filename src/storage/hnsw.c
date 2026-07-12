@@ -669,6 +669,25 @@ int hnsw_search(const Hnsw *h, const float *query, size_t dim, size_t top_k,
 size_t hnsw_count(const Hnsw *h) { return h ? h->live : 0; }
 int hnsw_is_quantized(const Hnsw *h) { return h ? h->quantized : 0; }
 
+/* Approximate resident bytes of the graph: the node + map arrays, each node's
+ * vector (float or int8), and its per-layer link arrays. Excludes allocator
+ * overhead. O(nodes) — fine for the infrequent stats path. */
+size_t hnsw_bytes(const Hnsw *h) {
+    if (!h) return 0;
+    size_t total = sizeof(*h) + h->cap * sizeof(Node) + h->mcap * sizeof(MapSlot);
+    size_t vsz = h->quantized ? h->dim : h->dim * sizeof(float);
+    for (size_t i = 0; i < h->n; i++) {
+        const Node *nd = &h->nodes[i];
+        total += vsz; /* vec (float mode) or qvec (quant mode) */
+        size_t layers = (size_t)nd->top_layer + 1;
+        total += layers * (sizeof(uint32_t *) + sizeof(uint32_t)); /* links + link_cnt arrays */
+        if (nd->link_cnt)
+            for (size_t l = 0; l < layers; l++)
+                total += (size_t)nd->link_cnt[l] * sizeof(uint32_t);
+    }
+    return total;
+}
+
 int hnsw_foreach_live(const Hnsw *h,
                       int (*cb)(uint64_t id, const float *vec, void *ctx),
                       void *ctx) {

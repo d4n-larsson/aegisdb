@@ -40,6 +40,18 @@ size_t tag_index_count(const TagIndex *t) {
     return n;
 }
 
+/* Approximate resident bytes: the bucket table + each tag node (struct, its tag
+ * string, and its id posting array). Excludes allocator overhead. */
+size_t tag_index_bytes(const TagIndex *t) {
+    if (!t) return 0;
+    size_t total = sizeof(*t);
+    for (size_t i = 0; i < NBUCKETS; i++)
+        for (const TagNode *node = t->buckets[i]; node; node = node->next)
+            total += sizeof(*node) + (node->tag ? strlen(node->tag) + 1 : 0) +
+                     node->cap * sizeof(uint64_t);
+    return total;
+}
+
 void tag_index_free(TagIndex *t) {
     if (!t) return;
     for (size_t i = 0; i < NBUCKETS; i++) {
