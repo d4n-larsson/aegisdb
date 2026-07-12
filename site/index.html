@@ -424,11 +424,35 @@
       </div>
     </section>
 
+    <!-- PERFORMANCE -->
+    <section class="rec" id="speed">
+      <div class="off mono">0x0500</div>
+      <div class="col">
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0005</b>&nbsp;·&nbsp;type=semantic</p>
+        <div class="twoup">
+          <div>
+            <h2 class="title">Fast enough to be invisible.</h2>
+            <p class="lede">Recall sits in the agent's inner loop, so latency is the whole game. AegisDB keeps vector search <b>sub-millisecond</b> as memories pile up — exact while a set is small, an HNSW graph past a threshold, so recall stays fast without losing accuracy.</p>
+            <p class="lede">These are AegisDB's own numbers, not a comparison — and you can reproduce them yourself: <span class="mono">make bench</span> (vector recall + latency) and <span class="mono">make wire-bench</span> (end-to-end over TCP).</p>
+          </div>
+          <div>
+            <p class="cap">make bench · make wire-bench</p>
+<pre>vector recall  <span class="ar">→</span> 0.14 ms @ 10k · 0.22 ms @ 100k
+recall@10      <span class="ar">→</span> 1.00  (384-dim, HNSW)
+ping           <span class="ar">→</span> 158k ops/s · p50 0.05 ms
+read (get)     <span class="ar">→</span> p50 0.8 ms over the wire
+
+<span class="c">measured on a 2023 laptop i7, loopback</span></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- WIRE PROTOCOL -->
     <section class="rec" id="wire">
       <div class="off mono">0x0640</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0005</b>&nbsp;·&nbsp;type=semantic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0006</b>&nbsp;·&nbsp;type=semantic</p>
         <h2 class="title">One JSON line in. One JSON line back.</h2>
         <p class="lede">The wire protocol is newline-delimited JSON over TCP. No SDK, no driver — any language that can open a socket can speak it.</p>
         <p class="cap">store a memory, then recall it</p>
@@ -449,7 +473,7 @@
     <section class="rec" id="claude">
       <div class="off mono">0x07A0</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0006</b>&nbsp;·&nbsp;type=semantic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0007</b>&nbsp;·&nbsp;type=semantic</p>
         <div class="twoup">
           <div>
             <h2 class="title">Long-term memory for Claude&nbsp;Code.</h2>
@@ -485,7 +509,7 @@
     <section class="rec" id="start">
       <div class="off mono">0x0940</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0007</b>&nbsp;·&nbsp;type=episodic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0008</b>&nbsp;·&nbsp;type=episodic</p>
         <h2 class="title">Run it, talk to it.</h2>
         <p class="lede">Pull the image or build from source — either way you're holding a connection in seconds.</p>
         <div class="start-log">
@@ -527,7 +551,7 @@ docker exec aegisdb aegisdb client search --tags user</code>
     <section class="rec" id="team">
       <div class="off mono">0x0B20</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0008</b>&nbsp;·&nbsp;type=meta</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0009</b>&nbsp;·&nbsp;type=meta</p>
         <h2 class="title">Set up shared memory for a team.</h2>
         <p class="lede">One server, one tenant token per project, and Claude&nbsp;Code wired in with <span class="mono">uvx</span> — no clone anywhere. Uses the published image and the <a href="https://pypi.org/project/aegisdb-mcp/"><span class="mono">aegisdb-mcp</span></a> PyPI package.</p>
         <div class="start-log">
