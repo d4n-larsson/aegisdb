@@ -188,6 +188,24 @@
     .feat p b { color: var(--paper); font-weight: 500; }
     @media (max-width: 680px) { .feats { grid-template-columns: 1fr; } }
 
+    /* "and more" expander — the long tail of production features, kept out of the
+       headline grid so the page reads as a pitch, not a spec sheet. */
+    .more { border: 1px solid var(--line); border-top: none; }
+    .more > summary {
+      cursor: pointer; padding: 14px 24px; font-family: var(--mono);
+      font-size: 0.82rem; letter-spacing: 0.04em; color: var(--brass);
+      list-style: none;
+    }
+    .more > summary::-webkit-details-marker { display: none; }
+    .more > summary::before { content: "\25B8\00a0"; }
+    .more[open] > summary { border-bottom: 1px solid var(--line); }
+    .more[open] > summary::before { content: "\25BE\00a0"; }
+    .morelist { margin: 0; padding: 18px 24px; columns: 2; column-gap: 32px; list-style: none; }
+    .morelist li { margin: 0 0 12px; break-inside: avoid; color: var(--dim); font-size: 0.9rem; line-height: 1.5; }
+    .morelist li b { color: var(--paper); font-weight: 500; }
+    .moremore { padding: 0 24px 18px; margin: 0; color: var(--dim); font-size: 0.85rem; }
+    @media (max-width: 680px) { .morelist { columns: 1; } }
+
     /* ---- code blocks ---- */
     pre {
       background: #0E0C0A; border: 1px solid var(--line); border-radius: 6px;
@@ -258,6 +276,7 @@
       <div class="col">
         <a class="brand" href="#top"><span class="blk">▍</span>AEGISDB</a>
         <nav aria-label="Primary">
+          <a href="#tokens" class="nav-hide">why</a>
           <a href="#what" class="nav-hide">memory</a>
           <a href="#wire" class="nav-hide">protocol</a>
           <a href="#claude" class="nav-hide">claude&nbsp;code</a>
@@ -277,10 +296,10 @@
           <div>
             <h1>Memory that<br>outlives the<br><span class="em">context window.</span></h1>
             <p class="lead">
-              Agents start every session with amnesia. AegisDB gives them durable
-              memory — what happened, what they know, and what they're working on —
-              recalled by meaning, time, or tag, so you stop rebuilding context
-              from scratch every session.
+              Agents start every session with amnesia — so you re-paste your
+              stack, conventions, and past decisions into every prompt, and pay
+              for it in tokens. AegisDB is the memory layer that keeps that
+              knowledge and feeds back only what's relevant, per prompt.
             </p>
             <div class="cta">
               <a class="btn primary" href="#start">▍ get started</a>
@@ -327,11 +346,33 @@
       </div>
     </section>
 
+    <!-- WHY FEWER TOKENS (the payoff, up front) -->
+    <section class="rec" id="tokens">
+      <div class="off mono">0x0140</div>
+      <div class="col">
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0003</b>&nbsp;·&nbsp;type=semantic</p>
+        <div class="twoup">
+          <div>
+            <h2 class="title">Stop paying to re-teach the model.</h2>
+            <p class="lede">Every session normally re-pastes your stack, conventions, and past decisions into the prompt. AegisDB keeps that knowledge out of the window and feeds back only what's relevant, per prompt — so you pay for the work, not for re-establishing context.</p>
+          </div>
+          <div>
+            <ul>
+              <li><b>Recall, don't re-explain</b> — your stack, conventions, and past decisions are already known, so you stop re-pasting them each session.</li>
+              <li><b>A relevant slice, not a dump</b> — each prompt pulls only the top-ranked memories — ranked by similarity &times; importance — instead of replaying entire transcripts; the model never sees the rest.</li>
+              <li><b>Short sessions, full knowledge</b> — start fresh instead of dragging a giant transcript whose every turn re-bills the whole context.</li>
+              <li><b>Distilled &amp; shared</b> — capture stores salient outcomes, not raw logs, and a team reuses context established once.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- WHAT IT IS -->
     <section class="rec" id="what">
       <div class="off mono">0x01A0</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0003</b>&nbsp;·&nbsp;type=semantic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0004</b>&nbsp;·&nbsp;type=semantic</p>
         <h2 class="title">A memory model shaped like memory.</h2>
         <p class="lede">Three kinds of memory, each with the lifecycle it actually needs — not one generic store with a TTL bolted on. Persisted memories are durable by default, and can be set to auto-archive after a deadline when you want them to fade.</p>
         <div class="legend">
@@ -360,49 +401,48 @@
             <h3><span class="bar"></span>Vector search that scales</h3>
             <p>Exact cosine while a set is small; past a threshold it switches to an <b>HNSW graph</b> for sublinear approximate-nearest-neighbour search, so recall stays fast as memories accumulate. The graph is <b>checkpointed</b> — a restart reloads it instead of rebuilding — and vectors can be <b>int8-quantized</b> to cut its memory ~4×.</p>
           </div>
-          <div class="feat se" data-k="0x0340">
-            <h3><span class="bar"></span>Ranked like memory</h3>
-            <p>Recall ranks by similarity, importance, and confidence — and, when you ask, an <b>opt-in recency decay</b> so a fresh memory outranks a stale one of equal similarity. Page results, or set a <b>minimum similarity</b> to gate on relevance.</p>
-          </div>
           <div class="feat" data-k="0x0360">
             <h3><span class="bar"></span>A graph of context</h3>
             <p>Link memories with directed edges and walk them breadth-first to <b>pull in what's related</b> to what you just recalled.</p>
           </div>
-          <div class="feat" data-k="0x03D0">
-            <h3><span class="bar"></span>One bad record doesn't poison the log</h3>
-            <p>Every frame is <b>magic + CRC</b> framed. A torn tail from a crash is trimmed; interior bit-rot is skipped frame by frame and the rest still loads — one bad record never costs you the log.</p>
+        </div>
+        <details class="more">
+          <summary>Built for production — and more</summary>
+          <ul class="morelist">
+            <li><b>Ranked like memory</b> — similarity × importance × confidence, with opt-in recency decay and a minimum-score gate.</li>
+            <li><b>Crash-safe log</b> — magic + CRC frames; a torn tail is trimmed and interior bit-rot skipped, so one bad record never costs you the log.</li>
+            <li><b>Multi-tenant isolation</b> — namespace + scope (<span class="mono">ro</span>/<span class="mono">rw</span>/admin) tokens; a tenant sees only its own memories.</li>
+            <li><b>Per-tenant quotas + rate limits</b> — bound one namespace's records, bytes, and request rate.</li>
+            <li><b>Encryption at rest</b> — optional XChaCha20-Poly1305 over the log + checkpoints (vendored, no deps), with an offline migrator.</li>
+            <li><b>Tunable durability</b> — <span class="mono">sync</span>/<span class="mono">batch</span>/<span class="mono">interval</span> fsync; checkpoint + non-blocking compaction recovery.</li>
+            <li><b>Read replicas</b> — async log-shipping standbys for read scaling and manual failover.</li>
+            <li><b>Online backup + restore</b> — consistent point-in-time snapshots, no downtime.</li>
+            <li><b>Memory-bounded</b> — a soft index-RAM cap backpressures instead of getting OOM-killed.</li>
+          </ul>
+          <p class="moremore">Full reference in the <a href="https://github.com/d4n-larsson/aegisdb#readme">README</a> &amp; <a href="https://github.com/d4n-larsson/aegisdb/tree/main/docs">docs</a>.</p>
+        </details>
+      </div>
+    </section>
+
+    <!-- PERFORMANCE -->
+    <section class="rec" id="speed">
+      <div class="off mono">0x0500</div>
+      <div class="col">
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0005</b>&nbsp;·&nbsp;type=semantic</p>
+        <div class="twoup">
+          <div>
+            <h2 class="title">Fast enough to be invisible.</h2>
+            <p class="lede">Recall sits in the agent's inner loop, so latency is the whole game. AegisDB keeps vector search <b>sub-millisecond</b> as memories pile up — exact while a set is small, an HNSW graph past a threshold, so recall stays fast without losing accuracy.</p>
+            <p class="lede">These are AegisDB's own numbers, not a comparison — and you can reproduce them yourself: <span class="mono">make bench</span> (vector recall + latency) and <span class="mono">make wire-bench</span> (end-to-end over TCP).</p>
           </div>
-          <div class="feat" data-k="0x0440">
-            <h3><span class="bar"></span>One server, many tenants</h3>
-            <p>Each token is <b>bound to a namespace</b>. A tenant can only read and write its own memories — another tenant's records read back as not-found. Isolation is <b>enforced</b>, not advisory.</p>
-          </div>
-          <div class="feat" data-k="0x04B0">
-            <h3><span class="bar"></span>Tokens with scope</h3>
-            <p>Bearer tokens carry a namespace and a scope — <span class="mono">ro</span>, <span class="mono">rw</span>, or <b>admin</b>. Writes outside scope are refused; <span class="mono">ping</span> stays open for health checks; admin tokens span tenants.</p>
-          </div>
-          <div class="feat" data-k="0x0520">
-            <h3><span class="bar"></span>Durability, your call</h3>
-            <p>Pick <span class="mono">sync</span>, <span class="mono">batch</span>, or <span class="mono">interval</span> fsync — bound loss by <b>time or count</b>, or pay per write for none. The default flushes on a timer, so an idle server never strands an acknowledged write.</p>
-          </div>
-          <div class="feat" data-k="0x0590">
-            <h3><span class="bar"></span>Boots from a checkpoint</h3>
-            <p>Recovery loads an index <b>checkpoint</b> and replays only the log written since — not the whole history. Compaction reclaims dead frames <b>without stopping the world</b>.</p>
-          </div>
-          <div class="feat" data-k="0x05C0">
-            <h3><span class="bar"></span>Encrypted at rest</h3>
-            <p>Point <span class="mono">--encryption-key-file</span> at a key and the log and its checkpoints are sealed with <b>XChaCha20-Poly1305</b> — a stolen disk, volume snapshot, or backup reveals nothing. Vendored, so the binary stays <b>dependency-free</b>; an offline migrator converts an existing store in place.</p>
-          </div>
-          <div class="feat" data-k="0x05E0">
-            <h3><span class="bar"></span>Fair shares per tenant</h3>
-            <p>Cap a namespace's <b>records, bytes, and request rate</b> so one member's runaway agent can't fill the disk or monopolize the server — over-quota writes get <span class="mono">QUOTA_EXCEEDED</span>, floods get <span class="mono">RATE_LIMITED</span>.</p>
-          </div>
-          <div class="feat" data-k="0x0600">
-            <h3><span class="bar"></span>Warm-standby replicas</h3>
-            <p>A read replica follows the primary by streaming its log, serving <span class="mono">get</span>/<span class="mono">search</span> from its own copy and <b>promotable by hand</b> after a failure — read scaling and availability, no consensus system.</p>
-          </div>
-          <div class="feat" data-k="0x0620">
-            <h3><span class="bar"></span>Online backups</h3>
-            <p>Take a point-in-time <span class="mono">snapshot</span> of a live server and restore it into a fresh data dir — <b>no downtime</b>, and an encrypted server's snapshot stays encrypted.</p>
+          <div>
+            <p class="cap">make bench · make wire-bench</p>
+<pre>vector recall  <span class="ar">→</span> 0.14 ms @ 10k · 0.22 ms @ 100k
+recall@10      <span class="ar">→</span> 1.00  (384-dim, HNSW)
+ping           <span class="ar">→</span> 158k ops/s · p50 0.05 ms
+read (get)     <span class="ar">→</span> p50 0.8 ms over the wire
+
+<span class="c">measured on a 2023 laptop i7, loopback</span></pre>
           </div>
         </div>
       </div>
@@ -412,7 +452,7 @@
     <section class="rec" id="wire">
       <div class="off mono">0x0640</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0004</b>&nbsp;·&nbsp;type=semantic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0006</b>&nbsp;·&nbsp;type=semantic</p>
         <h2 class="title">One JSON line in. One JSON line back.</h2>
         <p class="lede">The wire protocol is newline-delimited JSON over TCP. No SDK, no driver — any language that can open a socket can speak it.</p>
         <p class="cap">store a memory, then recall it</p>
@@ -433,7 +473,7 @@
     <section class="rec" id="claude">
       <div class="off mono">0x07A0</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0005</b>&nbsp;·&nbsp;type=semantic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0007</b>&nbsp;·&nbsp;type=semantic</p>
         <div class="twoup">
           <div>
             <h2 class="title">Long-term memory for Claude&nbsp;Code.</h2>
@@ -465,33 +505,11 @@
       </div>
     </section>
 
-    <!-- WHY FEWER TOKENS -->
-    <section class="rec" id="tokens">
-      <div class="off mono">0x0880</div>
-      <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0006</b>&nbsp;·&nbsp;type=semantic</p>
-        <div class="twoup">
-          <div>
-            <h2 class="title">Stop paying to re-teach the model.</h2>
-            <p class="lede">Every session normally re-pastes your stack, conventions, and past decisions into the prompt. AegisDB keeps that knowledge out of the window and feeds back only what's relevant, per prompt — so you pay for the work, not for re-establishing context.</p>
-          </div>
-          <div>
-            <ul>
-              <li><b>Recall, don't re-explain</b> — your stack, conventions, and past decisions are already known, so you stop re-pasting them each session.</li>
-              <li><b>A relevant slice, not a dump</b> — each prompt pulls only the top-ranked memories — ranked by similarity &times; importance — instead of replaying entire transcripts; the model never sees the rest.</li>
-              <li><b>Short sessions, full knowledge</b> — start fresh instead of dragging a giant transcript whose every turn re-bills the whole context.</li>
-              <li><b>Distilled &amp; shared</b> — capture stores salient outcomes, not raw logs, and a team reuses context established once.</li>
-            </ul>
-          </div>
-        </div>
-      </div>
-    </section>
-
     <!-- GET STARTED -->
     <section class="rec" id="start">
       <div class="off mono">0x0940</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0007</b>&nbsp;·&nbsp;type=episodic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0008</b>&nbsp;·&nbsp;type=episodic</p>
         <h2 class="title">Run it, talk to it.</h2>
         <p class="lede">Pull the image or build from source — either way you're holding a connection in seconds.</p>
         <div class="start-log">
@@ -533,7 +551,7 @@ docker exec aegisdb aegisdb client search --tags user</code>
     <section class="rec" id="team">
       <div class="off mono">0x0B20</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0008</b>&nbsp;·&nbsp;type=meta</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0009</b>&nbsp;·&nbsp;type=meta</p>
         <h2 class="title">Set up shared memory for a team.</h2>
         <p class="lede">One server, one tenant token per project, and Claude&nbsp;Code wired in with <span class="mono">uvx</span> — no clone anywhere. Uses the published image and the <a href="https://pypi.org/project/aegisdb-mcp/"><span class="mono">aegisdb-mcp</span></a> PyPI package.</p>
         <div class="start-log">
