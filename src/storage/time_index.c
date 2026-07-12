@@ -15,6 +15,10 @@ void time_index_free(TimeIndex *t) {
     free(t);
 }
 
+size_t time_index_bytes(const TimeIndex *t) {
+    return t ? sizeof(*t) + t->cap * sizeof(TimeEntry) : 0;
+}
+
 static int cmp_key(uint64_t ca, uint64_t ia, uint64_t cb, uint64_t ib) {
     if (ca < cb) return -1;
     if (ca > cb) return 1;

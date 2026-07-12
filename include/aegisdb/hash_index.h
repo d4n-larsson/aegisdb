@@ -37,6 +37,9 @@ const HashEntry *hash_index_get(const HashIndex *h, uint64_t id);
 
 size_t hash_index_count(const HashIndex *h);
 
+/* Approximate resident bytes of the table (the bucket array). */
+size_t hash_index_bytes(const HashIndex *h);
+
 /* Persist a checkpoint to `path` and load it back. The checkpoint records the
  * log size it reflects (`covered_log_size`) and the id allocator (`next_id`) so
  * recovery can trust [0, covered) and replay only the log tail. The log remains

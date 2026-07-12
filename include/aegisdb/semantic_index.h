@@ -42,6 +42,9 @@ int semantic_index_search(const SemanticIndex *s, const float *query,
 /* Number of stored vectors. */
 size_t semantic_index_count(const SemanticIndex *s);
 
+/* Approximate resident bytes (dense vectors + maps + HNSW shards). */
+size_t semantic_index_bytes(const SemanticIndex *s);
+
 /* --- HNSW graph construction --------------------------------------------- */
 
 /* Build the HNSW graph from the current dense vectors synchronously and drop

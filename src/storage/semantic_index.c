@@ -923,6 +923,20 @@ int semantic_index_load(SemanticIndex *s, const char *path,
     return 0;
 }
 
+/* Approximate resident bytes: the dense entry array + its per-entry vectors, the
+ * id->slot and record-count maps, and any HNSW shards. Vectors dominate; this is
+ * the figure to watch since indexes are held in RAM. Excludes allocator overhead. */
+size_t semantic_index_bytes(const SemanticIndex *s) {
+    if (!s) return 0;
+    size_t total = sizeof(*s) + s->cap * sizeof(SemEntry) +
+                   s->mcap * sizeof(MapSlot) + s->rccap * sizeof(RCount);
+    for (size_t i = 0; i < s->cap; i++)
+        if (s->e[i].used) total += s->dim * sizeof(float); /* per-entry vector */
+    for (size_t i = 0; i < s->nshards; i++)
+        total += hnsw_bytes(s->shards[i]);
+    return total;
+}
+
 void semantic_index_reconcile(SemanticIndex *s,
                               int (*keep)(uint64_t id, void *ctx), void *ctx) {
     /* The rc map holds exactly the live record ids (one entry per record,

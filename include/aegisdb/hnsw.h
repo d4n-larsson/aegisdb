@@ -59,6 +59,10 @@ int hnsw_is_quantized(const Hnsw *h);
  * the live count under churn. */
 size_t hnsw_total_nodes(const Hnsw *h);
 
+/* Approximate resident bytes of the graph (node/map arrays + per-node vectors
+ * and link lists); excludes allocator overhead. For stats/observability. */
+size_t hnsw_bytes(const Hnsw *h);
+
 /* Invoke `cb(id, vec, ctx)` for each live vector (vec is the stored copy, length
  * = the index dim). Stops early and returns cb's value if it returns nonzero;
  * otherwise returns 0. Used to repopulate a caller-side store after a load. */

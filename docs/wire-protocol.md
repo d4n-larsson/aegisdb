@@ -525,6 +525,7 @@ authentication when enabled (unlike `ping`). Available at every phase.
 | `log_bytes` | Current size of `memory.log` on disk |
 | `log_flush_pending` | `true` if writes have not yet been `fsync`'d — the current durability lag |
 | `indexes` | Per-index entry counts (`semantic` is the brute-force vector count; watch it for scale) |
+| `memory` | Approximate resident bytes per in-RAM index — `hash_bytes`, `time_bytes`, `tag_bytes`, `semantic_bytes`, and `index_bytes_total`. Indexes are held in memory and grow with the dataset (the semantic vectors usually dominate), so this is the figure to monitor/alert on. Excludes allocator overhead. |
 | `next_id` | The id the next persisted insert will receive |
 | `metrics` | Monotonic operational counters since startup (below) |
 

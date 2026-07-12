@@ -21,4 +21,7 @@ int tag_index_query(const TagIndex *t, const char *const *tags, size_t n,
 /* Number of distinct tags currently indexed. */
 size_t tag_index_count(const TagIndex *t);
 
+/* Approximate resident bytes (bucket table + tag nodes + posting arrays). */
+size_t tag_index_bytes(const TagIndex *t);
+
 #endif /* AEGISDB_TAG_INDEX_H */
