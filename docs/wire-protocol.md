@@ -107,6 +107,7 @@ dependency-free C binary); terminate it at the edge.
 | `QUOTA_EXCEEDED` | 507 | Write would push the tenant over its `--tenant-max-records`/`--tenant-max-bytes` cap |
 | `RATE_LIMITED` | 429 | Tenant exceeded its `--tenant-rate-qps` request rate |
 | `READ_ONLY` | 405 | Write attempted on a read-only replica (`--replicate-from`/`--read-only`); write to the primary |
+| `MEMORY_LIMIT` | 507 | Insert refused: in-RAM index size reached `--max-index-bytes`. Free memory (delete/compact) or raise the cap. Reads, deletes, updates, and working-memory inserts are unaffected. |
 | `INTERNAL` | 500 | Unexpected server error |
 
 ---
@@ -525,7 +526,7 @@ authentication when enabled (unlike `ping`). Available at every phase.
 | `log_bytes` | Current size of `memory.log` on disk |
 | `log_flush_pending` | `true` if writes have not yet been `fsync`'d — the current durability lag |
 | `indexes` | Per-index entry counts (`semantic` is the brute-force vector count; watch it for scale) |
-| `memory` | Approximate resident bytes per in-RAM index — `hash_bytes`, `time_bytes`, `tag_bytes`, `semantic_bytes`, and `index_bytes_total`. Indexes are held in memory and grow with the dataset (the semantic vectors usually dominate), so this is the figure to monitor/alert on. Excludes allocator overhead. |
+| `memory` | Approximate resident bytes per in-RAM index — `hash_bytes`, `time_bytes`, `tag_bytes`, `semantic_bytes`, `index_bytes_total`, and `index_bytes_limit` (the configured `--max-index-bytes` cap; 0 = unlimited). Indexes are held in memory and grow with the dataset (the semantic vectors usually dominate), so this is the figure to monitor/alert on; past the limit inserts return `MEMORY_LIMIT`. Excludes allocator overhead. |
 | `next_id` | The id the next persisted insert will receive |
 | `metrics` | Monotonic operational counters since startup (below) |
 

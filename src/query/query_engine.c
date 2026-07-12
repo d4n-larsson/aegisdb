@@ -219,6 +219,16 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
     }
     if (st != AEGIS_OK) return st;
 
+    /* Backpressure: refuse a persisted insert once index RAM reaches the cap, so
+     * a growing dataset returns MEMORY_LIMIT instead of getting OOM-killed. The
+     * sampled value (maintenance thread) is read lock-free; deletes/updates still
+     * proceed so memory can be freed. Working memory (above) is a bounded ring
+     * and is exempt. */
+    if (db->config.max_index_bytes &&
+        atomic_load_explicit(&db->index_bytes, memory_order_relaxed) >=
+            db->config.max_index_bytes)
+        return AEGIS_ERR_MEMORY_LIMIT;
+
     MemoryRecord *rec = record_clone(in);
     if (!rec) return AEGIS_ERR_INTERNAL;
     uint64_t now = db_now_ms();
@@ -1298,6 +1308,10 @@ static cJSON *handle_stats(AegisDB *db) {
         cJSON_AddNumberToObject(mem, "semantic_bytes", (double)sb);
         cJSON_AddNumberToObject(mem, "index_bytes_total",
                                 (double)(hb + tb + gb + sb));
+        /* The configured backpressure cap (0 = unlimited), so a scraper can
+         * alert on index_bytes_total approaching it. */
+        cJSON_AddNumberToObject(mem, "index_bytes_limit",
+                                (double)db->config.max_index_bytes);
     }
     pthread_rwlock_unlock(&db->index_lock);
 

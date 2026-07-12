@@ -12,6 +12,10 @@
 #include "aegisdb/query_engine.h"
 #include "aegisdb/record.h"
 
+/* How often the maintenance loop resamples index RAM when --max-index-bytes is
+ * set. Bounds how far a write burst can overshoot the cap before it is seen. */
+#define MEM_SAMPLE_SEC 3
+
 typedef struct {
     uint64_t id;
     uint64_t offset;
@@ -293,6 +297,14 @@ static void *maint_loop(void *arg) {
         if (!c->db->config.read_only && c->compact_sec &&
             (elapsed % c->compact_sec) == 0 && compaction_worthwhile(c->db))
             compaction_run_once(c->db);
+        /* Sample total index RAM for the --max-index-bytes backpressure cap.
+         * Only when a cap is set (the walk is O(index size), so it is skipped
+         * entirely by default), every MEM_SAMPLE_SEC so the write-path check
+         * reads a recent value lock-free. */
+        if (c->db->config.max_index_bytes &&
+            (elapsed % MEM_SAMPLE_SEC) == 0)
+            atomic_store_explicit(&c->db->index_bytes, db_index_bytes(c->db),
+                                  memory_order_relaxed);
     }
     return NULL;
 }

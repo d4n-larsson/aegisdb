@@ -109,6 +109,10 @@ int main(int argc, char **argv) {
     else
         LOG_WARN("index checkpoints disabled; recovery will full-scan the log");
 
+    if (cfg.max_index_bytes)
+        LOG_INFO("index-memory cap: %zu bytes (inserts return MEMORY_LIMIT past "
+                 "it; sampled periodically)", cfg.max_index_bytes);
+
     AegisDB db;
     if (db_open(&db, &cfg) != 0) {
         LOG_ERROR("failed to open database");
