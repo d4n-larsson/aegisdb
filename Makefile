@@ -103,11 +103,13 @@ coverage:
 # default config; pass args to the binary for other dims/sizes, e.g.
 #   ./build/bench/hnsw_bench 1024 50000 200
 # Add NATIVE=1 for vectorized (representative) latency numbers.
-$(BUILD)/bench/hnsw_bench: bench/hnsw_bench.c $(BUILD)/src/storage/hnsw.o \
-                          $(BUILD)/src/util/crc32.o
+# hnsw.o pulls in ckpt_crypt (checkpoint encryption), which pulls in the AEAD.
+HNSW_BENCH_OBJ := $(BUILD)/src/storage/hnsw.o $(BUILD)/src/util/crc32.o \
+                  $(BUILD)/src/storage/ckpt_crypt.o \
+                  $(BUILD)/src/util/chacha20poly1305.o
+$(BUILD)/bench/hnsw_bench: bench/hnsw_bench.c $(HNSW_BENCH_OBJ)
 	@mkdir -p $(dir $@)
-	$(CC) $(CSTD) $(CFLAGS) $(CPPFLAGS) -o $@ $< \
-	    $(BUILD)/src/storage/hnsw.o $(BUILD)/src/util/crc32.o $(LDLIBS)
+	$(CC) $(CSTD) $(CFLAGS) $(CPPFLAGS) -o $@ $< $(HNSW_BENCH_OBJ) $(LDLIBS)
 bench: $(BUILD)/bench/hnsw_bench
 	$(BUILD)/bench/hnsw_bench
 
