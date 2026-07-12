@@ -1,0 +1,35 @@
+# Operator-scheduled AegisDB memory summarization — systemd oneshot service,
+# driven by the companion aegisdb-summarize.timer. Runs one distillation pass
+# and exits (the timer handles the schedule).
+#
+# Install (system-wide):
+#   sudo cp aegisdb-summarize.{service,timer} /etc/systemd/system/
+#   sudo install -m 600 /dev/stdin /etc/aegisdb/summarize.env <<'ENV'
+#   AEGIS_HOST=127.0.0.1
+#   AEGIS_PORT=9470
+#   AEGIS_NAMESPACE=my-team-namespace          # MUST match your agents' namespace
+#   AEGIS_SUMMARY_MODE=anthropic               # or openai / claude-code
+#   ANTHROPIC_API_KEY=sk-ant-...               # key for the chosen backend
+#   # AEGIS_AUTH_TOKEN=...                      # if the server enforces auth
+#   ENV
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now aegisdb-summarize.timer
+# Verify:  systemctl list-timers aegisdb-summarize.timer
+#          journalctl -u aegisdb-summarize
+[Unit]
+Description=AegisDB memory summarization (one distillation pass)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Secrets + AEGIS_* config live here (chmod 600). Never put keys in this unit.
+EnvironmentFile=/etc/aegisdb/summarize.env
+# Zero-install via uv. Alternatively point at a venv's console script:
+#   ExecStart=/opt/aegisdb/.venv/bin/aegisdb-summarize
+ExecStart=/usr/bin/uvx --from aegisdb-mcp aegisdb-summarize
+# It only needs the network and its own env.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

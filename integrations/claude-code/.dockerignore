@@ -1,0 +1,12 @@
+# Keep the build context small. README.md is intentionally NOT excluded —
+# pyproject.toml references it as the package readme, so the build needs it.
+tests/
+docs/
+examples/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+.venv/
