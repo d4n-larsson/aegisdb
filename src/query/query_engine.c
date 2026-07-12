@@ -1731,15 +1731,6 @@ static cJSON *handle_traverse(AegisDB *db, const cJSON *req, const char *ns) {
 
 /* Constant-time string equality: no early exit on mismatch, and length
  * differences fold into the result so timing does not leak the secret. */
-static int ct_eq(const char *a, const char *b) {
-    size_t la = strlen(a), lb = strlen(b);
-    size_t n = la > lb ? la : lb;
-    unsigned char diff = (unsigned char)(la ^ lb);
-    for (size_t i = 0; i < n; i++)
-        diff |= (unsigned char)((i < la ? a[i] : 0) ^ (i < lb ? b[i] : 0));
-    return diff == 0;
-}
-
 /* Constant-time fixed-length byte compare (no early exit). */
 static int ct_eq_bytes(const uint8_t *a, const uint8_t *b, size_t n) {
     unsigned char diff = 0;
@@ -1891,21 +1882,23 @@ static aegis_status_t resolve_identity(AegisDB *db, const cJSON *req,
     const char *token = jr_str(req, "token", NULL);
     const AuthToken *match = NULL;
     if (token) {
+        /* Compare SHA-256 digests, never the raw token: a plaintext-string
+         * compare iterates for max(len) and so leaks the stored token's length
+         * via timing. Hashing both sides makes every comparison a fixed 32-byte
+         * constant-time check regardless of token length or storage form. */
         uint8_t th[SHA256_DIGEST_LEN];
-        int have_hash = 0;
+        sha256(token, strlen(token), th);
         for (size_t i = 0; i < db->config.auth_token_count; i++) {
             const AuthToken *t = &db->config.auth_tokens[i];
-            int eq;
+            uint8_t cand[SHA256_DIGEST_LEN];
+            const uint8_t *want;
             if (t->hashed) {
-                if (!have_hash) {
-                    sha256(token, strlen(token), th);
-                    have_hash = 1;
-                }
-                eq = ct_eq_bytes(th, t->hash, SHA256_DIGEST_LEN);
+                want = t->hash;
             } else {
-                eq = ct_eq(token, t->token);
+                sha256(t->token, strlen(t->token), cand);
+                want = cand;
             }
-            if (eq) match = t;
+            if (ct_eq_bytes(th, want, SHA256_DIGEST_LEN)) match = t;
         }
     }
     aegis_status_t st = AEGIS_ERR_UNAUTHORIZED;
