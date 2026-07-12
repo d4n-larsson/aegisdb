@@ -46,6 +46,20 @@ KEEP_SERVER_SNAPSHOT=${AEGIS_KEEP_SERVER_SNAPSHOT:-0}
 log() { printf '%s aegis-backup: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 
+# JSON-escape a string for a "..." value: escape backslash and double-quote, and
+# reject control characters (which can't appear in a valid token and would break
+# the single-line request). Kept dependency-free — no jq — matching the script's
+# bash+tar-only contract. Never logged.
+json_escape() {
+    local s=$1
+    case $s in
+        *[[:cntrl:]]*) die "AEGIS_AUTH_TOKEN contains control characters" ;;
+    esac
+    s=${s//\\/\\\\}   # backslash first
+    s=${s//\"/\\\"}   # then double-quote
+    printf '%s' "$s"
+}
+
 command -v tar >/dev/null 2>&1 || die "tar not found"
 
 TS=$(date -u +%Y%m%dT%H%M%SZ)
@@ -54,7 +68,7 @@ SNAP_DIR="$DATA_DIR/snapshots/$NAME"
 
 # --- 1. trigger a consistent online snapshot over the wire (bash /dev/tcp) ----
 tokfield=""
-[ -n "$TOKEN" ] && tokfield=",\"token\":\"$TOKEN\""
+[ -n "$TOKEN" ] && tokfield=",\"token\":\"$(json_escape "$TOKEN")\""
 req="{\"operation\":\"snapshot\",\"name\":\"$NAME\"$tokfield}"
 
 log "requesting snapshot '$NAME' from $HOST:$PORT"
@@ -86,7 +100,9 @@ fi
 # --- 3. ship it off-box via the supplied transport ----------------------------
 if [ -n "$UPLOAD_CMD" ]; then
     cmd=${UPLOAD_CMD//\{\}/$TARBALL}   # substitute {} -> tarball path
-    log "uploading: $cmd"
+    # Don't log $cmd — the upload command may embed a credential (an S3 key, an
+    # rclone token). Log only what is being shipped.
+    log "uploading $TARBALL off-box"
     if ! sh -c "$cmd"; then die "upload command failed"; fi
     log "upload ok"
 else
