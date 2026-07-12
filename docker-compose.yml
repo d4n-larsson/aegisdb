@@ -7,8 +7,11 @@
 # AEGIS_EXTRA_ARGS (e.g. auth, --io-threads, ANN tuning).
 services:
   aegisdb:
+    # No explicit `image:` tag: Compose builds a project-scoped image from the
+    # Dockerfile instead of reusing a hand-tagged/pulled `aegisdb:latest`, which
+    # could be stale (built before newer flags existed). After changing source,
+    # rebuild with `docker compose up -d --build`.
     build: .
-    image: aegisdb:latest
     container_name: aegisdb
     ports:
       # host_ip:host_port:container_port. Publishes on loopback only by default:
