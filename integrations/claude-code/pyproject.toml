@@ -27,6 +27,10 @@ Issues = "https://github.com/d4n-larsson/aegisdb/issues"
 # Embedding providers are opt-in; the integration runs in `none` mode without them.
 voyage = ["voyageai>=0.2"]
 local = ["sentence-transformers>=2.2"]
+# Summarization chat backends (AEGIS_SUMMARY_MODE); the default `none` and the
+# `claude-code` CLI backend need neither. Only for `anthropic` / `openai`.
+anthropic = ["anthropic>=0.40"]
+openai = ["openai>=1.0"]
 dev = ["pytest>=7"]
 
 [project.scripts]

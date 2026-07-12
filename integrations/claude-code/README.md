@@ -188,10 +188,20 @@ AEGIS_SUMMARY_MODE=claude-code uvx --from aegisdb-mcp aegisdb-summarize --dry-ru
 AEGIS_SUMMARY_MODE=claude-code uvx --from aegisdb-mcp aegisdb-summarize
 ```
 
-The `claude-code` backend distils via the `claude` CLI in headless mode, reusing
-your existing Claude Code auth — no API key. Summaries are conservative and
-reversible: sources are tombstoned (recoverable from the log until compaction),
-provenance is a graph edge, and `--dry-run` shows the plan first. See
+Pick a backend with `AEGIS_SUMMARY_MODE`:
+
+- **`claude-code`** — distils via the `claude` CLI in headless mode, reusing your
+  existing Claude Code auth. **No API key**, no extra install.
+- **`anthropic`** — direct Anthropic API. `pip install "aegisdb-mcp[anthropic]"`,
+  set `ANTHROPIC_API_KEY`.
+- **`openai`** — any OpenAI-compatible chat API. `pip install "aegisdb-mcp[openai]"`,
+  set `OPENAI_API_KEY` (and `AEGIS_SUMMARY_API_BASE` to point at a compatible
+  endpoint). Use for environments without the Claude Code CLI.
+
+A misconfigured backend (missing SDK or key) degrades to off rather than erroring.
+Summaries are conservative and reversible: sources are tombstoned (recoverable
+from the log until compaction), provenance is a graph edge, and `--dry-run` shows
+the plan first. See
 [`docs/summarization-design.md`](https://github.com/d4n-larsson/aegisdb/blob/main/docs/summarization-design.md).
 
 ## Requirements
@@ -250,8 +260,9 @@ explicit overrides.
 | `AEGIS_CAPTURE_ENABLED` | `true` | toggle automatic capture |
 | `AEGIS_CAPTURE_SCOPE` | `session` | `session` (SessionEnd) \| `turn` (Stop) |
 | `AEGIS_CAPTURE_MIN_SALIENCE` | `0.5` | below this, nothing is captured |
-| `AEGIS_SUMMARY_MODE` | `none` | `aegisdb-summarize` backend: `none` (off) \| `fake` (tests) \| `claude-code` |
-| `AEGIS_SUMMARY_MODEL` | — | optional model override for the `claude-code` backend |
+| `AEGIS_SUMMARY_MODE` | `none` | `aegisdb-summarize` backend: `none` (off) \| `fake` (tests) \| `claude-code` \| `anthropic` \| `openai` |
+| `AEGIS_SUMMARY_MODEL` | — | optional model override for the selected backend |
+| `AEGIS_SUMMARY_API_BASE` | — | `openai` backend: base URL for an OpenAI-compatible endpoint |
 | `AEGIS_SUMMARY_MIN_AGE_MS` | `604800000` | only distil memories older than this (7 days) |
 | `AEGIS_SUMMARY_MAX_IMPORTANCE` | `0.6` | leave higher-importance memories alone |
 | `AEGIS_SUMMARY_MIN_CLUSTER` | `3` | min related memories before a cluster is summarized |

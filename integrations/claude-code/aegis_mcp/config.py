@@ -50,8 +50,9 @@ class Config:
     # Background summarization (opt-in; see docs/summarization-design.md). Run by
     # `aegisdb-summarize` on an operator schedule — NOT a per-turn hook. Default
     # `none` = off, no dependency. `claude-code` distills via the `claude` CLI.
-    summary_mode: str = "none"  # "none" | "fake" | "claude-code"
-    summary_model: str = ""  # optional model override for the claude-code backend
+    summary_mode: str = "none"  # "none"|"fake"|"claude-code"|"anthropic"|"openai"
+    summary_model: str = ""  # optional model override for the selected backend
+    summary_api_base: str = ""  # openai backend: base URL for openai-compatible APIs
     summary_min_age_ms: int = 604800000  # only distill memories older than 7 days
     summary_max_importance: float = 0.6  # leave high-importance memories alone
     summary_min_cluster: int = 3  # min related memories to bother summarizing
@@ -84,6 +85,7 @@ _ENV = {
     "capture_min_salience": "AEGIS_CAPTURE_MIN_SALIENCE",
     "summary_mode": "AEGIS_SUMMARY_MODE",
     "summary_model": "AEGIS_SUMMARY_MODEL",
+    "summary_api_base": "AEGIS_SUMMARY_API_BASE",
     "summary_min_age_ms": "AEGIS_SUMMARY_MIN_AGE_MS",
     "summary_max_importance": "AEGIS_SUMMARY_MAX_IMPORTANCE",
     "summary_min_cluster": "AEGIS_SUMMARY_MIN_CLUSTER",
