@@ -1,0 +1,16 @@
+# AegisDB memory summarization via cron. Drop this in /etc/cron.d/aegisdb-summarize
+# (the 6th field is the user to run as, shown here as `aegis`). For a personal
+# `crontab -e`, remove that user field.
+#
+# Keep secrets out of the crontab: put AEGIS_* config + the backend key in an env
+# file (chmod 600), e.g. /etc/aegisdb/summarize.env:
+#   AEGIS_HOST=127.0.0.1
+#   AEGIS_PORT=9470
+#   AEGIS_NAMESPACE=my-team-namespace      # MUST match your agents' namespace
+#   AEGIS_SUMMARY_MODE=anthropic           # or openai / claude-code
+#   ANTHROPIC_API_KEY=sk-ant-...
+#
+# `set -a` exports everything the env file defines so the child process sees it.
+# Runs daily at 03:17; logs to a file (rotate it with logrotate).
+
+17 3 * * * aegis set -a; . /etc/aegisdb/summarize.env; uvx --from aegisdb-mcp aegisdb-summarize >> /var/log/aegis-summarize.log 2>&1

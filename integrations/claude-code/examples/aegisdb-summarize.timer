@@ -1,0 +1,13 @@
+# Daily trigger for aegisdb-summarize.service. See that file for install steps.
+[Unit]
+Description=Run AegisDB memory summarization daily
+
+[Timer]
+OnCalendar=daily
+# Catch up if the machine was off at the scheduled time.
+Persistent=true
+# Spread load / avoid a thundering herd across hosts.
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target

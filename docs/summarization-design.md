@@ -1,13 +1,14 @@
 # Design: Background Summarization (memory distillation)
 
-**Status:** PRs 1–2 implemented. The provider seam (`none`/`fake`/`claude-code`/
-`anthropic`/`openai`), the core distiller, `--dry-run`, and the operator-scheduled
-`aegisdb-summarize` entry point are in the Claude Code integration; the C server
-is unchanged. Decisions taken: the trigger is **operator-scheduled** (not a
+**Status:** Implemented (PRs 1–3). The provider seam (`none`/`fake`/`claude-code`/
+`anthropic`/`openai`), the core distiller, `--dry-run`, the operator-scheduled
+`aegisdb-summarize` entry point, and the scheduling wiring (compose `summarize`
+profile + systemd-timer/cron examples) are in the Claude Code integration; the C
+server is unchanged. Decisions taken: the trigger is **operator-scheduled** (not a
 per-turn hook), and the first real backend is **`claude-code`** (shells to the
 `claude` CLI — the agent's own model, no API key). The direct API backends
 (`anthropic`/`openai`, lazy-imported behind a key) cover environments without the
-Claude Code CLI. Remaining: scheduling/docs polish (compose sidecar, cron/timer).
+Claude Code CLI. The open questions in §10 remain as future work.
 **Scope:** Periodically fold clusters of related, aging memories into a single
 distilled fact, so recall stays small and cheap as memory accumulates — and the
 in-RAM indexes stop growing without bound. This is the LLM-powered complement to
@@ -168,8 +169,10 @@ The C server is unchanged; everything here is integration config.
    behind a key — for environments without the Claude Code CLI. Optional
    `anthropic` / `openai` install extras; `available()` degrades to off when the
    SDK or key is missing.
-3. **Scheduling polish** — a compose `summarize` sidecar / cron + systemd-timer
-   examples, and docs.
+3. ✅ **Scheduling polish** — an opt-in compose `summarize` profile (Python
+   sidecar image built from the integration, interval loop), plus host
+   `examples/`: a systemd oneshot `.service` + `.timer` and a `/etc/cron.d`
+   crontab. README documents all three and the namespace/backend gotchas.
 
 ## 10. Open questions
 - **Server help for candidate selection?** Selection is doable today with

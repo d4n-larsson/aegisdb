@@ -101,5 +101,47 @@ services:
     command:
       - 'while true; do aegis-backup.sh || echo "backup failed (will retry)"; sleep "${AEGIS_BACKUP_INTERVAL:-86400}"; done'
 
+  # Background summarization (opt-in): `docker compose --profile summarize up`.
+  # Loops `aegisdb-summarize` on an interval, distilling clusters of aging,
+  # low-value memories into semantic facts (see docs/summarization-design.md).
+  # OFF unless AEGIS_SUMMARY_MODE names a real backend and its key is provided;
+  # with the default `none` it connects, finds the provider disabled, and exits
+  # non-zero each pass. In a container use `anthropic`/`openai` (the `claude-code`
+  # backend needs the `claude` CLI, which isn't in this image). Preview without
+  # writing: `docker compose run --rm --entrypoint aegisdb-summarize summarize --dry-run`.
+  summarize:
+    profiles: ["summarize"]
+    build:
+      context: ./integrations/claude-code
+      args:
+        # Bake in the backend SDK extra (see integrations/claude-code/Dockerfile).
+        EXTRAS: "${AEGIS_SUMMARY_EXTRAS:-[anthropic]}"
+    container_name: aegisdb-summarize
+    depends_on:
+      aegisdb:
+        condition: service_healthy
+    environment:
+      AEGIS_HOST: aegisdb
+      AEGIS_PORT: "${AEGIS_PORT:-9470}"
+      AEGIS_AUTH_TOKEN: "${AEGIS_AUTH_TOKEN:-}"    # required if the server enforces auth
+      # MUST match the namespace your agents write under, or the pass summarizes
+      # an empty namespace. Blank falls back to the container's cwd-derived name,
+      # which is almost never what you want — set it.
+      AEGIS_NAMESPACE: "${AEGIS_SUMMARY_NAMESPACE:-}"
+      AEGIS_SUMMARY_MODE: "${AEGIS_SUMMARY_MODE:-none}"
+      AEGIS_SUMMARY_MODEL: "${AEGIS_SUMMARY_MODEL:-}"
+      AEGIS_SUMMARY_API_BASE: "${AEGIS_SUMMARY_API_BASE:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      # Match the server's embedding dim so summaries are stored consistently;
+      # `none` (default) writes summaries without vectors — tag/time recall still
+      # works, but set the same backend as your MCP clients for semantic recall.
+      AEGIS_EMBEDDING_MODE: "${AEGIS_EMBEDDING_MODE:-none}"
+      AEGIS_EMBEDDING_DIMENSIONS: "${AEGIS_EMBEDDING_DIM:-384}"
+    restart: unless-stopped
+    entrypoint: ["sh", "-c"]
+    command:
+      - 'while true; do aegisdb-summarize || echo "summarize failed (will retry)"; sleep "${AEGIS_SUMMARY_INTERVAL:-86400}"; done'
+
 volumes:
   aegis-data:

@@ -201,8 +201,40 @@ Pick a backend with `AEGIS_SUMMARY_MODE`:
 A misconfigured backend (missing SDK or key) degrades to off rather than erroring.
 Summaries are conservative and reversible: sources are tombstoned (recoverable
 from the log until compaction), provenance is a graph edge, and `--dry-run` shows
-the plan first. See
-[`docs/summarization-design.md`](https://github.com/d4n-larsson/aegisdb/blob/main/docs/summarization-design.md).
+the plan first.
+
+Set `AEGIS_NAMESPACE` to the namespace your agents write under — the pass runs
+against exactly one namespace, and the default (cwd-derived) name won't match
+your clients'.
+
+#### Scheduling it
+
+The job is a one-shot: it runs a single pass and exits, so any scheduler works.
+Three ready-made options:
+
+- **Compose sidecar** — opt-in profile that loops the job on an interval:
+
+  ```sh
+  # in .env: AEGIS_SUMMARY_MODE=anthropic, ANTHROPIC_API_KEY=…, AEGIS_SUMMARY_NAMESPACE=…
+  docker compose --profile summarize up -d --build
+  # one-shot preview (writes nothing):
+  docker compose run --rm --entrypoint aegisdb-summarize summarize --dry-run
+  ```
+
+  Backend keys and `AEGIS_SUMMARY_*` knobs are set in `.env`; the interval is
+  `AEGIS_SUMMARY_INTERVAL` (default daily). The `claude-code` backend won't work
+  here (no `claude` CLI in the image) — use `anthropic`/`openai`.
+
+- **systemd timer** — [`examples/aegisdb-summarize.service`](examples/aegisdb-summarize.service)
+  + [`examples/aegisdb-summarize.timer`](examples/aegisdb-summarize.timer). Install
+  both, drop the config in an `EnvironmentFile`, then
+  `systemctl enable --now aegisdb-summarize.timer`.
+
+- **cron** — [`examples/summarize.crontab`](examples/summarize.crontab): a daily
+  `/etc/cron.d` line that sources an env file and runs the job via `uvx`.
+
+See [`docs/summarization-design.md`](https://github.com/d4n-larsson/aegisdb/blob/main/docs/summarization-design.md)
+for the full design.
 
 ## Requirements
 
