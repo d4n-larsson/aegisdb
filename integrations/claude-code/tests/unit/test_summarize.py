@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from aegis_mcp.summary import (FakeSummaryProvider, NoneSummaryProvider,
+from aegis_mcp.summary import (AnthropicSummaryProvider, FakeSummaryProvider,
+                               NoneSummaryProvider, OpenAISummaryProvider,
                                make_summary_provider)
 from aegis_mcp.summarize import _clusters
 
@@ -41,6 +42,57 @@ class TestProviders(unittest.TestCase):
 
     def test_factory_selects_fake(self):
         self.assertIsInstance(make_summary_provider(_cfg()), FakeSummaryProvider)
+
+
+class TestApiBackends(unittest.TestCase):
+    """Response parsing is exercised with an injected fake client, so no SDK or
+    network is required. Key-gating is checked directly."""
+
+    def test_anthropic_parses_and_gates(self):
+        old = os.environ.pop("ANTHROPIC_API_KEY", None)
+        try:
+            self.assertFalse(AnthropicSummaryProvider().available())
+            self.assertIsInstance(make_summary_provider(_cfg(summary_mode="anthropic")),
+                                  NoneSummaryProvider)
+        finally:
+            if old is not None:
+                os.environ["ANTHROPIC_API_KEY"] = old
+        p = AnthropicSummaryProvider()
+        p._client = SimpleNamespace(messages=SimpleNamespace(
+            create=lambda **kw: SimpleNamespace(content=[
+                SimpleNamespace(type="text", text="  distilled fact.  ")])))
+        self.assertEqual(p.summarize(["a", "b"]), ("distilled fact.", 0.8))
+        self.assertIsNone(p.summarize([]))
+
+    def test_anthropic_empty_output_is_none(self):
+        p = AnthropicSummaryProvider()
+        p._client = SimpleNamespace(messages=SimpleNamespace(
+            create=lambda **kw: SimpleNamespace(content=[])))
+        self.assertIsNone(p.summarize(["a"]))
+
+    def test_anthropic_api_error_degrades(self):
+        def _boom(**kw):
+            raise RuntimeError("rate limited")
+        p = AnthropicSummaryProvider()
+        p._client = SimpleNamespace(messages=SimpleNamespace(create=_boom))
+        self.assertIsNone(p.summarize(["a"]))
+
+    def test_openai_parses_and_gates(self):
+        old = os.environ.pop("OPENAI_API_KEY", None)
+        try:
+            self.assertFalse(OpenAISummaryProvider().available())
+            self.assertIsInstance(make_summary_provider(_cfg(summary_mode="openai",
+                                                             summary_api_base="")),
+                                  NoneSummaryProvider)
+        finally:
+            if old is not None:
+                os.environ["OPENAI_API_KEY"] = old
+        p = OpenAISummaryProvider()
+        p._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+            create=lambda **kw: SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="distilled."))]))))
+        self.assertEqual(p.summarize(["a"]), ("distilled.", 0.8))
+        self.assertIsNone(p.summarize([]))
 
 
 class TestClustering(unittest.TestCase):

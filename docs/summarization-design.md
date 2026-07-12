@@ -1,12 +1,13 @@
 # Design: Background Summarization (memory distillation)
 
-**Status:** PR 1 implemented (this PR). The provider seam (`none`/`fake`/
-`claude-code`), the core distiller, `--dry-run`, and the operator-scheduled
+**Status:** PRs 1–2 implemented. The provider seam (`none`/`fake`/`claude-code`/
+`anthropic`/`openai`), the core distiller, `--dry-run`, and the operator-scheduled
 `aegisdb-summarize` entry point are in the Claude Code integration; the C server
 is unchanged. Decisions taken: the trigger is **operator-scheduled** (not a
 per-turn hook), and the first real backend is **`claude-code`** (shells to the
-`claude` CLI — the agent's own model, no API key). Remaining: a direct
-API backend (`anthropic`/`openai`) and scheduling/docs polish.
+`claude` CLI — the agent's own model, no API key). The direct API backends
+(`anthropic`/`openai`, lazy-imported behind a key) cover environments without the
+Claude Code CLI. Remaining: scheduling/docs polish (compose sidecar, cron/timer).
 **Scope:** Periodically fold clusters of related, aging memories into a single
 distilled fact, so recall stays small and cheap as memory accumulates — and the
 in-RAM indexes stop growing without bound. This is the LLM-powered complement to
@@ -146,8 +147,10 @@ A distilled summary is tagged `summary`; its sources are tagged (e.g.
 pass is convergent and re-runnable.
 
 ## 8. Configuration (integration)
-- `AEGIS_SUMMARY_MODE` — `none` (default) | `anthropic` | `openai` | (v2) `claude-code`.
-- `AEGIS_SUMMARY_MODEL`, and the backend's API key via its standard env var.
+- `AEGIS_SUMMARY_MODE` — `none` (default) | `fake` | `claude-code` | `anthropic` | `openai`.
+- `AEGIS_SUMMARY_MODEL` (optional model override), `AEGIS_SUMMARY_API_BASE`
+  (`openai` backend endpoint), and the backend's API key via its standard env var
+  (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`; `claude-code` needs none).
 - `AEGIS_SUMMARY_MIN_AGE_MS`, `AEGIS_SUMMARY_MAX_IMPORTANCE`, `AEGIS_SUMMARY_MIN_CLUSTER`,
   `AEGIS_SUMMARY_MAX_CLUSTERS_PER_RUN`, `AEGIS_SUMMARY_ARCHIVE_TTL_MS`,
   `AEGIS_SUMMARY_MIN_CONFIDENCE`.
@@ -161,8 +164,10 @@ The C server is unchanged; everything here is integration config.
    the deterministic fake summarizer against a real server; no external
    dependency. The `claude-code` backend shells to the `claude` CLI, so the first
    *real* summarizer needs no API key.
-2. **A direct chat backend** (`anthropic` / openai-compatible), lazy-imported,
-   behind a key — for environments without the Claude Code CLI.
+2. ✅ **A direct chat backend** (`anthropic` / openai-compatible), lazy-imported
+   behind a key — for environments without the Claude Code CLI. Optional
+   `anthropic` / `openai` install extras; `available()` degrades to off when the
+   SDK or key is missing.
 3. **Scheduling polish** — a compose `summarize` sidecar / cron + systemd-timer
    examples, and docs.
 
