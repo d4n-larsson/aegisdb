@@ -10,6 +10,12 @@ CFLAGS  ?= -O2 -g -Wall -Wextra -Wno-unused-parameter
 GIT_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
 VERSION ?= $(or $(GIT_VERSION),0.0.0-dev)
 CPPFLAGS:= -Iinclude -Ithird_party/cjson -D_GNU_SOURCE -DAEGIS_VERSION_STRING='"$(VERSION)"'
+# Auto-track header dependencies: -MMD emits a .d per compile listing the headers
+# it included, -MP adds phony targets so a deleted header doesn't break the build.
+# Included below, so editing a header in include/ rebuilds every object that uses
+# it — closing the stale-object footgun (previously `make clean` was required
+# after any header edit; the canonical CMake build already tracks this).
+CPPFLAGS += -MMD -MP
 # `?=` so a sanitizer/CI build can pass LDFLAGS via the environment (the server
 # link rule uses only LDFLAGS, unlike the test rule which also uses CFLAGS).
 LDFLAGS ?=
@@ -37,6 +43,12 @@ BIN := $(BUILD)/aegisdb
 UNITY_OBJ := $(BUILD)/third_party/unity/unity.o
 TEST_SRC  := $(wildcard tests/unit/*.c)
 TEST_BIN  := $(patsubst tests/unit/%.c,$(BUILD)/tests/%,$(TEST_SRC))
+
+# The .d files emitted by -MMD (one per object/binary); `-include`d at the very
+# bottom of this file so the auto-generated .o rules they carry can't shadow
+# `all` as the default goal.
+DEPS := $(CORE_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(CJSON_OBJ:.o=.d) \
+        $(UNITY_OBJ:.o=.d) $(TEST_BIN:=.d)
 
 PYTHON ?= python3
 
@@ -114,3 +126,8 @@ check: test integration
 
 clean:
 	rm -rf $(BUILD)
+
+# Header-dependency files, included last so their generated .o rules only add
+# prerequisites and never become the default goal. Leading '-' ignores them on a
+# clean tree; `clean` removes them with build/.
+-include $(DEPS)
