@@ -200,6 +200,10 @@ token: 9f3c…              # give to the client (AEGIS_TOKEN); not recoverable
 
 ### Authentication & multi-tenancy
 
+> Setting up a shared server for a team? Follow the step-by-step
+> [team server tutorial](docs/tutorial-team-server.md) instead of assembling the
+> flags below by hand.
+
 With no `--auth-token`/`--auth-token-file`, the server runs **without
 authentication** and every request is served with unrestricted access. When
 tokens are configured, each request must carry a matching `"token"` field
@@ -421,7 +425,8 @@ the step-by-step setup (start AegisDB → register the MCP server → enable the
 
 ## Documentation
 
+- **Team server tutorial** (guided golden path — auth, tenants, encryption, backups): [`docs/tutorial-team-server.md`](docs/tutorial-team-server.md)
 - Wire protocol: [`docs/wire-protocol.md`](docs/wire-protocol.md)
-- Quickstart: [`docs/quickstart.md`](docs/quickstart.md)
+- Quickstart (solo / local): [`docs/quickstart.md`](docs/quickstart.md)
 - Architecture: [`docs/architecture.md`](docs/architecture.md)
 - Read-replica design & promotion runbook: [`docs/read-replica-design.md`](docs/read-replica-design.md)
