@@ -95,11 +95,39 @@ python3 -m venv .venv
 
 ### 3. Choose an embedding mode
 
-- **Semantic recall (recommended)**: `export VOYAGE_API_KEY=...` (Voyage is auto-selected).
-- **Offline**: install the `[local]` extra and set `AEGIS_EMBEDDING_MODE=local`.
-  The default local model (`all-MiniLM-L6-v2`) produces **384-dim** vectors, so set
+**What's an embedding?** A model that turns a piece of text into a vector (a list
+of numbers) encoding its *meaning*, so texts about similar things sit close
+together. AegisDB uses this for **semantic recall**: it embeds your prompt and
+finds stored memories whose vectors are nearest — so "how do I ship a release?"
+can surface "deploys go through `make ship`" even with no shared keywords. The
+vector's length is its **dimension**, and it must be identical on the server
+(`--embedding-dim`) and every client (`AEGIS_EMBEDDING_DIMENSIONS`) — a mismatch
+disables embeddings rather than storing unusable vectors.
+
+Without embeddings, recall still works but falls back to **tags and time** only
+(no meaning-based matching). Pick a provider:
+
+| Mode | Model | Dim | Recall quality | Privacy | Cost | Offline | Per-client weight |
+|------|-------|-----|----------------|---------|------|---------|-------------------|
+| `none` (default) | — | — | tags/time only | 100% local | free | ✅ | none |
+| `local` | `all-MiniLM-L6-v2` | 384 | good | 100% local | free | ✅ | `sentence-transformers` + ~80 MB model |
+| `voyage` | `voyage-3-large` | 1024 | best | text sent to Voyage API | $ per call | ❌ | just an API key |
+
+- **`voyage` (best recall)** — [Voyage AI](https://www.voyageai.com/) is a hosted
+  embeddings service (the provider Anthropic recommends). `export VOYAGE_API_KEY=...`
+  and it's auto-selected; clients stay lightweight, but memory text is sent to
+  Voyage's API and billed per use. Use `--embedding-dim 1024`.
+- **`local` (offline, free)** — install the `[local]` extra and set
+  `AEGIS_EMBEDDING_MODE=local`. The default model `all-MiniLM-L6-v2` is a small
+  sentence-transformer; on first use `sentence-transformers` downloads it (~80 MB)
+  from the Hugging Face Hub and caches it under `~/.cache/`, then runs entirely on
+  your CPU — nothing leaves the machine. It produces **384-dim** vectors, so set
   `AEGIS_EMBEDDING_DIMENSIONS=384` and start the server with `--embedding-dim 384`.
-- **None**: skip this — semantic search disables and recall falls back to tags/time.
+- **`none`** — skip this; semantic search disables and recall falls back to
+  tags/time. Zero setup, nothing sent anywhere.
+
+(A fourth mode, `fake`, is a deterministic hash used only by the test suite — not
+for real use.)
 
 ### 4. Register the MCP server
 
