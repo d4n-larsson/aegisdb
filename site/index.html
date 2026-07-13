@@ -483,11 +483,12 @@ read (get)     <span class="ar">→</span> p50 0.8 ms over the wire
               <li><b>Automatic capture</b> at session end, filtered by salience.</li>
               <li><b>Per-project namespaces</b> — isolated by default, shared by choice.</li>
               <li><b>No clone</b> — <span class="mono">uvx</span> fetches the published package (<a href="https://pypi.org/project/aegisdb-mcp/"><span class="mono">aegisdb-mcp</span></a> on PyPI) on demand.</li>
+              <li><b>One-command setup</b> — <span class="mono">uvx --from aegisdb-mcp aegisdb-init</span> writes the config below <em>and</em> the hooks; or install the <span class="mono">/aegis-setup</span> skill and let Claude do it.</li>
               <li><b>Fails open</b> — if the backend is down, your session keeps working.</li>
             </ul>
           </div>
           <div>
-            <p class="cap">.mcp.json</p>
+            <p class="cap">.mcp.json <span class="mono" style="opacity:.6">— scaffolded by aegisdb-init</span></p>
 <pre>{
   <span class="key">"mcpServers"</span>: {
     <span class="key">"memory"</span>: {
@@ -593,7 +594,7 @@ docker exec aegisdb aegisdb client search --tags user</code>
     }
   }
 }</code>
-              <p class="ann">The token's namespace is authoritative — no <span class="mono">AEGIS_NAMESPACE</span> needed. <span class="mono">uvx</span> fetches the package on demand (install <a href="https://docs.astral.sh/uv/">uv</a> once).</p>
+              <p class="ann">The token's namespace is authoritative — no <span class="mono">AEGIS_NAMESPACE</span> needed. <span class="mono">uvx</span> fetches the package on demand (install <a href="https://docs.astral.sh/uv/">uv</a> once). Or skip the hand-editing: <span class="mono">uvx --from aegisdb-mcp aegisdb-init --host memory.internal --auth-token &lt;token&gt;</span> writes this and the hooks.</p>
             </div>
           </div>
           <div class="row2">
