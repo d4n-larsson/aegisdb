@@ -36,6 +36,12 @@ def build_tools(config=None) -> MemoryTools:
 
 
 def main() -> int:
+    # Ergonomic alias: `uvx aegisdb-mcp init …` runs the setup scaffolder. Claude
+    # Code launches the server with no args, so this never shadows normal use.
+    if len(sys.argv) > 1 and sys.argv[1] == "init":
+        from .init import main as init_main
+        return init_main(sys.argv[2:])
+
     try:
         from mcp.server.fastmcp import FastMCP
     except ImportError:

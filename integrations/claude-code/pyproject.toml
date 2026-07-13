@@ -35,6 +35,7 @@ dev = ["pytest>=7"]
 
 [project.scripts]
 aegisdb-mcp = "aegis_mcp.server:main"
+aegisdb-init = "aegis_mcp.init:main"
 aegisdb-recall-hook = "aegis_mcp.hooks:recall"
 aegisdb-capture-hook = "aegis_mcp.hooks:capture"
 aegisdb-summarize = "aegis_mcp.summarize:main"
