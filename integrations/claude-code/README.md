@@ -60,6 +60,37 @@ Recall does add a small, bounded amount per turn (the injected memories, plus a
 query embedding if enabled) — far less than re-pasting context blocks or carrying
 a long transcript, and tunable via the knobs above.
 
+## Fast path: one command
+
+If you already have (or can start) a server, scaffold the whole client side —
+`.mcp.json` plus the recall/capture hooks — with one command from your project
+root, instead of the manual steps below:
+
+```bash
+# preview what it writes (changes nothing)
+uvx --from aegisdb-mcp aegisdb-init --print
+
+# do it (interactive; prompts for host/port/embeddings/auth)
+uvx --from aegisdb-mcp aegisdb-init
+```
+
+It's idempotent and non-destructive (it won't clobber other MCP servers or hooks,
+and only replaces an existing `memory` entry with `--force`). Flags let you drive
+it non-interactively: `--host --port --namespace --auth-token --embedding-mode
+--embedding-dim --yes`. Restart Claude Code afterward.
+
+**Even easier — a guided skill.** Install the `/aegis-setup` skill once and let
+Claude walk you through it (including offering to start a local server):
+
+```bash
+# personal (all projects) — or drop it in a project's .claude/skills/ instead
+mkdir -p ~/.claude/skills
+cp -r integrations/claude-code/skills/aegis-setup ~/.claude/skills/
+```
+
+Then run `/aegis-setup` in Claude Code. The manual, step-by-step path follows for
+anyone who wants to see exactly what those write.
+
 ## Integrate with Claude Code (step by step)
 
 From a zero state to working memory in six steps. Run these from your project root.

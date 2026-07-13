@@ -419,9 +419,11 @@ AegisDB can act as the persistent long-term memory of [Claude Code](https://clau
 via the integration in [`integrations/claude-code/`](integrations/claude-code/):
 an MCP server exposing memory tools plus hooks for automatic recall and capture.
 It is published to PyPI as [`aegisdb-mcp`](https://pypi.org/project/aegisdb-mcp/),
-so `uvx aegisdb-mcp` runs it with no clone. See
+so `uvx aegisdb-mcp` runs it with no clone. **Fastest setup:** with a server
+running, `uvx --from aegisdb-mcp aegisdb-init` scaffolds `.mcp.json` and the hooks
+for you (or install the `/aegis-setup` skill and let Claude do it). See
 [`integrations/claude-code/README.md`](integrations/claude-code/README.md) for
-the step-by-step setup (start AegisDB → register the MCP server → enable the hooks).
+that and the manual step-by-step.
 
 ## Documentation
 
