@@ -52,7 +52,7 @@ DEPS := $(CORE_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(CJSON_OBJ:.o=.d) \
 
 PYTHON ?= python3
 
-.PHONY: all clean test integration check bench wire-bench
+.PHONY: all clean test integration check bench wire-bench fuzz fuzz-regress fuzz-corpus
 all: $(BIN)
 
 $(BIN): $(CORE_OBJ) $(CJSON_OBJ) $(MAIN_OBJ)
@@ -122,6 +122,69 @@ $(BUILD)/bench/wire_bench: bench/wire_bench.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CSTD) $(CFLAGS) $(CPPFLAGS) -o $@ $< $(LDLIBS)
 wire-bench: $(BUILD)/bench/wire_bench
+
+# ---- Fuzzing (tests/fuzz) --------------------------------------------------
+# Coverage-guided fuzzing of the two attacker-reachable parse surfaces: the
+# binary log record codec (record_decode) and the wire request path
+# (aegis_request_handle). Two build flavors share the target sources:
+#   `make fuzz`         libFuzzer + ASan/UBSan binaries for local/nightly runs
+#                       (needs clang; libFuzzer supplies main()).
+#   `make fuzz-regress` deterministic replay of the seed corpus + checked-in
+#                       crashers via standalone_main.c — no libFuzzer, so it
+#                       builds under the default $(CC) (gcc-OK) and is the fast
+#                       per-PR regression gate.
+#   `make fuzz-corpus`  (re)generate the seed corpus under tests/fuzz/corpus.
+CORPUS := tests/fuzz/corpus
+
+# libFuzzer flavor: instrument every core object (fuzzer-no-link) and link the
+# target with -fsanitize=fuzzer so libFuzzer drives it.
+FUZZ_CC     ?= clang
+FUZZ_SAN    ?= -fsanitize=fuzzer-no-link,address,undefined
+FUZZ_CFLAGS := -O1 -g -fno-omit-frame-pointer $(FUZZ_SAN) -Wall -Wextra -Wno-unused-parameter
+FUZZ_OBJDIR := $(BUILD)/fuzz-obj
+FUZZ_CORE_OBJ  := $(patsubst %.c,$(FUZZ_OBJDIR)/%.o,$(CORE_SRC))
+FUZZ_CJSON_OBJ := $(FUZZ_OBJDIR)/third_party/cjson/cJSON.o
+FUZZ_TARGETS   := $(BUILD)/fuzz/fuzz_record_decode $(BUILD)/fuzz/fuzz_wire
+
+$(FUZZ_OBJDIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(FUZZ_CC) $(CSTD) $(FUZZ_CFLAGS) $(CPPFLAGS) -c -o $@ $<
+
+$(BUILD)/fuzz/fuzz_%: tests/fuzz/fuzz_%.c $(FUZZ_CORE_OBJ) $(FUZZ_CJSON_OBJ)
+	@mkdir -p $(dir $@)
+	$(FUZZ_CC) $(CSTD) $(FUZZ_CFLAGS) -fsanitize=fuzzer $(CPPFLAGS) -o $@ $< \
+	  $(FUZZ_CORE_OBJ) $(FUZZ_CJSON_OBJ) $(LDLIBS)
+
+fuzz: $(FUZZ_TARGETS)
+
+# Standalone-replay flavor: target source + standalone_main.c, linked against
+# the ordinary core objects (so it inherits whatever CFLAGS the caller set —
+# e.g. the ASan job's sanitizers — and builds under gcc).
+$(BUILD)/fuzz/regress_%: tests/fuzz/fuzz_%.c tests/fuzz/standalone_main.c $(CORE_OBJ) $(CJSON_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(CFLAGS) $(CPPFLAGS) -o $@ tests/fuzz/fuzz_$*.c \
+	  tests/fuzz/standalone_main.c $(CORE_OBJ) $(CJSON_OBJ) $(LDLIBS)
+
+$(BUILD)/fuzz/gen_seeds: tests/fuzz/gen_seeds.c $(CORE_OBJ) $(CJSON_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(CFLAGS) $(CPPFLAGS) -o $@ $< $(CORE_OBJ) $(CJSON_OBJ) $(LDLIBS)
+
+fuzz-corpus: $(BUILD)/fuzz/gen_seeds
+	@mkdir -p $(CORPUS)/record $(CORPUS)/wire
+	$(BUILD)/fuzz/gen_seeds $(CORPUS)/record $(CORPUS)/wire
+
+# Replay every seed + crasher through the standalone drivers. A crash (or
+# sanitizer abort) fails the target; an empty arg list is a clean no-op. This is
+# what turns a libFuzzer find (minimized into corpus/crashers/) into a permanent
+# regression test, and what the per-PR CI gate runs.
+fuzz-regress: $(BUILD)/fuzz/regress_record_decode $(BUILD)/fuzz/regress_wire fuzz-corpus
+	@rec=$$(ls $(CORPUS)/record/* $(CORPUS)/crashers/record/* 2>/dev/null); \
+	 wir=$$(ls $(CORPUS)/wire/* $(CORPUS)/crashers/wire/* 2>/dev/null); \
+	 $(BUILD)/fuzz/regress_record_decode $$rec && \
+	 $(BUILD)/fuzz/regress_wire $$wir && \
+	 echo "fuzz-regress: corpus replayed cleanly"
+
+DEPS += $(FUZZ_CORE_OBJ:.o=.d) $(FUZZ_CJSON_OBJ:.o=.d)
 
 # Run the full suite: C unit tests + protocol contract tests.
 check: test integration
