@@ -17,6 +17,9 @@ on:
       - 'CMakeLists.txt'
       - '.github/workflows/ci.yml'
   workflow_dispatch:
+  # Nightly libFuzzer soak (the `fuzz` job below gates on this / manual dispatch).
+  schedule:
+    - cron: '0 3 * * *'
 
 permissions:
   contents: read
@@ -79,3 +82,55 @@ jobs:
             exit 1
           fi
           echo "TSan: no races detected"
+
+  fuzz-regress:
+    name: Fuzz corpus replay (ASan + UBSan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Cheap per-PR gate: replay the seed corpus + any checked-in crashers
+      # through the record-decode and wire fuzz targets under ASan/UBSan. No
+      # libFuzzer (no input generation), so it is deterministic and fast — its
+      # job is to guard against regressing a previously-found crash and to prove
+      # the targets themselves build and run clean.
+      - name: Build + replay fuzz corpus
+        env:
+          CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra -Wno-unused-parameter"
+          LDFLAGS: "-fsanitize=address,undefined"
+          ASAN_OPTIONS: "detect_leaks=1:abort_on_error=1"
+          UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
+        run: make fuzz-regress
+
+  fuzz:
+    name: libFuzzer soak (nightly)
+    runs-on: ubuntu-latest
+    # Off the per-PR critical path: only the nightly schedule or a manual run.
+    # A newly-discovered crash should never block an unrelated PR — it gets
+    # minimized into tests/fuzz/corpus/crashers/, where fuzz-regress then pins
+    # it on every subsequent PR.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    env:
+      CC: clang
+      # -max_total_time is per target; keep the whole job well under an hour.
+      FUZZ_SECONDS: '300'
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build libFuzzer targets + seed corpus
+        run: |
+          make fuzz FUZZ_CC=clang
+          make fuzz-corpus   # generate seeds (the corpus is not committed)
+      - name: Fuzz record_decode
+        run: |
+          ./build/fuzz/fuzz_record_decode -max_total_time=$FUZZ_SECONDS \
+            -artifact_prefix=crash-record- tests/fuzz/corpus/record
+      - name: Fuzz wire
+        run: |
+          ./build/fuzz/fuzz_wire -max_total_time=$FUZZ_SECONDS \
+            -artifact_prefix=crash-wire- tests/fuzz/corpus/wire
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: crash-*
+          if-no-files-found: ignore

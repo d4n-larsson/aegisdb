@@ -40,6 +40,11 @@ Thumbs.db
 tests/**/*.bin
 core
 
+# Fuzz seed corpus is generated (make fuzz-corpus) — not committed. Only the
+# hand-curated crashers under corpus/crashers/ are tracked (regression guards).
+tests/fuzz/corpus/record/
+tests/fuzz/corpus/wire/
+
 # Python (integrations/claude-code)
 __pycache__/
 *.pyc
