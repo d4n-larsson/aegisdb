@@ -13,6 +13,7 @@ on:
       - 'include/**'
       - 'tests/**'
       - 'third_party/**'
+      - 'integrations/prometheus-exporter/**'
       - 'Makefile'
       - 'CMakeLists.txt'
       - '.github/workflows/ci.yml'
@@ -134,3 +135,21 @@ jobs:
           name: fuzz-crashes
           path: crash-*
           if-no-files-found: ignore
+
+  exporter:
+    name: Prometheus exporter (unit + live)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      # Unit tests are pure/stdlib; the live test launches the server binary
+      # (built here) and scrapes /metrics end-to-end. Both are dependency-free.
+      - name: Build server (for the live scrape test)
+        run: make
+      - name: Run exporter tests
+        working-directory: integrations/prometheus-exporter
+        run: |
+          python -m unittest discover -s tests/unit -p 'test_*.py'
+          python -m unittest discover -s tests/integration -p 'test_*.py'

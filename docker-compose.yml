@@ -143,5 +143,28 @@ services:
     command:
       - 'while true; do aegisdb-summarize || echo "summarize failed (will retry)"; sleep "${AEGIS_SUMMARY_INTERVAL:-86400}"; done'
 
+  # Prometheus exporter (opt-in): `docker compose --profile metrics up`.
+  # Scrapes the server's `stats` op and serves it on /metrics for Prometheus.
+  # `stats` is admin-scoped, so set AEGIS_AUTH_TOKEN to an admin token when auth
+  # is enabled — otherwise every scrape is UNAUTHORIZED and reports aegisdb_up 0.
+  # Publishes on loopback by default (same posture as the server); set
+  # AEGIS_METRICS_BIND=0.0.0.0 to expose it (e.g. to an off-box Prometheus).
+  metrics:
+    profiles: ["metrics"]
+    build:
+      context: ./integrations/prometheus-exporter
+    container_name: aegisdb-metrics
+    depends_on:
+      aegisdb:
+        condition: service_healthy
+    ports:
+      - "${AEGIS_METRICS_BIND:-127.0.0.1}:${AEGIS_METRICS_HOST_PORT:-9471}:${AEGIS_METRICS_PORT:-9471}"
+    environment:
+      AEGIS_HOST: aegisdb
+      AEGIS_PORT: "${AEGIS_PORT:-9470}"
+      AEGIS_AUTH_TOKEN: "${AEGIS_AUTH_TOKEN:-}"    # admin token if auth is on
+      AEGIS_EXPORTER_PORT: "${AEGIS_METRICS_PORT:-9471}"
+    restart: unless-stopped
+
 volumes:
   aegis-data:
