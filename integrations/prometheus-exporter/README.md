@@ -12,18 +12,39 @@ no state between scrapes.
 AEGIS_HOST=127.0.0.1 AEGIS_PORT=9470 python3 aegis_exporter.py
 # -> serving /metrics on 0.0.0.0:9471
 
-# Or the container image (built by the compose `metrics` profile):
+# Exporter only — bring your own Prometheus:
 docker compose --profile metrics up
+
+# Or the whole stack — exporter + a bundled Prometheus, wired together:
+docker compose --profile monitoring up
 ```
 
-Then point Prometheus at it:
+## Bring your own Prometheus (`--profile metrics`)
+
+Point your Prometheus at the exporter. The target depends on where Prometheus
+runs relative to the exporter:
 
 ```yaml
 scrape_configs:
   - job_name: aegisdb
     static_configs:
-      - targets: ['aegis-exporter:9471']
+      # host Prometheus, exporter published on host loopback (the default):
+      - targets: ['127.0.0.1:9471']
+      # Prometheus in the same compose network: use the service name instead:
+      # - targets: ['metrics:9471']
 ```
+
+Prometheus in a container scraping a host-published exporter must use host
+networking (or `host.docker.internal`), because `127.0.0.1` inside the container
+is the container itself, not the host.
+
+## Bundled Prometheus (`--profile monitoring`)
+
+Brings up the exporter **and** a Prometheus already configured to scrape it over
+the compose network (`metrics:9471` — see `prometheus.yml`), so there's no
+host-networking or `127.0.0.1` juggling. The UI is published on
+`127.0.0.1:9090` by default (`AEGIS_PROM_BIND` / `AEGIS_PROM_HOST_PORT` to
+change). Check **Status → Targets** — the `aegisdb` job should read `UP`.
 
 ## Configuration (environment)
 
