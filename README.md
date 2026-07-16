@@ -1,11 +1,69 @@
 # AegisDB
 
-A standalone C database server optimized for **AI agent memory**: append-heavy
-writes, fast ID lookup, temporal/tag search, semantic similarity, and volatile
-working memory. AegisDB uses a log-structured storage engine with purpose-built
-indexes (hash for ID lookup, a sorted time index, inverted tags, and vector
-search — an exact cosine scan that upgrades to an HNSW graph at scale) behind a
-JSON-over-TCP wire protocol.
+> **Self-hosted memory for your AI agents.** One small C binary — multi-tenant,
+> encrypted, with backups, read replicas, and a one-command Prometheus + Grafana
+> stack. Your agents' memory stays on your box; nothing ships to a SaaS.
+
+[![CI](https://github.com/d4n-larsson/aegisdb/actions/workflows/ci.yml/badge.svg)](https://github.com/d4n-larsson/aegisdb/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Container: ghcr.io](https://img.shields.io/badge/ghcr.io-aegisdb-2496ED?logo=docker&logoColor=white)](https://github.com/d4n-larsson/aegisdb/pkgs/container/aegisdb)
+[![PyPI: aegisdb-mcp](https://img.shields.io/pypi/v/aegisdb-mcp?label=aegisdb-mcp&logo=pypi&logoColor=white)](https://pypi.org/project/aegisdb-mcp/)
+
+AI agents forget everything between sessions. **AegisDB** gives them durable,
+searchable long-term memory — episodic history, semantic facts with vector
+search, and volatile working memory — behind a dead-simple JSON-over-TCP
+protocol, with a first-class [Claude Code](#use-as-claude-code-memory)
+integration. It's a single dependency-free binary you run yourself: your data,
+your box, no third party in the loop.
+
+<!-- Screenshot slot: save the Grafana dashboard to docs/img/dashboard.png
+     (see docs/img/README.md) and uncomment the line below.
+![The bundled Grafana dashboard for AegisDB](docs/img/dashboard.png)
+-->
+
+## Quickstart
+
+Run the server — no clone, no toolchain (prebuilt multi-arch image on GHCR):
+
+```bash
+docker run -d --name aegisdb -p 9470:9470 -v aegis-data:/data \
+  ghcr.io/d4n-larsson/aegisdb:latest
+```
+
+Talk to it — the same binary is also the client:
+
+```bash
+docker exec aegisdb aegisdb client ping
+docker exec aegisdb aegisdb client put --type semantic --tags user "prefers dark mode"
+docker exec aegisdb aegisdb client search --tags user --top-k 5
+```
+
+Want the **whole observability stack** (server + Prometheus + a pre-built Grafana
+dashboard) in one command? Clone this repo and:
+
+```bash
+docker compose --profile monitoring up      # dashboard on http://127.0.0.1:3000
+```
+
+Giving **Claude Code** a persistent memory is a one-liner (with a server
+running): `uvx --from aegisdb-mcp aegisdb-init` — see
+[Use as Claude Code memory](#use-as-claude-code-memory).
+
+## Why AegisDB
+
+- **Self-hosted & private.** Your agents' memory never leaves your infrastructure
+  — no SaaS, no per-token billing, no data-sharing. Encrypt it at rest with one
+  flag.
+- **One binary, no dependencies.** Written in C; the only vendored code is cJSON
+  and the crypto. No JVM, no Python runtime, no external database to babysit.
+- **Built for teams.** Multi-tenant auth (per-namespace, scoped tokens), per-tenant
+  quotas + rate limits, online backups, read replicas, and turnkey
+  Prometheus/Grafana observability.
+- **Claude Code native.** Ships an MCP server + hooks so Claude remembers across
+  sessions — installable with a single command.
+- **Production-minded.** Corruption-resilient append-only log, crash recovery,
+  a documented security review, and CI that runs ASan/UBSan/TSan plus continuous
+  fuzzing.
 
 ## Features
 
@@ -23,7 +81,8 @@ JSON-over-TCP wire protocol.
 - **Multi-tenant auth** — optional bearer tokens (constant-time check; `ping` exempt), each bound to a namespace + scope (`ro`/`rw`/admin) so one server safely isolates many tenants
 - **Per-tenant limits** — optional storage quotas (records/bytes) and a request rate limit per namespace, so one team member's runaway agent can't fill the disk or monopolize the shared server
 - **Encryption at rest** — optional XChaCha20-Poly1305 (vendored, no crypto dependency) over the log + checkpoints; opt-in via `--encryption-key-file`, with an offline migrator and encrypted backups/replicas
-- **Operations** — `stats` for monitoring and online `snapshot`/restore backups
+- **Observability** — `stats` op plus a drop-in [Prometheus exporter + Grafana dashboard](integrations/prometheus-exporter/) (`docker compose --profile monitoring up`)
+- **Operations** — online `snapshot`/restore backups and read replicas
 - **Concurrency** — sharded `poll()` event-loop threads (`--io-threads`); selectable `fsync` durability (`sync` / `batch` / `interval`)
 
 ## Requirements
