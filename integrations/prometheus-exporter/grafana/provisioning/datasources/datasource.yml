@@ -1,0 +1,11 @@
+# Auto-provisioned Prometheus datasource for the bundled `monitoring` stack.
+# Fixed uid so the dashboard JSON can bind to it without a manual import step.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: aegisdb-prometheus
+    access: proxy
+    url: http://prometheus:9090   # the compose service name on the shared network
+    isDefault: true
+    editable: false
