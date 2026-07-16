@@ -16,10 +16,7 @@ protocol, with a first-class [Claude Code](#use-as-claude-code-memory)
 integration. It's a single dependency-free binary you run yourself: your data,
 your box, no third party in the loop.
 
-<!-- Screenshot slot: save the Grafana dashboard to docs/img/dashboard.png
-     (see docs/img/README.md) and uncomment the line below.
-![The bundled Grafana dashboard for AegisDB](docs/img/dashboard.png)
--->
+![The bundled Grafana dashboard for AegisDB — live records, request/op rates, index memory, and more](docs/img/dashboard.png)
 
 ## Quickstart
 
