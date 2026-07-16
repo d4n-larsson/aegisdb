@@ -143,14 +143,18 @@ services:
     command:
       - 'while true; do aegisdb-summarize || echo "summarize failed (will retry)"; sleep "${AEGIS_SUMMARY_INTERVAL:-86400}"; done'
 
-  # Prometheus exporter (opt-in): `docker compose --profile metrics up`.
-  # Scrapes the server's `stats` op and serves it on /metrics for Prometheus.
+  # Prometheus exporter (opt-in). Scrapes the server's `stats` op and serves it
+  # on /metrics for Prometheus.
+  #   docker compose --profile metrics up      # exporter only (bring your own Prometheus)
+  #   docker compose --profile monitoring up    # exporter + the bundled Prometheus below
+  # In both profiles so `monitoring` can start the exporter it depends on without
+  # also naming `metrics` (a dependency in a non-active profile is an error).
   # `stats` is admin-scoped, so set AEGIS_AUTH_TOKEN to an admin token when auth
   # is enabled — otherwise every scrape is UNAUTHORIZED and reports aegisdb_up 0.
   # Publishes on loopback by default (same posture as the server); set
   # AEGIS_METRICS_BIND=0.0.0.0 to expose it (e.g. to an off-box Prometheus).
   metrics:
-    profiles: ["metrics"]
+    profiles: ["metrics", "monitoring"]
     build:
       context: ./integrations/prometheus-exporter
     container_name: aegisdb-metrics
@@ -166,5 +170,25 @@ services:
       AEGIS_EXPORTER_PORT: "${AEGIS_METRICS_PORT:-9471}"
     restart: unless-stopped
 
+  # Bundled Prometheus (opt-in): `docker compose --profile monitoring up`.
+  # Runs on the compose network and scrapes the exporter by service name
+  # (metrics:9471, see integrations/prometheus-exporter/prometheus.yml), so no
+  # host networking or 127.0.0.1 juggling is needed. Already have a Prometheus?
+  # Skip this and use `--profile metrics` with your own scrape target instead.
+  prometheus:
+    profiles: ["monitoring"]
+    image: prom/prometheus:latest
+    container_name: aegisdb-prometheus
+    depends_on:
+      - metrics
+    ports:
+      # Prometheus UI. Loopback-only by default; override AEGIS_PROM_BIND to expose.
+      - "${AEGIS_PROM_BIND:-127.0.0.1}:${AEGIS_PROM_HOST_PORT:-9090}:9090"
+    volumes:
+      - ./integrations/prometheus-exporter/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+
 volumes:
   aegis-data:
+  prometheus-data:
