@@ -1,0 +1,201 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["aegisdb"],
+  "title": "AegisDB",
+  "uid": "aegisdb",
+  "version": 1,
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Status",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "aegisdb_up", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } }
+      ],
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [ { "type": "value", "options": { "0": { "text": "DOWN" }, "1": { "text": "UP" } } } ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Live records",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "aegisdb_records", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } }
+      ],
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "blue" } }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Tombstones",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "aegisdb_tombstones", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } }
+      ],
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "orange" } }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Uptime",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "aegisdb_uptime_seconds", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } }
+      ],
+      "options": { "colorMode": "none", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "fixed", "fixedColor": "text" } }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Request rate",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(aegisdb_requests_total[$__rate_interval]))", "legendFormat": "requests", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } },
+        { "refId": "B", "expr": "sum(rate(aegisdb_errors_total[$__rate_interval]))", "legendFormat": "errors", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Requests by operation",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "rate(aegisdb_requests_by_op_total[$__rate_interval])", "legendFormat": "{{op}}", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 20, "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Avg dispatch latency",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "rate(aegisdb_dispatch_seconds_total[$__rate_interval]) / rate(aegisdb_requests_total[$__rate_interval])", "legendFormat": "avg dispatch", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Index entries by type",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "aegisdb_index_entries", "legendFormat": "{{index}}", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Dataset growth",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "aegisdb_records", "legendFormat": "records", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } },
+        { "refId": "B", "expr": "aegisdb_tombstones", "legendFormat": "tombstones", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Index memory (resident bytes)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "aegisdb_index_bytes", "legendFormat": "{{index}}", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } },
+        { "refId": "B", "expr": "aegisdb_index_bytes_limit > 0", "legendFormat": "cap (--max-index-bytes)", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "custom": { "drawStyle": "line", "fillOpacity": 20, "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "cap (--max-index-bytes)" }, "properties": [ { "id": "custom.stacking", "value": { "mode": "none" } }, { "id": "custom.fillOpacity", "value": 0 }, { "id": "custom.lineWidth", "value": 2 }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Log size",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "aegisdb_log_bytes", "legendFormat": "log bytes", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Per-tenant records (when quotas configured)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "aegisdb_tenant_records", "legendFormat": "{{namespace}}", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Replication lag (when replicating)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "aegisdb_replication_lag_bytes", "legendFormat": "{{role}} lag", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }
+    },
+    {
+      "id": 14,
+      "type": "table",
+      "title": "Server info",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 36 },
+      "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "aegisdb_info", "format": "table", "instant": true, "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } }
+      ],
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "Value": true, "__name__": true, "instance": true, "job": true }, "renameByName": {} } }
+      ],
+      "options": { "showHeader": true },
+      "fieldConfig": { "defaults": {}, "overrides": [] }
+    }
+  ]
+}

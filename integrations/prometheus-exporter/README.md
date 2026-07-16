@@ -38,13 +38,32 @@ Prometheus in a container scraping a host-published exporter must use host
 networking (or `host.docker.internal`), because `127.0.0.1` inside the container
 is the container itself, not the host.
 
-## Bundled Prometheus (`--profile monitoring`)
+## Bundled monitoring stack (`--profile monitoring`)
 
-Brings up the exporter **and** a Prometheus already configured to scrape it over
-the compose network (`metrics:9471` — see `prometheus.yml`), so there's no
-host-networking or `127.0.0.1` juggling. The UI is published on
-`127.0.0.1:9090` by default (`AEGIS_PROM_BIND` / `AEGIS_PROM_HOST_PORT` to
-change). Check **Status → Targets** — the `aegisdb` job should read `UP`.
+Brings up the exporter **plus** a Prometheus and a Grafana, all pre-wired:
+
+```sh
+docker compose --profile monitoring up
+```
+
+- **Prometheus** scrapes the exporter over the compose network (`metrics:9471` —
+  see `prometheus.yml`), so there's no host-networking or `127.0.0.1` juggling.
+  UI on `127.0.0.1:9090` (`AEGIS_PROM_BIND` / `AEGIS_PROM_HOST_PORT`). Check
+  **Status → Targets**: the `aegisdb` job should read `UP`.
+- **Grafana** on `127.0.0.1:3000`, auto-provisioned with the Prometheus
+  datasource and the **AegisDB dashboard** (`grafana/dashboards/aegisdb.json`) —
+  it opens straight onto it. Anonymous viewing is on for zero-login demos; log in
+  (`AEGIS_GRAFANA_USER` / `AEGIS_GRAFANA_PASSWORD`, default `admin`/`admin`) to
+  edit.
+
+The dashboard covers status/records/uptime, request + error rates, requests by
+op, dispatch latency, index entries + resident bytes (with the `--max-index-bytes`
+cap line), dataset growth, log size, and — when configured — per-tenant usage and
+replication lag.
+
+To customize: edit `grafana/dashboards/aegisdb.json` (provisioned from disk,
+reloaded every 30s) or edit in the Grafana UI and export the JSON back to that
+file.
 
 ## Configuration (environment)
 
