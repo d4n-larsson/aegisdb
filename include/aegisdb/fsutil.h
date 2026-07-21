@@ -7,4 +7,9 @@
  * Returns 0 on success, -1 on failure (errno set). */
 int fs_mkdir_p(const char *path);
 
+/* fsync the directory `dir` so a preceding rename()/create of an entry within
+ * it is made durable (the rename is atomic but its durability is not ordered
+ * without this). Returns 0 on success, -1 on failure (errno set). */
+int fs_fsync_dir(const char *dir);
+
 #endif /* AEGISDB_FSUTIL_H */

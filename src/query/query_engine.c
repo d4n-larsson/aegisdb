@@ -327,23 +327,43 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
     if (patch->has_importance) cur.importance = patch->importance;
     if (patch->has_confidence) cur.confidence = patch->confidence;
 
+    /* Stage the new tags on the record, but defer the shared tag-index mutation
+     * until validate_common + append_and_hash both succeed. The old ordering
+     * rewrote the index up front, so a rejected update (e.g. an out-of-range
+     * importance) or a failed append left the index desynced from the log — the
+     * record's real tags — making live records unsearchable by their tags until
+     * a restart rebuilt the index from the log. */
+    char **old_tags = NULL;
+    size_t old_tag_count = 0;
     if (patch->has_tags) {
-        for (size_t i = 0; i < cur.tag_count; i++)
-            tag_index_remove(db->tags, cur.tags[i], cur.id);
+        old_tags = cur.tags; /* detach so record_set_tags won't free them */
+        old_tag_count = cur.tag_count;
+        cur.tags = NULL;
+        cur.tag_count = 0;
         if (record_set_tags(&cur, patch->tags, patch->tag_count) != 0) {
+            cur.tags = old_tags; /* reattach originals for record_free */
+            cur.tag_count = old_tag_count;
             record_free(&cur);
             pthread_rwlock_unlock(&db->index_lock);
             return AEGIS_ERR_INTERNAL;
         }
-        for (size_t i = 0; i < cur.tag_count; i++)
-            tag_index_add(db->tags, cur.tags[i], cur.id);
     }
 
     cur.updated = db_now_ms();
     st = validate_common(db, &cur);
     if (st == AEGIS_OK) st = append_and_hash(db, &cur);
+    if (st == AEGIS_OK && patch->has_tags) {
+        /* Committed: now it's safe to swing the tag index from old to new. */
+        for (size_t i = 0; i < old_tag_count; i++)
+            tag_index_remove(db->tags, old_tags[i], cur.id);
+        for (size_t i = 0; i < cur.tag_count; i++)
+            tag_index_add(db->tags, cur.tags[i], cur.id);
+    }
     pthread_rwlock_unlock(&db->index_lock);
     if (st == AEGIS_OK) log_fsync_if_batched(&db->log); /* fsync off the lock */
+
+    for (size_t i = 0; i < old_tag_count; i++) free(old_tags[i]);
+    free(old_tags);
 
     if (st != AEGIS_OK) {
         record_free(&cur);
@@ -1064,7 +1084,11 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
     Cand *acc = NULL;
     size_t acc_n = 0, acc_cap = 0;
 
-    for (int level = 0; level <= depth && front_n > 0; level++) {
+    /* On any allocation failure we stop growing and return what we have so far
+     * (like the malloc(offs) guard below), rather than dereferencing a failed
+     * realloc's NULL or leaking the old buffer it left untouched. */
+    int oom = 0;
+    for (int level = 0; level <= depth && front_n > 0 && !oom; level++) {
         /* Resolve this level's not-yet-seen ids to log offsets under the index
          * lock, then read+decode them off it (disk I/O under log_lock only). */
         uint64_t *offs = malloc(front_n * sizeof(uint64_t));
@@ -1079,8 +1103,11 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
                 if (seen[s] == id) { dup = 1; break; }
             if (dup) continue;
             if (seen_n == seen_cap) {
-                seen_cap = seen_cap ? seen_cap * 2 : 8;
-                seen = realloc(seen, seen_cap * sizeof(uint64_t));
+                size_t nc = seen_cap ? seen_cap * 2 : 8;
+                uint64_t *tmp = realloc(seen, nc * sizeof(uint64_t));
+                if (!tmp) { oom = 1; break; }
+                seen = tmp;
+                seen_cap = nc;
             }
             seen[seen_n++] = id;
             const HashEntry *e = hash_index_get(db->hash, id);
@@ -1090,10 +1117,11 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
         pthread_rwlock_rdlock(&db->log_lock);
         pthread_rwlock_unlock(&db->index_lock);
         free(frontier);
+        frontier = NULL;
 
         uint64_t *next = NULL;
         size_t next_n = 0, next_cap = 0;
-        for (size_t i = 0; i < off_n; i++) {
+        for (size_t i = 0; i < off_n && !oom; i++) {
             uint8_t *buf = NULL;
             size_t len = 0;
             if (log_read(&db->log, offs[i], &buf, &len) != 0) continue;
@@ -1110,8 +1138,11 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
             }
             /* collect */
             if (acc_n == acc_cap) {
-                acc_cap = acc_cap ? acc_cap * 2 : 8;
-                acc = realloc(acc, acc_cap * sizeof(Cand));
+                size_t nc = acc_cap ? acc_cap * 2 : 8;
+                Cand *tmp = realloc(acc, nc * sizeof(Cand));
+                if (!tmp) { record_free(&r); oom = 1; break; }
+                acc = tmp;
+                acc_cap = nc;
             }
             acc[acc_n].rec = r; /* keep; do not free */
             acc[acc_n].score = 0;
@@ -1119,8 +1150,11 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
             /* enqueue neighbours */
             for (size_t k = 0; k < r.rel_count; k++) {
                 if (next_n == next_cap) {
-                    next_cap = next_cap ? next_cap * 2 : 8;
-                    next = realloc(next, next_cap * sizeof(uint64_t));
+                    size_t nc = next_cap ? next_cap * 2 : 8;
+                    uint64_t *tmp = realloc(next, nc * sizeof(uint64_t));
+                    if (!tmp) { oom = 1; break; }
+                    next = tmp;
+                    next_cap = nc;
                 }
                 next[next_n++] = r.relationships[k].to_id;
             }

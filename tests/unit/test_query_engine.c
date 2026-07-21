@@ -134,6 +134,111 @@ static void test_semantic_update(void) {
     record_free(&upd);
 }
 
+/* Regression: a rejected update must NOT mutate the tag index. The old code
+ * rewrote db->tags before validate_common/append, so an update that changed
+ * tags but failed validation (here an out-of-range importance) stripped the
+ * record's real tags from the index — leaving a live record unsearchable by
+ * its tags until a restart rebuilt the index from the log. */
+static void test_update_failed_preserves_tag_index(void) {
+    const char *tagset[] = {"keeptag"};
+    MemoryRecord in = make_input(MEM_SEMANTIC, "tagged");
+    in.confidence = 1.0f;
+    record_set_tags(&in, tagset, 1);
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &in, NULL, 0, &out));
+    uint64_t id = out.id;
+    record_free(&out);
+    free(in.tags[0]);
+    free(in.tags);
+
+    SearchParams pt = {0};
+    const char *q[] = {"keeptag"};
+    pt.tags = q;
+    pt.tag_count = 1;
+    pt.match_all = 1;
+    pt.top_k = 100;
+    MemoryRecord *recs = NULL;
+    size_t n = 0;
+
+    /* precondition: searchable by its tag */
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &pt, &recs, &n));
+    TEST_ASSERT_EQUAL_size_t(1, n);
+    for (size_t i = 0; i < n; i++) record_free(&recs[i]);
+    free(recs);
+    recs = NULL;
+
+    /* An update that swaps the tags but is rejected by validation. */
+    const char *newtags[] = {"newtag"};
+    UpdatePatch patch = {0};
+    patch.has_tags = 1;
+    patch.tags = newtags;
+    patch.tag_count = 1;
+    patch.has_importance = 1;
+    patch.importance = 5.0f; /* out of [0,1] -> rejected by validate_common */
+    MemoryRecord upd;
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_INVALID_REQUEST,
+                          qe_update(&g_db, id, &patch, NULL, &upd));
+
+    /* The rejected update must have left the index untouched: still findable
+     * by the original tag, and NOT by the (never-committed) new tag. */
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &pt, &recs, &n));
+    TEST_ASSERT_EQUAL_size_t(1, n);
+    record_free(&recs[0]);
+    free(recs);
+    recs = NULL;
+
+    const char *q2[] = {"newtag"};
+    pt.tags = q2;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &pt, &recs, &n));
+    TEST_ASSERT_EQUAL_size_t(0, n);
+    free(recs);
+}
+
+/* A successful tag update must swing the index: gone from the old tag, found
+ * under the new one. Guards the deferred-index-swap path of the same fix. */
+static void test_update_tags_swings_index(void) {
+    const char *tagset[] = {"oldtag"};
+    MemoryRecord in = make_input(MEM_SEMANTIC, "retagged");
+    in.confidence = 1.0f;
+    record_set_tags(&in, tagset, 1);
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &in, NULL, 0, &out));
+    uint64_t id = out.id;
+    record_free(&out);
+    free(in.tags[0]);
+    free(in.tags);
+
+    const char *newtags[] = {"freshtag"};
+    UpdatePatch patch = {0};
+    patch.has_tags = 1;
+    patch.tags = newtags;
+    patch.tag_count = 1;
+    MemoryRecord upd;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_update(&g_db, id, &patch, NULL, &upd));
+    record_free(&upd);
+
+    SearchParams pt = {0};
+    pt.tag_count = 1;
+    pt.match_all = 1;
+    pt.top_k = 100;
+    MemoryRecord *recs = NULL;
+    size_t n = 0;
+
+    const char *oldq[] = {"oldtag"};
+    pt.tags = oldq;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &pt, &recs, &n));
+    TEST_ASSERT_EQUAL_size_t(0, n); /* old tag no longer indexed */
+    free(recs);
+    recs = NULL;
+
+    const char *newq[] = {"freshtag"};
+    pt.tags = newq;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &pt, &recs, &n));
+    TEST_ASSERT_EQUAL_size_t(1, n); /* found under the new tag */
+    record_free(&recs[0]);
+    free(recs);
+}
+
 static void test_search_by_time_and_tags(void) {
     const char *tagset[] = {"alpha"};
     for (int i = 0; i < 3; i++) {
@@ -665,6 +770,46 @@ static void test_relate_and_traverse(void) {
     TEST_ASSERT_TRUE(saw_to);
 }
 
+/* A hub linked to more nodes than the traversal's initial buffer capacity (8)
+ * forces the seen/acc/next arrays to grow. Guards the realloc growth paths in
+ * qe_traverse (which were hardened to check for allocation failure). */
+static void test_traverse_wide_graph(void) {
+    const int FANOUT = 25;
+    MemoryRecord ih = make_input(MEM_SEMANTIC, "hub");
+    MemoryRecord oh;
+    qe_insert(&g_db, &ih, NULL, 0, &oh);
+    uint64_t hub = oh.id;
+    record_free(&oh);
+
+    uint64_t targets[25];
+    for (int i = 0; i < FANOUT; i++) {
+        char b[16];
+        snprintf(b, sizeof(b), "t%d", i);
+        MemoryRecord it = make_input(MEM_SEMANTIC, b);
+        MemoryRecord ot;
+        qe_insert(&g_db, &it, NULL, 0, &ot);
+        targets[i] = ot.id;
+        record_free(&ot);
+        TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                              qe_relate(&g_db, hub, targets[i], "link", NULL));
+    }
+
+    MemoryRecord *recs = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_traverse(&g_db, hub, 1, NULL, &recs, &n));
+    /* hub + all FANOUT targets reached exactly once */
+    TEST_ASSERT_EQUAL_size_t((size_t)FANOUT + 1, n);
+    int seen_targets = 0;
+    for (size_t i = 0; i < n; i++) {
+        for (int t = 0; t < FANOUT; t++)
+            if (recs[i].id == targets[t]) { seen_targets++; break; }
+        record_free(&recs[i]);
+    }
+    free(recs);
+    TEST_ASSERT_EQUAL_INT(FANOUT, seen_targets);
+}
+
 /* qe_relate must reject self-edges and be idempotent per (to_id, kind) so a
  * record's relationship list cannot grow without bound (which, past 65535,
  * would truncate the u16 wire count and make the record undecodable). */
@@ -767,6 +912,8 @@ int main(void) {
     RUN_TEST(test_get_not_found);
     RUN_TEST(test_episodic_update_rejected);
     RUN_TEST(test_semantic_update);
+    RUN_TEST(test_update_failed_preserves_tag_index);
+    RUN_TEST(test_update_tags_swings_index);
     RUN_TEST(test_search_by_time_and_tags);
     RUN_TEST(test_semantic_search);
     RUN_TEST(test_search_top_k_selection);
@@ -780,6 +927,7 @@ int main(void) {
     RUN_TEST(test_consolidate);
     RUN_TEST(test_working_memory_promote);
     RUN_TEST(test_relate_and_traverse);
+    RUN_TEST(test_traverse_wide_graph);
     RUN_TEST(test_relate_dedup_and_selfedge);
     RUN_TEST(test_agent_namespace_filter);
     RUN_TEST(test_ns_scoped_writes);

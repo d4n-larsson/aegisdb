@@ -43,12 +43,20 @@ int db_save_metadata(AegisDB *db) {
     pthread_mutex_unlock(&db->id_lock);
     memcpy(buf + 9, &nid, 8);
     int ok = (fwrite(buf, 1, sizeof(buf), f) == sizeof(buf));
-    fclose(f);
+    /* Order the data before the rename: without fsync the atomic rename can be
+     * durable while the 32 bytes it points at are not, so a crash can leave a
+     * present-but-empty metadata.db. load_metadata_next_id then finds no AMETA
+     * magic and drops the next_id floor — reintroducing the id-reuse hazard
+     * (#18) this file exists to prevent. */
+    if (ok && (fflush(f) != 0 || fsync(fileno(f)) != 0)) ok = 0;
+    if (fclose(f) != 0) ok = 0;
     if (!ok) {
         unlink(tmp);
         return -1;
     }
-    return rename(tmp, db->path_meta);
+    if (rename(tmp, db->path_meta) != 0) return -1;
+    /* fsync the directory so the rename itself survives a crash. */
+    return fs_fsync_dir(db->config.data_dir);
 }
 
 uint64_t db_index_bytes(AegisDB *db) {
