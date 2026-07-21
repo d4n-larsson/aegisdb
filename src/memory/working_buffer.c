@@ -1,6 +1,7 @@
 /* Working memory ring buffer with TTL (T041, T042). */
 #include "aegisdb/working_buffer.h"
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -23,6 +24,11 @@ struct WorkingStore {
     Session *buckets[SBUCKETS];
     uint32_t capacity;
     uint64_t default_ttl_ms;
+    /* The working store is mutated concurrently by every io-thread (each handles
+     * MEM_WORKING inserts/promotes off the index_lock) and by the maintenance
+     * thread's sweep. A single store-wide mutex serialises all public entry
+     * points; the internal helpers (get_session/find_slot) run under it. */
+    pthread_mutex_t lock;
 };
 
 static size_t hash_str(const char *s) {
@@ -39,21 +45,29 @@ WorkingStore *working_store_create(uint32_t capacity, uint64_t default_ttl_ms) {
     if (!ws) return NULL;
     ws->capacity = capacity ? capacity : 256;
     ws->default_ttl_ms = default_ttl_ms ? default_ttl_ms : 3600000;
+    if (pthread_mutex_init(&ws->lock, NULL) != 0) {
+        free(ws);
+        return NULL;
+    }
     return ws;
 }
 
 size_t working_store_count(const WorkingStore *ws) {
     if (!ws) return 0;
+    WorkingStore *w = (WorkingStore *)ws; /* mutex use requires non-const */
+    pthread_mutex_lock(&w->lock);
     size_t n = 0;
     for (size_t i = 0; i < SBUCKETS; i++)
-        for (const Session *s = ws->buckets[i]; s; s = s->next)
+        for (const Session *s = w->buckets[i]; s; s = s->next)
             for (uint32_t k = 0; k < s->capacity; k++)
                 if (s->slots[k].rec) n++;
+    pthread_mutex_unlock(&w->lock);
     return n;
 }
 
 void working_store_free(WorkingStore *ws) {
     if (!ws) return;
+    pthread_mutex_destroy(&ws->lock);
     for (size_t i = 0; i < SBUCKETS; i++) {
         Session *s = ws->buckets[i];
         while (s) {
@@ -113,10 +127,17 @@ static Slot *find_slot(Session *s, uint64_t id, uint64_t now) {
 int working_store_add(WorkingStore *ws, const char *session_id,
                       const MemoryRecord *rec, uint64_t now, uint64_t ttl_ms,
                       uint64_t *out_id) {
+    pthread_mutex_lock(&ws->lock);
     Session *s = get_session(ws, session_id, 1);
-    if (!s) return -1;
+    if (!s) {
+        pthread_mutex_unlock(&ws->lock);
+        return -1;
+    }
     MemoryRecord *copy = record_clone(rec);
-    if (!copy) return -1;
+    if (!copy) {
+        pthread_mutex_unlock(&ws->lock);
+        return -1;
+    }
     copy->type = MEM_WORKING;
     copy->id = s->next_id++;
     copy->created = now;
@@ -132,36 +153,52 @@ int working_store_add(WorkingStore *ws, const char *session_id,
     slot->rec = copy;
     s->head = (s->head + 1) % s->capacity;
     if (out_id) *out_id = copy->id;
+    pthread_mutex_unlock(&ws->lock);
     return 0;
 }
 
 MemoryRecord *working_store_get(WorkingStore *ws, const char *session_id,
                                 uint64_t id, uint64_t now) {
+    pthread_mutex_lock(&ws->lock);
     Session *s = get_session(ws, session_id, 0);
-    if (!s) return NULL;
-    Slot *sl = find_slot(s, id, now);
-    if (!sl) return NULL;
-    return record_clone(sl->rec);
+    MemoryRecord *out = NULL;
+    if (s) {
+        Slot *sl = find_slot(s, id, now);
+        if (sl) out = record_clone(sl->rec);
+    }
+    pthread_mutex_unlock(&ws->lock);
+    return out;
 }
 
 int working_store_take(WorkingStore *ws, const char *session_id, uint64_t id,
                        uint64_t now, const char *ns, MemoryRecord *out) {
+    pthread_mutex_lock(&ws->lock);
     Session *s = get_session(ws, session_id, 0);
-    if (!s) return -1;
+    if (!s) {
+        pthread_mutex_unlock(&ws->lock);
+        return -1;
+    }
     Slot *sl = find_slot(s, id, now);
-    if (!sl) return -1;
+    if (!sl) {
+        pthread_mutex_unlock(&ws->lock);
+        return -1;
+    }
     /* Tenant ownership: a namespaced caller may only take its own record, so a
      * known/guessed session_id can't promote another tenant's working memory. */
-    if (ns && (!sl->rec->agent_id || strcmp(sl->rec->agent_id, ns) != 0))
+    if (ns && (!sl->rec->agent_id || strcmp(sl->rec->agent_id, ns) != 0)) {
+        pthread_mutex_unlock(&ws->lock);
         return -1;
+    }
     *out = *sl->rec; /* move ownership */
     free(sl->rec);
     sl->rec = NULL;
+    pthread_mutex_unlock(&ws->lock);
     return 0;
 }
 
 size_t working_store_sweep(WorkingStore *ws, uint64_t now) {
     size_t removed = 0;
+    pthread_mutex_lock(&ws->lock);
     for (size_t i = 0; i < SBUCKETS; i++) {
         for (Session *s = ws->buckets[i]; s; s = s->next) {
             for (uint32_t k = 0; k < s->capacity; k++) {
@@ -176,5 +213,6 @@ size_t working_store_sweep(WorkingStore *ws, uint64_t now) {
             }
         }
     }
+    pthread_mutex_unlock(&ws->lock);
     return removed;
 }

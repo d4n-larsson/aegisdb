@@ -373,6 +373,52 @@ static void test_hnsw_quantized(void) {
     free(centers);
 }
 
+/* Regression (#1): a *quantized* index must survive tombstone compaction.
+ * Quantized nodes keep only qvec (nd->vec is NULL), so maybe_rebuild used to
+ * pass NULL into hnsw_add -> store_vector and segfault. The rebuild must
+ * dequantize qvec back to float. The float-only test above never exercised this.
+ * Uses replace-churn to push tombstones past half the array and trigger it. */
+static void test_hnsw_quantized_tombstone_rebuild(void) {
+    const size_t N = 2000;
+    g_rng = 0xB0DEULL;
+    float *vecs = malloc(N * DIM * sizeof(float));
+    for (size_t i = 0; i < N; i++) rand_vec(&vecs[i * DIM]);
+
+    HnswParams p = {.quantize = 1};
+    Hnsw *h = hnsw_create(DIM, &p);
+    TEST_ASSERT_TRUE(hnsw_is_quantized(h));
+    for (size_t i = 0; i < N; i++)
+        TEST_ASSERT_EQUAL_INT(0, hnsw_add(h, i, &vecs[i * DIM], DIM));
+    TEST_ASSERT_EQUAL_size_t(N, hnsw_total_nodes(h)); /* no tombstones yet */
+
+    /* Replace every id once: each replace tombstones the old node, so total
+     * would reach 2N without the in-place compaction (which crashed pre-fix). */
+    for (size_t i = 0; i < N; i++) {
+        rand_vec(&vecs[i * DIM]);
+        TEST_ASSERT_EQUAL_INT(0, hnsw_add(h, i, &vecs[i * DIM], DIM));
+    }
+    TEST_ASSERT_EQUAL_size_t(N, hnsw_count(h));                   /* still N live */
+    TEST_ASSERT_TRUE(hnsw_total_nodes(h) < 2 * N);               /* rebuild ran */
+    TEST_ASSERT_EQUAL_size_t(hnsw_count(h), hnsw_total_nodes(h)); /* fully compacted */
+
+    /* Search still finds current vectors after the quantized rebuild. */
+    size_t hits = 0;
+    for (size_t i = 0; i < N; i += 50) {
+        uint64_t *ids = NULL;
+        float *sc = NULL;
+        size_t n = 0;
+        TEST_ASSERT_EQUAL_INT(0,
+            hnsw_search(h, &vecs[i * DIM], DIM, 1, 64, &ids, &sc, &n));
+        if (n == 1 && ids[0] == i) hits++;
+        free(ids);
+        free(sc);
+    }
+    TEST_ASSERT_TRUE(hits >= 36); /* 40 probes; quantization adds a little noise */
+
+    hnsw_free(h);
+    free(vecs);
+}
+
 static void test_hnsw_empty(void) {
     Hnsw *h = hnsw_create(DIM, NULL);
     float q[DIM] = {1.0f};
@@ -394,5 +440,6 @@ int main(void) {
     RUN_TEST(test_hnsw_save_load);
     RUN_TEST(test_hnsw_quantized);
     RUN_TEST(test_hnsw_tombstone_rebuild);
+    RUN_TEST(test_hnsw_quantized_tombstone_rebuild);
     return UNITY_END();
 }

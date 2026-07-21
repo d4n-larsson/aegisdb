@@ -140,7 +140,7 @@ int compaction_run_once(AegisDB *db) {
             failed = 1;
         record_free(&r);
         free(buf);
-        tail += LOG_FRAME_HEADER + (uint64_t)len;
+        tail += log_frame_overhead(&db->log) + (uint64_t)len;
     }
     if (failed) {
         free(locs);
