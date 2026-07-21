@@ -7,6 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "aegisdb/aead.h"
 #include "aegisdb/compaction.h"
 #include "aegisdb/db.h"
 #include "aegisdb/query_engine.h"
@@ -141,6 +142,44 @@ static void test_compaction_concurrent_with_writes(void) {
     }
 }
 
+/* Regression (#2): on an ENCRYPTED log the phase-3 tail-drain must step by the
+ * real per-frame overhead (V3_FRAME_OVERHEAD=52), not the hardcoded plaintext
+ * header (16). With the wrong stride the drain misaligns on the first tail
+ * frame, log_read fails, and compaction_run_once returns -1 (so the log never
+ * compacts). The tail is only non-empty when writes race the pass, so this
+ * mirrors the concurrent test above but with encryption enabled. */
+static void test_compaction_encrypted_concurrent(void) {
+    /* Reopen g_db encrypted in a fresh dir (setUp created it unencrypted). */
+    db_close(&g_db);
+    char cmd[320];
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", g_dir);
+    (void)!system(cmd);
+
+    Config cfg;
+    config_defaults(&cfg);
+    strncpy(cfg.data_dir, g_dir, sizeof(cfg.data_dir) - 1);
+    cfg.encryption_enabled = 1;
+    for (int i = 0; i < AEAD_KEY_LEN; i++) cfg.encryption_key[i] = (uint8_t)(i + 1);
+    TEST_ASSERT_EQUAL_INT(0, db_open(&g_db, &cfg));
+    TEST_ASSERT_TRUE(g_db.log.encrypted);
+
+    pthread_t th;
+    TEST_ASSERT_EQUAL_INT(0, pthread_create(&th, NULL, writer, &g_db));
+    /* Every pass must succeed; a mis-strided encrypted tail-drain returns -1. */
+    for (int i = 0; i < 8; i++) {
+        TEST_ASSERT_EQUAL_INT(0, compaction_run_once(&g_db));
+        usleep(200);
+    }
+    pthread_join(th, NULL);
+    TEST_ASSERT_EQUAL_INT(0, compaction_run_once(&g_db));
+
+    for (int i = 0; i < NWRITES; i++) {
+        char b[24];
+        snprintf(b, sizeof(b), "concurrent-%d", i);
+        assert_data(&g_db, g_ids[i], b);
+    }
+}
+
 /* The dead-fraction gate (#63): compaction is worthwhile only once >=25% of the
  * hash entries are tombstones, so a lightly-churned log is not rewritten. */
 static void test_compaction_gate_threshold(void) {
@@ -190,6 +229,7 @@ int main(void) {
     RUN_TEST(test_compaction_preserves_live_drops_deleted);
     RUN_TEST(test_compacted_log_recovers);
     RUN_TEST(test_compaction_concurrent_with_writes);
+    RUN_TEST(test_compaction_encrypted_concurrent);
     RUN_TEST(test_compaction_gate_threshold);
     RUN_TEST(test_compaction_scheduled_trigger);
     return UNITY_END();

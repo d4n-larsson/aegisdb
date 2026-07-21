@@ -529,13 +529,35 @@ static int maybe_rebuild(Hnsw *h) {
     Hnsw *t = hnsw_alloc(h->dim, h->M, h->ef_construction, h->ef_search, h->rng,
                          h->quantized);
     if (!t) return -1;
-    for (size_t i = 0; i < h->n; i++) {
-        if (h->nodes[i].deleted) continue;
-        if (hnsw_add(t, h->nodes[i].id, h->nodes[i].vec, h->dim) != 0) {
+    /* A quantized node keeps only qvec (nd->vec is NULL), so we must dequantize
+     * into a scratch float vector before re-inserting; hnsw_add re-quantizes it
+     * on the target. Float nodes pass their stored vec through directly. */
+    float *tmp = NULL;
+    if (h->quantized) {
+        tmp = malloc((h->dim ? h->dim : 1) * sizeof(float));
+        if (!tmp) {
             hnsw_free(t);
             return -1;
         }
     }
+    for (size_t i = 0; i < h->n; i++) {
+        if (h->nodes[i].deleted) continue;
+        const float *vec;
+        if (h->quantized) {
+            const Node *nd = &h->nodes[i];
+            for (size_t d = 0; d < h->dim; d++)
+                tmp[d] = (float)nd->qvec[d] * nd->scale;
+            vec = tmp;
+        } else {
+            vec = h->nodes[i].vec;
+        }
+        if (hnsw_add(t, h->nodes[i].id, vec, h->dim) != 0) {
+            free(tmp);
+            hnsw_free(t);
+            return -1;
+        }
+    }
+    free(tmp);
     hnsw_free_contents(h);
     *h = *t;  /* adopt the compacted graph's storage */
     free(t);  /* free only the temporary shell */
