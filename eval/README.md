@@ -29,6 +29,21 @@ Exits non-zero if the corpus didn't shrink or recall@maxk regressed. Typical run
 on the starter dataset: **66 → 22 records** with recall@10 held at 93% (and
 recall@3/@5 improved, since duplicates no longer crowd the top-k).
 
+### Forgetting eval (ROADMAP 2.3)
+
+Measures decay/forgetting: seed the curated facts, flood the corpus with
+`--noise` low-value episodic records, then check that `forget` ages out the noise
+(corpus plateaus) **without losing recall** of the facts.
+
+```sh
+make eval EVAL_ARGS='--decay'                           # before/after report
+python3 eval/recall_eval.py ./build/aegisdb --decay --noise 200 --min-retention 0.05
+```
+
+Exits non-zero if the corpus didn't shrink or recall@maxk regressed. Typical run:
+**222 → 22 records** (200 low-value episodic forgotten) with recall@10 held at
+93% — a bounded corpus at equal answer quality.
+
 The default **hashing embedder** is deterministic and dependency-free, so the
 harness runs in CI and offline with no model or API. It gives real-but-modest
 semantic signal (token overlap → cosine similarity) — enough to make recall

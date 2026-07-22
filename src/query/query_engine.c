@@ -1014,6 +1014,70 @@ aegis_status_t qe_consolidate(AegisDB *db, const char *ns, float min_similarity,
     return AEGIS_OK;
 }
 
+/* Decay-based forgetting (ROADMAP 2.3). A maintenance pass that tombstones aging,
+ * low-value records so a long-running corpus (and its in-RAM indexes) plateaus
+ * instead of growing without bound. Retention = importance * 0.5^(age/half_life),
+ * age measured from `updated`; a record is forgotten when retention <
+ * min_retention. Scoped to one type (default episodic — the high-volume,
+ * low-individual-value events; curated semantic facts are protected unless the
+ * caller opts them in) and to `ns`. dry_run counts without deleting. */
+aegis_status_t qe_forget(AegisDB *db, const char *ns, MemoryType type,
+                         uint64_t half_life_ms, float min_retention, int dry_run,
+                         size_t max_forget, size_t *out_scanned,
+                         size_t *out_forgotten) {
+    aegis_status_t st = require_phase(db, 1);
+    if (st != AEGIS_OK) return st;
+    *out_scanned = 0;
+    *out_forgotten = 0;
+    if (half_life_ms < MIN_HALF_LIFE_MS) half_life_ms = MIN_HALF_LIFE_MS;
+
+    /* snapshot the live ids of the target type (hash scan; no record reads) */
+    pthread_rwlock_rdlock(&db->index_lock);
+    const HashIndex *h = db->hash;
+    uint64_t *ids = NULL;
+    size_t n = 0, cap = 0;
+    for (size_t i = 0; i < h->cap; i++) {
+        const HashEntry *e = &h->buckets[i];
+        if (!e->used || e->deleted || e->type != type) continue;
+        if (n == cap) {
+            size_t nc = cap ? cap * 2 : 64;
+            uint64_t *g = realloc(ids, nc * sizeof(uint64_t));
+            if (!g) {
+                free(ids);
+                pthread_rwlock_unlock(&db->index_lock);
+                return AEGIS_ERR_INTERNAL;
+            }
+            ids = g;
+            cap = nc;
+        }
+        ids[n++] = e->id;
+    }
+    pthread_rwlock_unlock(&db->index_lock);
+
+    uint64_t now = db_now_ms();
+    for (size_t i = 0; i < n; i++) {
+        if (max_forget && *out_forgotten >= max_forget) break; /* safety cap */
+        MemoryRecord r;
+        /* qe_get enforces the namespace (NOT_FOUND for another tenant) and skips
+         * anything a prior iteration already tombstoned. */
+        if (qe_get(db, ids[i], ns, &r) != AEGIS_OK) continue;
+        (*out_scanned)++;
+        double age = now > r.updated ? (double)(now - r.updated) : 0.0;
+        /* 0.5^(age/half_life) == exp(-ln2 * age/half_life) */
+        double recency = exp(-0.6931471805599453 * age / (double)half_life_ms);
+        double retention = (double)r.importance * recency;
+        record_free(&r);
+        if (retention >= (double)min_retention) continue; /* still worth keeping */
+        if (dry_run) {
+            (*out_forgotten)++; /* would forget */
+        } else if (qe_delete(db, ids[i], ns) == AEGIS_OK) {
+            (*out_forgotten)++;
+        }
+    }
+    free(ids);
+    return AEGIS_OK;
+}
+
 aegis_status_t qe_promote(AegisDB *db, const char *session_id,
                           uint64_t working_id, MemoryType to_type,
                           const char *ns, MemoryRecord *out) {
@@ -1752,6 +1816,36 @@ static cJSON *handle_consolidate(AegisDB *db, const cJSON *req, const char *ns) 
     return o;
 }
 
+#define FORGET_DEFAULT_HALF_LIFE_MS 604800000ull /* 7 days */
+#define FORGET_DEFAULT_MIN_RETENTION 0.05f
+
+static cJSON *handle_forget(AegisDB *db, const cJSON *req, const char *ns) {
+    uint64_t v;
+    double d;
+    uint64_t half_life = (jr_u64(req, "half_life_ms", &v) == 0 && v > 0)
+                             ? v : FORGET_DEFAULT_HALF_LIFE_MS;
+    float min_ret = (jr_f64(req, "min_retention", &d) == 0)
+                        ? (float)d : FORGET_DEFAULT_MIN_RETENTION;
+    /* Default to episodic only: the high-volume, low-individual-value events.
+     * Curated semantic facts are protected unless the caller names the type. */
+    MemoryType type = MEM_EPISODIC;
+    const char *ts = jr_str(req, "type", NULL);
+    if (ts && memory_type_from_string(ts, &type) != 0)
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    int dry_run = jr_bool(req, "dry_run", 0);
+    size_t max_forget = (jr_u64(req, "max_forget", &v) == 0) ? (size_t)v : 0;
+
+    size_t scanned = 0, forgotten = 0;
+    aegis_status_t st = qe_forget(db, ns, type, half_life, min_ret, dry_run,
+                                  max_forget, &scanned, &forgotten);
+    if (st != AEGIS_OK) return json_error_status(st);
+    cJSON *o = json_ok();
+    cJSON_AddNumberToObject(o, "scanned", (double)scanned);
+    cJSON_AddNumberToObject(o, "forgotten", (double)forgotten);
+    cJSON_AddBoolToObject(o, "dry_run", dry_run);
+    return o;
+}
+
 static cJSON *handle_search(AegisDB *db, const cJSON *req, const char *ns) {
     SearchParams p;
     memset(&p, 0, sizeof(p));
@@ -2076,7 +2170,8 @@ static aegis_status_t resolve_identity(AegisDB *db, const cJSON *req,
 static int is_write_op(const char *op) {
     return strcmp(op, "insert") == 0 || strcmp(op, "update") == 0 ||
            strcmp(op, "delete") == 0 || strcmp(op, "promote") == 0 ||
-           strcmp(op, "relate") == 0 || strcmp(op, "consolidate") == 0;
+           strcmp(op, "relate") == 0 || strcmp(op, "consolidate") == 0 ||
+           strcmp(op, "forget") == 0;
 }
 
 static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
@@ -2148,6 +2243,7 @@ static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
     if (strcmp(op, "search") == 0) return handle_search(db, req, ctx.ns);
     if (strcmp(op, "count") == 0) return handle_count(db, req, ctx.ns);
     if (strcmp(op, "consolidate") == 0) return handle_consolidate(db, req, ctx.ns);
+    if (strcmp(op, "forget") == 0) return handle_forget(db, req, ctx.ns);
     if (strcmp(op, "promote") == 0) return handle_promote(db, req, ctx.ns);
     if (strcmp(op, "relate") == 0) return handle_relate(db, req, ctx.ns);
     if (strcmp(op, "traverse") == 0) return handle_traverse(db, req, ctx.ns);

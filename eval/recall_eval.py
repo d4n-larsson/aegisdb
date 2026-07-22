@@ -217,6 +217,75 @@ def run_consolidate_eval(args, ds, embed, ks, max_k):
     return 0
 
 
+def run_decay_eval(args, ds, embed, ks, max_k):
+    """Measure forgetting (ROADMAP 2.3): seed the curated facts, flood the corpus
+    with low-value episodic 'noise', then check that `forget` ages out the noise
+    (corpus plateaus) WITHOUT losing recall of the facts. The point of forgetting
+    is a bounded corpus at equal answer quality."""
+    dim = ds.get("embedding_dim", 256)
+    with Server(args.binary, args.port, dim) as srv:
+        label_to_ids = seed(srv, ds["memories"], embed)  # the facts (semantic)
+        # inject low-importance episodic noise — the volume that should age out
+        for i in range(args.noise):
+            r = srv.req({"operation": "insert", "type": "episodic",
+                         "data": f"transient event {i}", "importance": 0.01,
+                         "tags": ["noise"], "embedding": embed(f"transient event {i}"),
+                         "include_embeddings": False})
+            if not r.get("ok"):
+                raise RuntimeError(f"noise insert failed: {r}")
+        before_n = record_count(srv)
+        before_recall, before_mrr, _ = measure(
+            srv, ds["queries"], embed, label_to_ids, ks, max_k)
+
+        # forget low-value episodic records (semantic facts are protected by type)
+        r = srv.req({"operation": "forget", "min_retention": args.min_retention})
+        if not r.get("ok"):
+            print(f"forget failed: {r}", file=sys.stderr)
+            return 2
+        scanned, forgotten = r.get("scanned", 0), r.get("forgotten", 0)
+
+        after_n = record_count(srv)
+        after_recall, after_mrr, _ = measure(
+            srv, ds["queries"], embed, label_to_ids, ks, max_k)
+
+    facts = len(ds["memories"])
+    if args.json:
+        print(json.dumps({
+            "mode": "decay", "dataset": ds["name"], "facts": facts, "noise": args.noise,
+            "min_retention": args.min_retention, "scanned": scanned, "forgotten": forgotten,
+            "records_before": before_n, "records_after": after_n,
+            "recall_before": before_recall, "recall_after": after_recall,
+            "mrr_before": before_mrr, "mrr_after": after_mrr,
+        }, indent=2))
+    else:
+        print(f"\nAegisDB forgetting eval — dataset '{ds['name']}', "
+              f"{facts} facts + {args.noise} low-value episodic records, "
+              f"min_retention={args.min_retention}\n")
+        print(f"  records:  {before_n} → {after_n}  "
+              f"({forgotten} forgotten of {scanned} episodic scanned; "
+              f"ideal ≈ {facts})")
+        print(f"  {'':<10}" + "  ".join(f"R@{k}" for k in ks) + "   MRR")
+        print(f"  before    " + "  ".join(f"{before_recall[k]:>3.0%}" for k in ks) +
+              f"   {before_mrr:.3f}")
+        print(f"  after     " + "  ".join(f"{after_recall[k]:>3.0%}" for k in ks) +
+              f"   {after_mrr:.3f}")
+        print()
+
+    shrank = after_n < before_n
+    held = after_recall[max_k] >= before_recall[max_k] - 1e-9
+    if not shrank:
+        print(f"GATE FAILED: forgetting did not shrink the corpus "
+              f"({before_n} → {after_n})", file=sys.stderr)
+        return 1
+    if not held:
+        print(f"GATE FAILED: recall@{max_k} regressed "
+              f"{before_recall[max_k]:.2%} → {after_recall[max_k]:.2%}", file=sys.stderr)
+        return 1
+    print(f"OK: corpus {before_n} → {after_n} (−{before_n - after_n}), "
+          f"recall@{max_k} held at {after_recall[max_k]:.2%}")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="AegisDB recall-quality eval")
     ap.add_argument("binary", nargs="?", default="./build/aegisdb")
@@ -236,6 +305,13 @@ def main():
                     help="copies of each memory to seed in --consolidate mode")
     ap.add_argument("--min-similarity", type=float, default=0.95,
                     help="cosine threshold passed to consolidate")
+    ap.add_argument("--decay", action="store_true",
+                    help="forgetting mode: seed the facts + --noise low-value episodic "
+                         "records, then measure recall + corpus size before and after a forget")
+    ap.add_argument("--noise", type=int, default=200,
+                    help="low-importance episodic records to inject in --decay mode")
+    ap.add_argument("--min-retention", type=float, default=0.05,
+                    help="retention floor passed to forget (importance*recency)")
     args = ap.parse_args()
 
     ks = sorted(int(x) for x in args.k.split(","))
@@ -247,6 +323,8 @@ def main():
 
     if args.consolidate:
         return run_consolidate_eval(args, ds, embed, ks, max_k)
+    if args.decay:
+        return run_decay_eval(args, ds, embed, ks, max_k)
 
     with Server(args.binary, args.port, dim) as srv:
         label_to_ids = seed(srv, ds["memories"], embed)
