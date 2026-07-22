@@ -577,7 +577,13 @@ int hnsw_add(Hnsw *h, uint64_t id, const float *vec, size_t dim) {
     int level = rand_level(h);
     uint32_t cur;
     if (node_create(h, id, vec, level, &cur) != 0) return -1;
-    if (map_put(h, id, cur) != 0) return -1;
+    if (map_put(h, id, cur) != 0) {
+        /* Node is allocated and counted in h->n but unreachable via the map;
+         * tombstone it so it's excluded from search and serialised as a valid
+         * (dead) node rather than a live one with no links. */
+        h->nodes[cur].deleted = 1;
+        return -1;
+    }
     h->live++;
 
     /* Use the caller's float vector as the query for the insertion search — the
@@ -651,7 +657,14 @@ int hnsw_search(const Hnsw *h, const float *query, size_t dim, size_t top_k,
     if (h->entry == NPOS || top_k == 0) {
         *out_ids = malloc(sizeof(uint64_t));
         *out_scores = malloc(sizeof(float));
-        return (*out_ids && *out_scores) ? 0 : -1;
+        if (!*out_ids || !*out_scores) {
+            free(*out_ids);
+            free(*out_scores);
+            *out_ids = NULL;
+            *out_scores = NULL;
+            return -1;
+        }
+        return 0;
     }
 
     float qn = l2norm(query, dim);
@@ -917,6 +930,10 @@ Hnsw *hnsw_load(const char *path, size_t expected_dim,
 
     for (uint64_t i = 0; i < ncount; i++) {
         Node *nd = &h->nodes[i];
+        /* Advance the freeable prefix before any per-node allocation so the error
+         * path (hnsw_free_contents over [0, h->n)) also frees this node's partial
+         * allocations. h->nodes is calloc'd, so freeing a zeroed node is safe. */
+        h->n = i + 1;
         nd->id = rd_u64(&r);
         nd->deleted = (int)rd_u32(&r);
         nd->top_layer = (int)rd_u32(&r);
@@ -931,7 +948,6 @@ Hnsw *hnsw_load(const char *path, size_t expected_dim,
             nd->vec = malloc(dim * sizeof(float));
             if (!nd->vec) goto bad;
         }
-        h->n = i + 1; /* keep the freeable prefix accurate for the error path */
         rd_get(&r, &nd->norm, sizeof(float));
         if (h->quantized) {
             rd_get(&r, &nd->scale, sizeof(float));

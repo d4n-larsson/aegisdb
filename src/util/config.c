@@ -126,8 +126,13 @@ static int load_key_file(const char *path, uint8_t out[AEAD_KEY_LEN]) {
     while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r' ||
                      line[n - 1] == ' ' || line[n - 1] == '\t'))
         line[--n] = '\0';
-    if (n != 2 * AEAD_KEY_LEN) return -1;
-    return hex_decode(line, out, 2 * AEAD_KEY_LEN);
+    if (n != 2 * AEAD_KEY_LEN) {
+        explicit_bzero(line, sizeof(line));
+        return -1;
+    }
+    int rc = hex_decode(line, out, 2 * AEAD_KEY_LEN);
+    explicit_bzero(line, sizeof(line)); /* don't leave the raw key on the stack */
+    return rc;
 }
 
 /* Append a token bound to `ns` (NULL = global) with `scope`. `tok` is either a

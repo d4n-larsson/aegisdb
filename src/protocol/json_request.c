@@ -17,6 +17,9 @@ int jr_u64(const cJSON *o, const char *key, uint64_t *out) {
     const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, key);
     if (!cJSON_IsNumber(v)) return -1;
     if (v->valuedouble < 0) return -1;
+    /* Casting a double >= 2^64 to uint64_t is undefined behaviour and would
+     * yield a garbage huge integer; reject it instead. */
+    if (v->valuedouble >= 18446744073709551616.0) return -1;
     *out = (uint64_t)v->valuedouble;
     return 0;
 }

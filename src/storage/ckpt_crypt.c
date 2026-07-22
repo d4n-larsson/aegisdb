@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "aegisdb/aead.h"
+#include "aegisdb/fsutil.h"
 
 #define CKPT_MAGIC 0x43454B41u /* "AKEC" LE: AegisDB checKpoint EnCryption */
 #define CKPT_VERSION 1u
@@ -61,7 +62,9 @@ static int write_atomic(const char *path, const uint8_t *buf, size_t len) {
         unlink(tmp);
         return -1;
     }
-    return 0;
+    /* Order the rename itself: without a directory fsync the "atomic" rename can
+     * still be lost on a crash even though the file data was fsync'd above. */
+    return fs_fsync_parent(path);
 }
 
 /* Read the whole file at `path` into a fresh buffer. Returns 0/-1. */

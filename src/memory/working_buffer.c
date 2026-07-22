@@ -143,7 +143,10 @@ int working_store_add(WorkingStore *ws, const char *session_id,
     copy->created = now;
     copy->updated = now;
     uint64_t ttl = ttl_ms ? ttl_ms : ws->default_ttl_ms;
-    copy->expires_at = now + ttl;
+    /* Saturate rather than wrap: a huge ttl must read as "far future", not fold
+     * now+ttl past the epoch and make the entry look already-expired (matching
+     * the persisted-insert path in qe_insert). */
+    copy->expires_at = ttl > UINT64_MAX - now ? UINT64_MAX : now + ttl;
 
     Slot *slot = &s->slots[s->head];
     if (slot->rec) { /* evict oldest */

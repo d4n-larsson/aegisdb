@@ -137,6 +137,27 @@ static void test_tag_remove(void) {
     tag_index_free(t);
 }
 
+/* Removing a tag's last id must reclaim the node, not leave an empty shell in
+ * the bucket chain (which would grow unbounded under add/remove churn). */
+static void test_tag_remove_reclaims_empty_node(void) {
+    TagIndex *t = tag_index_create();
+    tag_index_add(t, "solo", 1);
+    TEST_ASSERT_EQUAL_size_t(1, tag_index_count(t));
+    tag_index_remove(t, "solo", 1); /* last id gone -> node should be freed */
+    TEST_ASSERT_EQUAL_size_t(0, tag_index_count(t));
+
+    /* still queryable (as empty) and re-addable */
+    const char *q[] = {"solo"};
+    uint64_t *ids = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, tag_index_query(t, q, 1, 1, &ids, &n));
+    TEST_ASSERT_EQUAL_size_t(0, n);
+    free(ids);
+    tag_index_add(t, "solo", 9);
+    TEST_ASSERT_EQUAL_size_t(1, tag_index_count(t));
+    tag_index_free(t);
+}
+
 /* ---- SemanticIndex ----------------------------------------------------- */
 
 static void test_semantic_topk_ordering(void) {
@@ -512,6 +533,7 @@ int main(void) {
     RUN_TEST(test_time_range_recent_keeps_newest);
     RUN_TEST(test_tag_intersection_and_union);
     RUN_TEST(test_tag_remove);
+    RUN_TEST(test_tag_remove_reclaims_empty_node);
     RUN_TEST(test_semantic_topk_ordering);
     RUN_TEST(test_semantic_remove_reclaims);
     RUN_TEST(test_semantic_overwrite_in_place);

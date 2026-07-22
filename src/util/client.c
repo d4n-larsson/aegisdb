@@ -85,10 +85,17 @@ static int send_all(int fd, const char *buf, size_t len) {
 /* Read one newline-terminated response line. Caller frees. */
 static char *recv_line(int fd) {
     size_t cap = 4096, len = 0;
+    const size_t max_cap = 64u * 1024 * 1024; /* bound a server that never sends \n */
     char *buf = malloc(cap);
     if (!buf) return NULL;
+    buf[0] = '\0'; /* so an immediate server close returns a valid empty string,
+                    * never an uninitialised, unterminated heap buffer */
     for (;;) {
         if (len + 1 >= cap) {
+            if (cap >= max_cap) {
+                free(buf);
+                return NULL;
+            }
             cap *= 2;
             char *g = realloc(buf, cap);
             if (!g) {

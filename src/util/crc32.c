@@ -1,8 +1,10 @@
 /* CRC32 (IEEE 802.3, reflected, poly 0xEDB88820) — T009. */
 #include "aegisdb/crc32.h"
 
+#include <pthread.h>
+
 static uint32_t g_table[256];
-static int g_table_ready = 0;
+static pthread_once_t g_table_once = PTHREAD_ONCE_INIT;
 
 static void build_table(void) {
     for (uint32_t i = 0; i < 256; i++) {
@@ -11,11 +13,13 @@ static void build_table(void) {
             c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
         g_table[i] = c;
     }
-    g_table_ready = 1;
 }
 
 uint32_t crc32_update(uint32_t crc, const void *data, size_t len) {
-    if (!g_table_ready) build_table();
+    /* pthread_once publishes the fully-built table with the right memory
+     * ordering, so concurrent first callers can't observe a half-built table
+     * (the old lazy flag had a data race under weak memory models). */
+    pthread_once(&g_table_once, build_table);
     const unsigned char *p = (const unsigned char *)data;
     crc = ~crc;
     while (len--)

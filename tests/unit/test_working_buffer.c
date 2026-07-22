@@ -71,6 +71,23 @@ static void test_working_ring_evicts_oldest(void) {
     working_store_free(ws);
 }
 
+/* A huge ttl must saturate to "far future", not wrap now+ttl past the epoch and
+ * make the just-added entry look already-expired. */
+static void test_working_ttl_saturates(void) {
+    WorkingStore *ws = working_store_create(4, 1000);
+    MemoryRecord in = mk("v", NULL);
+    uint64_t id = 0;
+    uint64_t now = 1000;
+    TEST_ASSERT_EQUAL_INT(0,
+        working_store_add(ws, "s", &in, now, UINT64_MAX, &id));
+    /* Far in the future relative to `now` — a wrapped expiry would drop it. */
+    MemoryRecord *g = working_store_get(ws, "s", id, now + 1000000000ULL);
+    TEST_ASSERT_NOT_NULL(g);
+    record_free(g);
+    free(g);
+    working_store_free(ws);
+}
+
 /* ---- concurrent stress (#3 regression) --------------------------------- */
 
 #define NTHREADS 8
@@ -135,6 +152,7 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_working_add_get_take);
     RUN_TEST(test_working_ring_evicts_oldest);
+    RUN_TEST(test_working_ttl_saturates);
     RUN_TEST(test_working_concurrent_stress);
     return UNITY_END();
 }
