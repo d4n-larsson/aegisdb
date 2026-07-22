@@ -72,6 +72,48 @@ class TestCaptureE2E(unittest.TestCase):
             # the ephemeral secret was dropped before extraction
             self.assertNotIn("secret api key", texts)
 
+    def test_extraction_supersedes_contradicting_memory(self):
+        """ROADMAP 2.1 follow-up: a newly extracted fact that updates an existing
+        one replaces it — the old memory is tombstoned and the new one records a
+        `supersedes` provenance link."""
+        with AegisServer() as srv:
+            cfg = make_config(srv, extract_mode="fake", recall_min_score=0.0,
+                              extract_supersede_min_score=0.3)
+            provider = FakeProvider(srv.dim)
+            client = AegisClient(cfg.aegis_host, cfg.aegis_port)
+            tools = MemoryTools(cfg, client, provider)
+
+            # an existing fact
+            old = tools.save("The deploy command is make ship", semantic=True,
+                             importance=0.7)
+            old_id = old["id"]
+
+            # capture a contradicting/updated version
+            transcript = _write_transcript([
+                ("assistant", "The deploy command is make release"),
+            ])
+            try:
+                stored = run_capture({"transcript_path": transcript}, cfg, provider)
+                self.assertGreaterEqual(stored, 1)
+            finally:
+                os.remove(transcript)
+
+            # the old memory was superseded (tombstoned)
+            self.assertFalse(tools.get(old_id)["ok"], "old memory should be gone")
+
+            # the new memory records a `supersedes` link to the old id
+            res = tools.search(query="deploy command", top_k=5)
+            self.assertTrue(res["ok"])
+            found = False
+            for m in res["memories"]:
+                rec = client.request({"operation": "get", "id": m["id"]})["record"]
+                rels = rec.get("relationships", [])
+                if any(r.get("kind") == "supersedes" and r.get("to_id") == old_id
+                       for r in rels):
+                    found = True
+                    self.assertIn("make release", rec["data"])
+            self.assertTrue(found, "new memory should supersede the old one")
+
     def test_nonsalient_session_stores_nothing(self):
         with AegisServer() as srv:
             cfg = make_config(srv)

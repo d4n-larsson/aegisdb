@@ -356,6 +356,9 @@ explicit overrides.
 | `AEGIS_EXTRACT_API_BASE` | — | `openai` backend: base URL for an OpenAI-compatible endpoint |
 | `AEGIS_EXTRACT_MAX_FACTS` | `12` | cap facts stored per session |
 | `AEGIS_EXTRACT_MAX_INPUT_CHARS` | `24000` | cap transcript chars sent to the model (keeps the most recent) |
+| `AEGIS_EXTRACT_SUPERSEDE` | `true` | when an extracted fact updates/contradicts an existing memory, replace it (tombstone + a `supersedes` provenance link) instead of accumulating both. Needs embeddings + an extractor backend; active only when `AEGIS_EXTRACT_MODE` is on |
+| `AEGIS_EXTRACT_SUPERSEDE_TOP_K` | `5` | similar existing memories considered per new fact |
+| `AEGIS_EXTRACT_SUPERSEDE_MIN_SCORE` | `0.6` | cosine floor for a supersession candidate |
 | `AEGIS_SUMMARY_MODE` | `none` | `aegisdb-summarize` backend: `none` (off) \| `fake` (tests) \| `claude-code` \| `anthropic` \| `openai` |
 | `AEGIS_SUMMARY_MODEL` | — | optional model override for the selected backend |
 | `AEGIS_SUMMARY_API_BASE` | — | `openai` backend: base URL for an OpenAI-compatible endpoint |

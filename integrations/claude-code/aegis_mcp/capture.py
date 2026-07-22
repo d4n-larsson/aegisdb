@@ -147,12 +147,13 @@ def _drop_ephemeral(texts: list) -> list:
             if not any(m in t.lower() for m in _EPHEMERAL_MARKERS)]
 
 
-def extract_facts(texts: list, config) -> list | None:
+def extract_facts(texts: list, config, provider=None) -> list | None:
     """LLM extraction path (ROADMAP 2.1): distil the transcript into durable
     Facts. Returns a list[Fact] (possibly empty) when an extractor ran, or None
     when extraction is disabled/unavailable/failed so the caller falls back to
     heuristic capture. Never raises."""
-    provider = make_extraction_provider(config)
+    if provider is None:
+        provider = make_extraction_provider(config)
     if not provider.available():
         return None
     kept = _drop_ephemeral(texts)
@@ -168,6 +169,28 @@ def extract_facts(texts: list, config) -> list | None:
         return None  # never let extraction break capture
 
 
+def _find_superseded_ids(fact, tools, config, extractor) -> list:
+    """Ids of existing semantic memories the new `fact` makes obsolete. Recalls
+    similar facts (needs embeddings — degraded search returns no scores, so we
+    supersede nothing) and asks the extractor which to replace. Best-effort."""
+    if not getattr(config, "extract_supersede", True):
+        return []
+    res = tools.search(query=fact.text, kind="semantic",
+                       top_k=getattr(config, "extract_supersede_top_k", 5))
+    if not res.get("ok"):
+        return []
+    floor = getattr(config, "extract_supersede_min_score", 0.6)
+    mems = [m for m in res.get("memories", [])
+            if m.get("score") is not None and m["score"] >= floor and m.get("id")]
+    if not mems:
+        return []
+    try:
+        idxs = extractor.judge_supersedes(fact.text, [m["text"] for m in mems])
+    except Exception:
+        return []
+    return [mems[i]["id"] for i in idxs if 0 <= i < len(mems)]
+
+
 def run_capture(event: dict, config, provider: EmbeddingProvider,
                 client: AegisClient | None = None) -> int:
     """Capture salient memories for an ended session. Returns the number stored.
@@ -181,7 +204,8 @@ def run_capture(event: dict, config, provider: EmbeddingProvider,
         return 0
     texts = load_transcript(event.get("transcript_path"))
 
-    facts = extract_facts(texts, config)
+    extractor = make_extraction_provider(config)
+    facts = extract_facts(texts, config, extractor)
     if facts is not None:  # extractor ran (even if it found nothing)
         if not facts:
             return 0
@@ -190,10 +214,21 @@ def run_capture(event: dict, config, provider: EmbeddingProvider,
         tools = MemoryTools(config, client, provider)
         stored = 0
         for f in facts:
+            # Contradiction -> supersession: find existing memories this fact
+            # updates/replaces BEFORE inserting it (so candidates are prior facts),
+            # then tombstone them with a `supersedes` provenance link.
+            superseded = _find_superseded_ids(f, tools, config, extractor)
             res = tools.save(f.text, tags=f.tags, importance=f.importance,
                              semantic=True, confidence=f.confidence)
-            if res.get("ok"):
-                stored += 1
+            if not res.get("ok"):
+                continue
+            stored += 1
+            new_id = res.get("id")
+            for old_id in superseded:
+                if old_id == new_id:
+                    continue
+                tools.relate(new_id, old_id, "supersedes")
+                tools.delete(old_id)
         return stored
 
     # heuristic fallback (extraction disabled/unavailable)
