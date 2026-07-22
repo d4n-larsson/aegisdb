@@ -13,6 +13,22 @@ make eval EVAL_ARGS='--gate-recall-at 5 --gate-threshold 0.8'   # fail on regres
 python3 eval/recall_eval.py ./build/aegisdb --json              # machine-readable
 ```
 
+### Consolidation eval (ROADMAP 2.2)
+
+Measures dedup: seed `--dup-factor` copies of every memory, then check that
+`consolidate` collapses the corpus **without losing recall** of the surviving
+fact — the whole point of dedup is a smaller corpus at equal (or better) answer
+quality.
+
+```sh
+make eval EVAL_ARGS='--consolidate'                     # before/after report
+python3 eval/recall_eval.py ./build/aegisdb --consolidate --dup-factor 3
+```
+
+Exits non-zero if the corpus didn't shrink or recall@maxk regressed. Typical run
+on the starter dataset: **66 → 22 records** with recall@10 held at 93% (and
+recall@3/@5 improved, since duplicates no longer crowd the top-k).
+
 The default **hashing embedder** is deterministic and dependency-free, so the
 harness runs in CI and offline with no model or API. It gives real-but-modest
 semantic signal (token overlap → cosine similarity) — enough to make recall
