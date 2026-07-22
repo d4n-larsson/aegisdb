@@ -776,6 +776,72 @@ static void test_forget(void) {
     TEST_ASSERT_EQUAL_size_t(0, forgotten);
 }
 
+/* export returns a subject's records (id-paginated); purge removes exactly that
+ * subject and refuses a global purge (ROADMAP 3.2). */
+static void test_export_and_purge(void) {
+    for (int i = 0; i < 3; i++) {
+        MemoryRecord in = make_input(MEM_EPISODIC, "alice data");
+        in.agent_id = (char *)"alice"; /* borrowed; record_clone dups it */
+        MemoryRecord out;
+        TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &in, NULL, 0, &out));
+        record_free(&out);
+    }
+    for (int i = 0; i < 2; i++) {
+        MemoryRecord in = make_input(MEM_EPISODIC, "bob data");
+        in.agent_id = (char *)"bob";
+        MemoryRecord out;
+        TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &in, NULL, 0, &out));
+        record_free(&out);
+    }
+
+    MemoryRecord *recs = NULL;
+    size_t n = 0;
+    int more = 0;
+
+    /* full export */
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_export(&g_db, "alice", 0, 10, &recs, &n, &more));
+    TEST_ASSERT_EQUAL_size_t(3, n);
+    TEST_ASSERT_FALSE(more);
+    for (size_t i = 0; i < n; i++) record_free(&recs[i]);
+    free(recs);
+
+    /* pagination */
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_export(&g_db, "alice", 0, 2, &recs, &n, &more));
+    TEST_ASSERT_EQUAL_size_t(2, n);
+    TEST_ASSERT_TRUE(more);
+    uint64_t cursor = recs[n - 1].id;
+    for (size_t i = 0; i < n; i++) record_free(&recs[i]);
+    free(recs);
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_export(&g_db, "alice", cursor, 2, &recs, &n, &more));
+    TEST_ASSERT_EQUAL_size_t(1, n);
+    for (size_t i = 0; i < n; i++) record_free(&recs[i]);
+    free(recs);
+
+    /* a global purge is refused */
+    size_t c = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_INVALID_REQUEST, qe_purge_namespace(&g_db, NULL, 0, &c));
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_INVALID_REQUEST, qe_purge_namespace(&g_db, "", 0, &c));
+
+    /* dry-run counts, deletes nothing */
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_purge_namespace(&g_db, "alice", 1, &c));
+    TEST_ASSERT_EQUAL_size_t(3, c);
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_export(&g_db, "alice", 0, 10, &recs, &n, &more));
+    TEST_ASSERT_EQUAL_size_t(3, n);
+    for (size_t i = 0; i < n; i++) record_free(&recs[i]);
+    free(recs);
+
+    /* real purge removes exactly alice; bob untouched */
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_purge_namespace(&g_db, "alice", 0, &c));
+    TEST_ASSERT_EQUAL_size_t(3, c);
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_export(&g_db, "alice", 0, 10, &recs, &n, &more));
+    TEST_ASSERT_EQUAL_size_t(0, n);
+    free(recs);
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_export(&g_db, "bob", 0, 10, &recs, &n, &more));
+    TEST_ASSERT_EQUAL_size_t(2, n);
+    for (size_t i = 0; i < n; i++) record_free(&recs[i]);
+    free(recs);
+}
+
 static void test_working_memory_promote(void) {
     MemoryRecord in = make_input(MEM_WORKING, "scratch note");
     MemoryRecord out;
@@ -986,6 +1052,7 @@ int main(void) {
     RUN_TEST(test_ttl_sweep_tombstones);
     RUN_TEST(test_consolidate);
     RUN_TEST(test_forget);
+    RUN_TEST(test_export_and_purge);
     RUN_TEST(test_working_memory_promote);
     RUN_TEST(test_relate_and_traverse);
     RUN_TEST(test_traverse_wide_graph);

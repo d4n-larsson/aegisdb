@@ -356,6 +356,57 @@ judgment belongs in a client/maintenance job on top.
 
 ---
 
+### `export`
+
+Export a **subject's** records — the "export what you store about me" side of data
+compliance. Returns the live records owned by a namespace, in id order, paginated.
+The subject is the token's namespace (namespaced token) or an admin-specified
+`agent_id`; a subjectless export is refused (no "dump the whole DB"). Read-only;
+`ro` tokens may call it.
+
+```json
+{ "operation": "export", "agent_id": "acme", "limit": 100, "after_id": 0 }
+→ { "ok": true, "namespace": "acme", "records": [ ... ], "count": 100,
+    "cursor": 342, "has_more": true }
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `agent_id` | string | Subject to export; ignored for a namespaced token (pinned to its own namespace). Required for an admin/no-auth caller |
+| `limit` | integer | Max records this page; default 100, capped at 1000 |
+| `after_id` | integer | Return records with id greater than this — pass the previous page's `cursor` to page through everything |
+| `include_embeddings` | boolean | As elsewhere; set `false` to omit vectors |
+
+Page until `has_more` is `false`, passing `cursor` as the next `after_id`.
+
+---
+
+### `purge`
+
+**Right to be forgotten**: hard-delete every record owned by a namespace and make
+the payloads actually leave disk. The records are tombstoned and then compaction
+rewrites the log without them, so a purged subject's plaintext is gone from
+`memory.log` (not merely hidden). Requires `rw` scope; a namespaced token purges
+only its own namespace, an admin targets one via `agent_id`. A subjectless purge
+is refused. Requires at least phase 1.
+
+```json
+{ "operation": "purge", "agent_id": "acme", "dry_run": false, "compact": true }
+→ { "ok": true, "namespace": "acme", "purged": 42, "dry_run": false, "compacted": true }
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `agent_id` | string | Namespace to erase; ignored for a namespaced token. Required for admin/no-auth |
+| `dry_run` | boolean | Default `false`. When `true`, counts what *would* be purged and deletes nothing (preview) |
+| `compact` | boolean | Default `true`. Run compaction after the purge so payloads leave the on-disk log. Set `false` to defer to a scheduled/batched compaction |
+
+`purged` is the number of records tombstoned; `compacted` is whether the reclaim
+pass ran. Deferring compaction leaves the plaintext recoverable from the log
+until the next compaction, so keep it on for a true erase.
+
+---
+
 ### `search`
 
 Unified search with mutually combinable filters. The time filter activates only

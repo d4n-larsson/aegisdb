@@ -643,6 +643,88 @@ def test_forget(binary, port):
         check(r.get("forgotten") == 2, "max_forget caps the number tombstoned")
 
 
+def test_export_and_purge(binary, port):
+    print("[export + right-to-be-forgotten (ROADMAP 3.2)]")
+    with Server(binary, port, phase=4) as srv:
+        for i in range(3):
+            srv.req({"operation": "insert", "type": "episodic",
+                     "data": f"ALICE_SECRET_{i} likes coffee", "agent_id": "alice"})
+        for i in range(2):
+            srv.req({"operation": "insert", "type": "episodic",
+                     "data": f"BOB_DATA_{i}", "agent_id": "bob"})
+
+        # export a subject's records
+        r = srv.req({"operation": "export", "agent_id": "alice", "limit": 10})
+        check(r.get("ok") and r.get("count") == 3 and r.get("namespace") == "alice",
+              "export returns the subject's records")
+        check(all("ALICE_SECRET" in rec["data"] for rec in r["records"]),
+              "export returns only the subject's data")
+
+        # pagination via cursor
+        p1 = srv.req({"operation": "export", "agent_id": "alice", "limit": 2})
+        check(p1.get("count") == 2 and p1.get("has_more") is True, "export page 1")
+        p2 = srv.req({"operation": "export", "agent_id": "alice", "limit": 2,
+                      "after_id": p1["cursor"]})
+        check(p2.get("count") == 1 and p2.get("has_more") is False, "export page 2")
+
+        # a subjectless export/purge is refused (no "dump/erase everything")
+        check(srv.req({"operation": "export"})["error"]["code"] == "INVALID_REQUEST",
+              "subjectless export rejected")
+        check(srv.req({"operation": "purge"})["error"]["code"] == "INVALID_REQUEST",
+              "subjectless purge rejected")
+
+        # dry-run purge counts without deleting
+        d = srv.req({"operation": "purge", "agent_id": "alice", "dry_run": True})
+        check(d.get("purged") == 3 and d.get("dry_run") is True and d.get("compacted") is False,
+              "dry-run purge counts without deleting")
+        check(srv.req({"operation": "export", "agent_id": "alice"})["count"] == 3,
+              "dry-run left the data in place")
+
+        # real purge + compaction
+        r = srv.req({"operation": "purge", "agent_id": "alice"})
+        check(r.get("purged") == 3 and r.get("compacted") is True,
+              "purge tombstones the subject and compacts")
+        check(srv.req({"operation": "export", "agent_id": "alice"})["count"] == 0,
+              "subject's data is gone after purge")
+        check(srv.req({"operation": "export", "agent_id": "bob"})["count"] == 2,
+              "other tenants are untouched")
+
+        # COMPLIANCE PROOF: the purged plaintext is gone from the on-disk log
+        # (compaction rewrote it); a co-tenant's data survives.
+        with open(os.path.join(srv.datadir, "memory.log"), "rb") as fh:
+            blob = fh.read()
+        check(b"ALICE_SECRET" not in blob,
+              "purged plaintext is absent from the on-disk log after compaction")
+        check(b"BOB_DATA" in blob, "co-tenant data survives in the log")
+
+
+def test_export_purge_isolation(binary, port):
+    print("[export/purge: tenant isolation]")
+    lines = ["admintok", "acme_rw acme rw", "acme_ro acme ro", "beta_rw beta rw"]
+    with Server(binary, port, phase=4, token_lines=lines) as srv:
+        srv.req({"operation": "insert", "type": "episodic", "data": "acme one",
+                 "token": "acme_rw"})
+        srv.req({"operation": "insert", "type": "episodic", "data": "beta one",
+                 "token": "beta_rw"})
+
+        # a namespaced token exports only its own ns, even if it spoofs agent_id
+        r = srv.req({"operation": "export", "agent_id": "beta", "token": "acme_rw"})
+        check(r.get("ok") and r.get("count") == 1 and r["records"][0]["data"] == "acme one",
+              "export is pinned to the token's namespace (spoofed agent_id ignored)")
+
+        # a read-only token cannot purge
+        check(srv.req({"operation": "purge", "token": "acme_ro"})["error"]["code"] == "FORBIDDEN",
+              "read-only token cannot purge")
+
+        # acme purges its own ns; beta is untouched
+        r = srv.req({"operation": "purge", "token": "acme_rw"})
+        check(r.get("ok") and r.get("purged") == 1, "tenant purges its own namespace")
+        check(srv.req({"operation": "export", "token": "acme_rw"})["count"] == 0,
+              "acme data gone")
+        check(srv.req({"operation": "export", "token": "beta_rw"})["count"] == 1,
+              "beta data untouched by acme's purge")
+
+
 def test_snapshot(binary, port):
     print("[backup: online snapshot + recover]")
     with Server(binary, port, phase=4) as srv:
@@ -1561,6 +1643,8 @@ def main():
     test_bulk_ops(binary, 19480)
     test_consolidate(binary, 19481)
     test_forget(binary, 19499)
+    test_export_and_purge(binary, 19500)
+    test_export_purge_isolation(binary, 19501)
     test_multivector(binary, 19482)
     test_include_embeddings(binary, 19487)
     test_search_explain(binary, 19498)

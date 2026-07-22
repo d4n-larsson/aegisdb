@@ -13,6 +13,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "aegisdb/compaction.h"
 #include "aegisdb/json_request.h"
 #include "aegisdb/json_response.h"
 #include "aegisdb/logging.h"
@@ -841,6 +842,105 @@ aegis_status_t qe_delete_by_query(AegisDB *db, const SearchParams *p,
         if (qe_delete(db, ids[i], ns) == AEGIS_OK) deleted++;
     free(ids);
     *out_deleted = deleted;
+    return AEGIS_OK;
+}
+
+static int cmp_u64_asc(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return (x > y) - (x < y);
+}
+
+/* Snapshot every live record id (optionally only those > after_id) under the
+ * index lock. Returns a malloc'd, unsorted array; caller frees. */
+static uint64_t *snapshot_live_ids(AegisDB *db, uint64_t after_id, size_t *out_n) {
+    pthread_rwlock_rdlock(&db->index_lock);
+    const HashIndex *h = db->hash;
+    uint64_t *ids = NULL;
+    size_t n = 0, cap = 0;
+    for (size_t i = 0; i < h->cap; i++) {
+        const HashEntry *e = &h->buckets[i];
+        if (!e->used || e->deleted || e->id <= after_id) continue;
+        if (n == cap) {
+            size_t nc = cap ? cap * 2 : 64;
+            uint64_t *g = realloc(ids, nc * sizeof(uint64_t));
+            if (!g) break; /* best-effort: work with what we gathered */
+            ids = g;
+            cap = nc;
+        }
+        ids[n++] = e->id;
+    }
+    pthread_rwlock_unlock(&db->index_lock);
+    *out_n = n;
+    return ids;
+}
+
+/* Export (ROADMAP 3.2): the subject's records, id-ordered, paginated by
+ * after_id. Only records owned by `ns` are returned (qe_get enforces the
+ * namespace), so a tenant exports exactly its own data. */
+aegis_status_t qe_export(AegisDB *db, const char *ns, uint64_t after_id,
+                         size_t limit, MemoryRecord **out_records, size_t *out_n,
+                         int *out_has_more) {
+    aegis_status_t st = require_phase(db, 1);
+    if (st != AEGIS_OK) return st;
+    *out_records = NULL;
+    *out_n = 0;
+    if (out_has_more) *out_has_more = 0;
+    if (limit == 0) limit = 100;
+
+    size_t n = 0;
+    uint64_t *ids = snapshot_live_ids(db, after_id, &n);
+    if (n) qsort(ids, n, sizeof(uint64_t), cmp_u64_asc);
+
+    MemoryRecord *out = malloc(limit * sizeof(MemoryRecord));
+    if (!out) {
+        free(ids);
+        return AEGIS_ERR_INTERNAL;
+    }
+    size_t got = 0;
+    int more = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (got == limit) {
+            more = 1; /* at least one candidate remains for the next page */
+            break;
+        }
+        MemoryRecord r;
+        if (qe_get(db, ids[i], ns, &r) != AEGIS_OK) continue; /* not this tenant's */
+        out[got++] = r; /* move ownership */
+    }
+    free(ids);
+    *out_records = out;
+    *out_n = got;
+    if (out_has_more) *out_has_more = more;
+    return AEGIS_OK;
+}
+
+/* Right-to-be-forgotten (ROADMAP 3.2): tombstone every record owned by `ns`.
+ * `ns` must be a concrete namespace — a global purge is refused. The caller runs
+ * compaction afterward so the payloads actually leave the on-disk log. dry_run
+ * counts the subject's records without deleting. */
+aegis_status_t qe_purge_namespace(AegisDB *db, const char *ns, int dry_run,
+                                  size_t *out_count) {
+    aegis_status_t st = require_phase(db, 1);
+    if (st != AEGIS_OK) return st;
+    if (!ns || !*ns) return AEGIS_ERR_INVALID_REQUEST; /* never purge everything */
+    *out_count = 0;
+
+    size_t n = 0;
+    uint64_t *ids = snapshot_live_ids(db, 0, &n);
+    size_t count = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (dry_run) {
+            MemoryRecord r;
+            if (qe_get(db, ids[i], ns, &r) == AEGIS_OK) {
+                count++;
+                record_free(&r);
+            }
+        } else if (qe_delete(db, ids[i], ns) == AEGIS_OK) {
+            count++; /* qe_delete enforces ns: only this tenant's records go */
+        }
+    }
+    free(ids);
+    *out_count = count;
     return AEGIS_OK;
 }
 
@@ -1754,6 +1854,64 @@ static cJSON *handle_delete(AegisDB *db, const cJSON *req, const char *ns) {
     return o;
 }
 
+static cJSON *handle_export(AegisDB *db, const cJSON *req, const char *ns) {
+    /* Subject = the token's namespace, or an admin-specified agent_id. Refuse a
+     * subjectless export (that would be "dump the whole DB"). */
+    const char *target = ns ? ns : jr_str(req, "agent_id", NULL);
+    if (!target || !*target)
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    uint64_t v, after = 0;
+    if (jr_u64(req, "after_id", &v) == 0) after = v;
+    size_t limit = 100;
+    if (jr_u64(req, "limit", &v) == 0) limit = v > 1000 ? 1000 : (size_t)v;
+
+    MemoryRecord *recs = NULL;
+    size_t n = 0;
+    int more = 0;
+    aegis_status_t st = qe_export(db, target, after, limit, &recs, &n, &more);
+    if (st != AEGIS_OK) return json_error_status(st);
+
+    int inc_emb = want_embeddings(req);
+    cJSON *o = json_ok();
+    cJSON_AddStringToObject(o, "namespace", target);
+    cJSON *arr = cJSON_AddArrayToObject(o, "records");
+    uint64_t cursor = after;
+    for (size_t i = 0; i < n; i++) {
+        cJSON_AddItemToArray(arr, json_record(&recs[i], inc_emb));
+        cursor = recs[i].id;
+        record_free(&recs[i]);
+    }
+    free(recs);
+    cJSON_AddNumberToObject(o, "count", (double)n);
+    cJSON_AddNumberToObject(o, "cursor", (double)cursor); /* pass as next after_id */
+    cJSON_AddBoolToObject(o, "has_more", more);
+    return o;
+}
+
+static cJSON *handle_purge(AegisDB *db, const cJSON *req, const char *ns) {
+    const char *target = ns ? ns : jr_str(req, "agent_id", NULL);
+    if (!target || !*target)
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST); /* no global purge */
+    int dry_run = jr_bool(req, "dry_run", 0);
+    int compact = jr_bool(req, "compact", 1);
+
+    size_t purged = 0;
+    aegis_status_t st = qe_purge_namespace(db, target, dry_run, &purged);
+    if (st != AEGIS_OK) return json_error_status(st);
+    /* Compact so the tombstoned payloads actually leave the on-disk log — the
+     * point of right-to-be-forgotten. Skippable for a batched/scheduled compact. */
+    int compacted = 0;
+    if (!dry_run && compact && purged > 0)
+        compacted = (compaction_run_once(db) == 0);
+
+    cJSON *o = json_ok();
+    cJSON_AddStringToObject(o, "namespace", target);
+    cJSON_AddNumberToObject(o, "purged", (double)purged);
+    cJSON_AddBoolToObject(o, "dry_run", dry_run);
+    cJSON_AddBoolToObject(o, "compacted", compacted);
+    return o;
+}
+
 /* Parse the shared filter fields (type/tags/time/agent_id/match) into `p` for
  * count and delete-by-query. On success *out_tags is the allocated tag array
  * (free it after use, even when tag_count is 0). Returns 0/-1. */
@@ -2171,7 +2329,7 @@ static int is_write_op(const char *op) {
     return strcmp(op, "insert") == 0 || strcmp(op, "update") == 0 ||
            strcmp(op, "delete") == 0 || strcmp(op, "promote") == 0 ||
            strcmp(op, "relate") == 0 || strcmp(op, "consolidate") == 0 ||
-           strcmp(op, "forget") == 0;
+           strcmp(op, "forget") == 0 || strcmp(op, "purge") == 0;
 }
 
 static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
@@ -2240,6 +2398,8 @@ static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
     if (strcmp(op, "get") == 0) return handle_get(db, req, ctx.ns);
     if (strcmp(op, "update") == 0) return handle_update(db, req, ctx.ns);
     if (strcmp(op, "delete") == 0) return handle_delete(db, req, ctx.ns);
+    if (strcmp(op, "export") == 0) return handle_export(db, req, ctx.ns);
+    if (strcmp(op, "purge") == 0) return handle_purge(db, req, ctx.ns);
     if (strcmp(op, "search") == 0) return handle_search(db, req, ctx.ns);
     if (strcmp(op, "count") == 0) return handle_count(db, req, ctx.ns);
     if (strcmp(op, "consolidate") == 0) return handle_consolidate(db, req, ctx.ns);
