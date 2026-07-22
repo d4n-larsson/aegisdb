@@ -825,6 +825,49 @@ def test_include_embeddings(binary, port):
               "include_embeddings=true includes the embedding")
 
 
+def test_search_explain(binary, port):
+    print("[search: per-hit ranking explanation (ROADMAP 1.2)]")
+    with Server(binary, port, phase=4) as srv:  # default --embedding-dim 384
+        dim = 384
+        va = [1.0] + [0.0] * (dim - 1)
+        vb = [0.0, 1.0] + [0.0] * (dim - 2)
+        srv.req({"operation": "insert", "type": "semantic", "data": "alpha",
+                 "importance": 0.9, "confidence": 1.0, "embedding": va})
+        srv.req({"operation": "insert", "type": "semantic", "data": "beta",
+                 "importance": 0.3, "confidence": 1.0, "embedding": vb})
+
+        # default: no explain block (responses stay lean)
+        r = srv.req({"operation": "search", "embedding": va, "top_k": 2})
+        check(all("explain" not in rec for rec in r.get("records", [])),
+              "explain omitted by default")
+
+        # explain=true: every hit carries a breakdown
+        r = srv.req({"operation": "search", "embedding": va, "top_k": 2,
+                     "explain": True, "include_embeddings": False})
+        recs = r.get("records", [])
+        check(len(recs) == 2 and all("explain" in rec for rec in recs),
+              "explain present on every hit when requested")
+        top = recs[0]
+        e = top.get("explain", {})
+        check(top.get("data") == "alpha", "higher importance+similarity ranks first")
+        check(e.get("semantic") is True, "explain marks semantic ranking")
+        for f in ("score", "similarity", "importance", "confidence", "weight",
+                  "recency_factor"):
+            check(f in e, f"explain has {f}")
+        # score == weight * similarity * recency_factor
+        expect = e["weight"] * e["similarity"] * e["recency_factor"]
+        check(abs(e["score"] - expect) < 1e-4,
+              "explain score == weight * similarity * recency_factor")
+        check(abs(e["importance"] - 0.9) < 1e-4, "explain reports the record importance")
+
+        # recency decay: a half-life shrinks recency_factor below 1
+        r = srv.req({"operation": "search", "embedding": va, "top_k": 1,
+                     "explain": True, "half_life_ms": 1})
+        e = r["records"][0]["explain"]
+        check(e["recency_factor"] < 1.0,
+              "recency_factor < 1 under an aggressive half_life_ms")
+
+
 def test_replication_encrypted(binary, port):
     print("[read replica: encrypted primary -> encrypted replica (shared key)]")
     repl_port = port + 1
@@ -1467,6 +1510,7 @@ def main():
     test_consolidate(binary, 19481)
     test_multivector(binary, 19482)
     test_include_embeddings(binary, 19487)
+    test_search_explain(binary, 19498)
     test_tenant_quota(binary, 19488)
     test_tenant_rate_limit(binary, 19489)
     test_token_admin(binary, 19490)

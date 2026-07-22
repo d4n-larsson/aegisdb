@@ -73,10 +73,31 @@ typedef struct {
                          * selection for summarization). Ignored for semantic. */
 } SearchParams;
 
+/* Per-hit ranking explanation (ROADMAP 1.2), one entry parallel to each returned
+ * record, in the same order. Explains why a hit ranked where it did:
+ *   score = weight * similarity * recency_factor   (semantic queries)
+ * so a client/operator can see the contribution of each factor. */
+typedef struct {
+    int semantic;         /* 1 if ranked by semantic similarity, 0 otherwise */
+    float similarity;     /* raw cosine similarity [-1,1]; 0 for non-semantic */
+    float importance;     /* record importance */
+    float confidence;     /* record confidence */
+    float weight;         /* importance*confidence applied (1.0 if that was <=0) */
+    float recency_factor; /* recency-decay multiplier in (0,1]; 1.0 if no half-life */
+    float score;          /* final rank score */
+} SearchExplain;
+
 /* Search. Allocates *out_records (array of MemoryRecord; record_free each then
  * free the array). */
 aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
                          MemoryRecord **out_records, size_t *out_n);
+
+/* Like qe_search, but when out_explain is non-NULL also allocates a parallel
+ * array of SearchExplain (one per returned record, same order; free it with a
+ * single free()). Pass NULL to behave exactly like qe_search. ROADMAP 1.2. */
+aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
+                            MemoryRecord **out_records,
+                            SearchExplain **out_explain, size_t *out_n);
 
 /* Count live records matching the filters (type/tags/time/agent_id); ignores
  * any embedding. Returns the count in *out_count. A broad/filterless count is
