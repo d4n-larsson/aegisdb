@@ -89,7 +89,7 @@ end. Nothing here needs a model on the hot path.*
 
 ---
 
-## Horizon 2 — Next: memory that stays coherent
+## Horizon 2 — Next: memory that stays coherent  🚧 *in progress*
 
 *Theme: the memory-quality layer. Turn existing primitives into real policy.*
 
@@ -103,7 +103,7 @@ end. Nothing here needs a model on the hot path.*
 - **Leverages:** the existing summarizer provider seam
   (`none`/`fake`/`claude-code`/`anthropic`/`openai`) — reuse it, don't reinvent.
 
-### 2.2 Dedup + contradiction resolution
+### 2.2 Dedup + contradiction resolution — *provenance + measurement shipped*
 - **Why now:** unbounded, self-contradicting memory is worse than none.
 - **Build:** a policy layer over the mechanical `consolidate`:
   near-duplicate collapse (already have cosine dedup), plus **supersession** when
@@ -111,6 +111,16 @@ end. Nothing here needs a model on the hot path.*
   supersession chain for provenance (1.2).
 - **Leverages:** `consolidate`, `MEM_SEMANTIC` supersession in the append-only
   log, `update`/`delete`.
+- **Shipped:** consolidation now records a `supersedes` link (survivor → each
+  absorbed record) so a merge is auditable lineage, not silent loss (surfaced by
+  the inspector + `get`/`search` `relationships`). Made **measurable** with
+  `make eval EVAL_ARGS='--consolidate'`: seed duplicate clusters, assert the
+  corpus shrinks without losing recall (starter run: 66 → 22 records, recall@10
+  held at 93%).
+- **Remaining:** *semantic* contradiction detection ("prefers X, not Y" — vector-
+  similar but opposite) needs a model, so it belongs in the integration's write
+  path behind the provider seam (with 2.1 extraction), calling this server-side
+  supersession mechanism. Deferred, like LLM distillation was.
 
 ### 2.3 Decay & forgetting policy
 - **Why now:** recall is injected every turn — its size is a recurring token cost,

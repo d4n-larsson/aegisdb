@@ -569,7 +569,8 @@ def test_consolidate(binary, port):
         near1 = [0.999, 0.001] + [0.0] * (dim - 2)
         near2 = [0.998, 0.002] + [0.0] * (dim - 2)
         far = [0.0, 1.0] + [0.0] * (dim - 2)
-        ins(base, "a"); ins(near1, "b"); ins(near2, "c")
+        aid = ins(base, "a"); bid = ins(near1, "b"); cid = ins(near2, "c")
+        cluster = {aid, bid, cid}
         distinct = ins(far, "z")
 
         r = srv.req({"operation": "consolidate", "min_similarity": 0.95})
@@ -584,6 +585,17 @@ def test_consolidate(binary, port):
         n = srv.req({"operation": "count", "tags": ["a", "b", "c"], "match": "any"})
         check(n.get("ok") is True and n.get("count") == 1,
               "one survivor carries the merged cluster")
+
+        # provenance (ROADMAP 2.2): the survivor records `supersedes` links to the
+        # two records it absorbed, so the merge is auditable rather than silent.
+        s = srv.req({"operation": "search", "tags": ["a", "b", "c"],
+                     "match": "any", "top_k": 5})
+        recs = s.get("records", [])
+        sv = recs[0] if recs else {}
+        sup = sorted(x["to_id"] for x in sv.get("relationships", [])
+                     if x.get("kind") == "supersedes")
+        check(sup == sorted(cluster - {sv.get("id")}),
+              "survivor supersedes the 2 merged ids (auditable lineage)")
 
         # idempotent
         r = srv.req({"operation": "consolidate", "min_similarity": 0.95})

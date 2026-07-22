@@ -314,6 +314,11 @@ records were tombstoned. There is no LLM summarization — this is mechanical
 dedup only. Use a conservative threshold: too low merges genuinely distinct
 memories.
 
+**Provenance:** before a loser is tombstoned, the survivor records a
+`supersedes` relationship pointing at it, so a merge is auditable lineage rather
+than silent data loss — the memory inspector (and `get`/`search`, which return
+`relationships`) can show exactly what a surviving memory absorbed.
+
 ---
 
 ### `search`

@@ -937,10 +937,15 @@ static size_t merge_cluster(AegisDB *db, MemoryRecord *recs, size_t n,
     if (qe_update(db, survivor, &patch, ns, &upd) == AEGIS_OK) record_free(&upd);
     free(utags);
 
-    /* tombstone the losers */
+    /* tombstone the losers, recording provenance first: the survivor `supersedes`
+     * each loser (a merge should be auditable lineage, not silent data loss — the
+     * inspector can then show what a memory absorbed). The link is added while the
+     * loser still exists (qe_relate requires both endpoints), then it's deleted.
+     * Best-effort: a failed relate (e.g. rel cap hit) doesn't block the merge. */
     size_t merged = 0;
     for (size_t i = 0; i < n; i++) {
         if (recs[i].id == survivor) continue;
+        qe_relate(db, survivor, recs[i].id, "supersedes", ns);
         if (qe_delete(db, recs[i].id, ns) == AEGIS_OK) merged++;
     }
     return merged;
