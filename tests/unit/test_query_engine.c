@@ -842,6 +842,71 @@ static void test_export_and_purge(void) {
     free(recs);
 }
 
+/* Temporal reads (ROADMAP 3.1): history is the full version trail; get_as_of
+ * reconstructs the record as it was at a past time. */
+static void test_history_and_as_of(void) {
+    MemoryRecord in = make_input(MEM_SEMANTIC, "v1");
+    in.confidence = 1.0f;
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &in, NULL, 0, &out));
+    uint64_t id = out.id, t1 = out.updated;
+    record_free(&out);
+
+    usleep(3000); /* distinct updated timestamps */
+    UpdatePatch p = {0};
+    p.has_data = 1;
+    p.data = "v2";
+    p.data_len = 2;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_update(&g_db, id, &p, NULL, &out));
+    uint64_t t2 = out.updated;
+    record_free(&out);
+
+    usleep(3000);
+    p.data = "v3";
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_update(&g_db, id, &p, NULL, &out));
+    uint64_t t3 = out.updated;
+    record_free(&out);
+    TEST_ASSERT_TRUE(t1 < t2 && t2 < t3);
+
+    /* history: three versions in causal order */
+    MemoryRecord *vers = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_history(&g_db, id, NULL, &vers, &n));
+    TEST_ASSERT_EQUAL_size_t(3, n);
+    TEST_ASSERT_EQUAL_MEMORY("v1", vers[0].data, 2);
+    TEST_ASSERT_EQUAL_MEMORY("v3", vers[2].data, 2);
+    for (size_t i = 0; i < n; i++) record_free(&vers[i]);
+    free(vers);
+
+    /* point-in-time reconstruction */
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_get_as_of(&g_db, id, NULL, t1, &out));
+    TEST_ASSERT_EQUAL_MEMORY("v1", out.data, 2);
+    record_free(&out);
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_get_as_of(&g_db, id, NULL, t2, &out));
+    TEST_ASSERT_EQUAL_MEMORY("v2", out.data, 2);
+    record_free(&out);
+    /* before it existed */
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_get_as_of(&g_db, id, NULL, t1 - 1, &out));
+
+    /* after delete: current is gone, but the pre-delete past is intact */
+    usleep(3000);
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_delete(&g_db, id, NULL));
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_get(&g_db, id, NULL, &out));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_get_as_of(&g_db, id, NULL, t3, &out));
+    TEST_ASSERT_EQUAL_MEMORY("v3", out.data, 2);
+    record_free(&out);
+
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_history(&g_db, id, NULL, &vers, &n));
+    TEST_ASSERT_EQUAL_size_t(4, n); /* + the tombstone */
+    TEST_ASSERT_TRUE(vers[3].deleted);
+    for (size_t i = 0; i < n; i++) record_free(&vers[i]);
+    free(vers);
+
+    /* unknown id */
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_history(&g_db, 999999, NULL, &vers, &n));
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_get_as_of(&g_db, 999999, NULL, t3, &out));
+}
+
 static void test_working_memory_promote(void) {
     MemoryRecord in = make_input(MEM_WORKING, "scratch note");
     MemoryRecord out;
@@ -1053,6 +1118,7 @@ int main(void) {
     RUN_TEST(test_consolidate);
     RUN_TEST(test_forget);
     RUN_TEST(test_export_and_purge);
+    RUN_TEST(test_history_and_as_of);
     RUN_TEST(test_working_memory_promote);
     RUN_TEST(test_relate_and_traverse);
     RUN_TEST(test_traverse_wide_graph);

@@ -212,6 +212,45 @@ Retrieve a memory by ID.
 }
 ```
 
+**Point-in-time (`as_of`)**: pass `as_of` (epoch ms) to get the record **as it was
+at that time** — the version with the greatest `updated` ≤ `as_of`, reconstructed
+from the log. Returns `NOT_FOUND` if the record did not yet exist, or had been
+deleted, by then. Absent `as_of` = the current version.
+
+```json
+{ "operation": "get", "id": 42, "as_of": 1719400000000 }
+```
+
+---
+
+### `history`
+
+The full version trail of a record (ROADMAP 3.1) — the audit answer to "what did
+the agent know, and when?". Returns every version still in the log, in causal
+(append) order, each annotated with its validity interval and `deleted` flag.
+Namespace-scoped like `get` (a cross-tenant id reads as `NOT_FOUND`).
+
+```json
+{ "operation": "history", "id": 42 }
+→ { "ok": true, "id": 42, "count": 3, "versions": [
+     { "...": "MemoryRecord", "valid_from": 1719400000000,
+       "valid_to": 1719400005000, "deleted": false },
+     { "...": "MemoryRecord", "valid_from": 1719400005000,
+       "valid_to": 0, "deleted": false }
+   ] }
+```
+
+Each version's `valid_from` is its `updated`; `valid_to` is the next version's
+`updated` (`0` = still current). The final entry is a tombstone (`deleted:true`)
+if the record was deleted.
+
+> **History depth is bounded by compaction.** These reads reconstruct from the
+> on-disk log, and compaction reclaims superseded versions and tombstones — so
+> after a compaction pass, history reflects only what the log still holds
+> (typically the current version). For a durable archival trail, snapshot before
+> compacting, or defer compaction. This is point-in-time reconstruction over the
+> live log, not an immutable audit ledger.
+
 ---
 
 ### `update` (semantic only)

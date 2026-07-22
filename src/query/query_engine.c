@@ -944,6 +944,124 @@ aegis_status_t qe_purge_namespace(AegisDB *db, const char *ns, int dry_run,
     return AEGIS_OK;
 }
 
+/* --- Temporal / point-in-time reads (ROADMAP 3.1) --------------------------
+ * The append-only log holds every version of every record (updates append a new
+ * version, deletes append a tombstone), so history and "as of time T" reads are
+ * a log scan. These are diagnostic/audit ops — O(log size) — run under log_lock
+ * so a concurrent compaction swap can't move the file underneath the scan. */
+
+typedef struct {
+    uint64_t id;
+    MemoryRecord *arr;
+    size_t n, cap;
+    int err;
+} HistCtx;
+
+static int history_cb(uint64_t offset, const uint8_t *payload, size_t len,
+                      void *ctx) {
+    (void)offset;
+    HistCtx *h = ctx;
+    MemoryRecord r;
+    if (record_decode(payload, len, &r) != 0) return 0;
+    if (r.id != h->id) {
+        record_free(&r);
+        return 0;
+    }
+    if (h->n == h->cap) {
+        size_t nc = h->cap ? h->cap * 2 : 8;
+        MemoryRecord *g = realloc(h->arr, nc * sizeof(MemoryRecord));
+        if (!g) {
+            record_free(&r);
+            h->err = 1;
+            return 1; /* abort scan */
+        }
+        h->arr = g;
+        h->cap = nc;
+    }
+    h->arr[h->n++] = r; /* keep in causal (log/append) order; ownership moved */
+    return 0;
+}
+
+aegis_status_t qe_history(AegisDB *db, uint64_t id, const char *ns,
+                          MemoryRecord **out_versions, size_t *out_n) {
+    aegis_status_t st = require_phase(db, 1);
+    if (st != AEGIS_OK) return st;
+    *out_versions = NULL;
+    *out_n = 0;
+
+    HistCtx h = {id, NULL, 0, 0, 0};
+    LogScanResult res;
+    pthread_rwlock_rdlock(&db->log_lock);
+    int rc = log_scan(&db->log, 0, history_cb, &h, &res);
+    pthread_rwlock_unlock(&db->log_lock);
+    if (rc != 0 || h.err) {
+        for (size_t i = 0; i < h.n; i++) record_free(&h.arr[i]);
+        free(h.arr);
+        return AEGIS_ERR_INTERNAL;
+    }
+    if (h.n == 0) return AEGIS_ERR_NOT_FOUND; /* id never existed */
+    /* All versions of an id share its agent_id, so one namespace check suffices;
+     * a cross-tenant id reads as NOT_FOUND (no existence leak). */
+    if (ns_denies(ns, &h.arr[h.n - 1])) {
+        for (size_t i = 0; i < h.n; i++) record_free(&h.arr[i]);
+        free(h.arr);
+        return AEGIS_ERR_NOT_FOUND;
+    }
+    *out_versions = h.arr;
+    *out_n = h.n;
+    return AEGIS_OK;
+}
+
+typedef struct {
+    uint64_t id;
+    uint64_t as_of;
+    int have;
+    MemoryRecord best;
+} AsOfCtx;
+
+static int as_of_cb(uint64_t offset, const uint8_t *payload, size_t len,
+                    void *ctx) {
+    (void)offset;
+    AsOfCtx *a = ctx;
+    MemoryRecord r;
+    if (record_decode(payload, len, &r) != 0) return 0;
+    if (r.id != a->id || r.updated > a->as_of) {
+        record_free(&r);
+        return 0;
+    }
+    /* Scan is in append (causal) order, so the last version with updated <= as_of
+     * is the one live at that time. */
+    if (a->have) record_free(&a->best);
+    a->best = r;
+    a->have = 1;
+    return 0;
+}
+
+aegis_status_t qe_get_as_of(AegisDB *db, uint64_t id, const char *ns,
+                            uint64_t as_of, MemoryRecord *out) {
+    aegis_status_t st = require_phase(db, 1);
+    if (st != AEGIS_OK) return st;
+
+    AsOfCtx a = {id, as_of, 0, {0}};
+    LogScanResult res;
+    pthread_rwlock_rdlock(&db->log_lock);
+    int rc = log_scan(&db->log, 0, as_of_cb, &a, &res);
+    pthread_rwlock_unlock(&db->log_lock);
+    if (rc != 0) {
+        if (a.have) record_free(&a.best);
+        return AEGIS_ERR_INTERNAL;
+    }
+    if (!a.have) return AEGIS_ERR_NOT_FOUND; /* did not exist at as_of */
+    /* A tombstone or another tenant's record reads as NOT_FOUND: as of that
+     * time, this caller "knew" nothing here. */
+    if (a.best.deleted || ns_denies(ns, &a.best)) {
+        record_free(&a.best);
+        return AEGIS_ERR_NOT_FOUND;
+    }
+    *out = a.best; /* move ownership */
+    return AEGIS_OK;
+}
+
 size_t qe_sweep_expired(AegisDB *db, uint64_t now) {
     /* Collect expired live ids from an in-memory hash scan (no record reads —
      * expires_at lives in the HashEntry), then tombstone each so compaction can
@@ -1785,11 +1903,44 @@ static cJSON *handle_get(AegisDB *db, const cJSON *req, const char *ns) {
     if (jr_u64(req, "id", &id) != 0) return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     const char *agent = ns ? ns : jr_str(req, "agent_id", NULL);
     MemoryRecord out;
-    aegis_status_t st = qe_get(db, id, agent, &out);
+    /* Point-in-time get (ROADMAP 3.1): `as_of` (epoch ms) returns the record as
+     * it was at that time, reconstructed from the log; absent = current. */
+    uint64_t as_of;
+    aegis_status_t st = (jr_u64(req, "as_of", &as_of) == 0)
+                            ? qe_get_as_of(db, id, agent, as_of, &out)
+                            : qe_get(db, id, agent, &out);
     if (st != AEGIS_OK) return json_error_status(st);
     cJSON *r = resp_record(&out, want_embeddings(req));
     record_free(&out);
     return r;
+}
+
+static cJSON *handle_history(AegisDB *db, const cJSON *req, const char *ns) {
+    uint64_t id;
+    if (jr_u64(req, "id", &id) != 0) return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    const char *agent = ns ? ns : jr_str(req, "agent_id", NULL);
+    MemoryRecord *vers = NULL;
+    size_t n = 0;
+    aegis_status_t st = qe_history(db, id, agent, &vers, &n);
+    if (st != AEGIS_OK) return json_error_status(st);
+
+    int inc_emb = want_embeddings(req);
+    cJSON *o = json_ok();
+    cJSON_AddNumberToObject(o, "id", (double)id);
+    cJSON *arr = cJSON_AddArrayToObject(o, "versions");
+    for (size_t i = 0; i < n; i++) {
+        cJSON *v = json_record(&vers[i], inc_emb);
+        /* validity interval: [updated, next version's updated); 0 = still current */
+        cJSON_AddNumberToObject(v, "valid_from", (double)vers[i].updated);
+        cJSON_AddNumberToObject(v, "valid_to",
+                                (double)(i + 1 < n ? vers[i + 1].updated : 0));
+        cJSON_AddBoolToObject(v, "deleted", vers[i].deleted);
+        cJSON_AddItemToArray(arr, v);
+        record_free(&vers[i]);
+    }
+    free(vers);
+    cJSON_AddNumberToObject(o, "count", (double)n);
+    return o;
 }
 
 static cJSON *handle_update(AegisDB *db, const cJSON *req, const char *ns) {
@@ -2396,6 +2547,7 @@ static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
     }
     if (strcmp(op, "insert") == 0) return handle_insert(db, req, ctx.ns);
     if (strcmp(op, "get") == 0) return handle_get(db, req, ctx.ns);
+    if (strcmp(op, "history") == 0) return handle_history(db, req, ctx.ns);
     if (strcmp(op, "update") == 0) return handle_update(db, req, ctx.ns);
     if (strcmp(op, "delete") == 0) return handle_delete(db, req, ctx.ns);
     if (strcmp(op, "export") == 0) return handle_export(db, req, ctx.ns);

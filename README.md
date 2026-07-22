@@ -351,7 +351,8 @@ echo '{"operation":"search","tags":["user"],"match":"all","top_k":10}' | nc -q1 
 Supported operations: `ping`, `insert` (episodic/semantic/working, single or
 batch), `get`, `update` (semantic), `delete` (by id or query), `search`
 (time/tags/embedding), `count`, `consolidate`, `forget`, `export`, `purge`,
-`promote`, `relate`, `traverse`, `stats`, `snapshot`, and token administration
+`history` (+ point-in-time `get` via `as_of`), `promote`, `relate`, `traverse`,
+`stats`, `snapshot`, and token administration
 (`token_list`/`token_add`/`token_revoke`).
 
 ### Python client example
