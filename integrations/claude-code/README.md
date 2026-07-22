@@ -350,7 +350,12 @@ explicit overrides.
 | `AEGIS_RECALL_CHAR_BUDGET` | `2000` | total chars of injected memory text per turn; keeps the top-ranked slice, drops the rest (0 = unlimited) |
 | `AEGIS_CAPTURE_ENABLED` | `true` | toggle automatic capture |
 | `AEGIS_CAPTURE_SCOPE` | `session` | `session` (SessionEnd) \| `turn` (Stop) |
-| `AEGIS_CAPTURE_MIN_SALIENCE` | `0.5` | below this, nothing is captured |
+| `AEGIS_CAPTURE_MIN_SALIENCE` | `0.5` | below this, nothing is captured (heuristic path) |
+| `AEGIS_EXTRACT_MODE` | `none` | LLM fact extraction for capture: `none` (off → heuristic markers) \| `fake` (tests) \| `claude-code` \| `anthropic` \| `openai`. When on, a session is distilled into durable facts stored as **semantic** memories (so they dedup/supersede and resist decay) instead of raw marker-matched sentences |
+| `AEGIS_EXTRACT_MODEL` | — | optional model override for the extraction backend |
+| `AEGIS_EXTRACT_API_BASE` | — | `openai` backend: base URL for an OpenAI-compatible endpoint |
+| `AEGIS_EXTRACT_MAX_FACTS` | `12` | cap facts stored per session |
+| `AEGIS_EXTRACT_MAX_INPUT_CHARS` | `24000` | cap transcript chars sent to the model (keeps the most recent) |
 | `AEGIS_SUMMARY_MODE` | `none` | `aegisdb-summarize` backend: `none` (off) \| `fake` (tests) \| `claude-code` \| `anthropic` \| `openai` |
 | `AEGIS_SUMMARY_MODEL` | — | optional model override for the selected backend |
 | `AEGIS_SUMMARY_API_BASE` | — | `openai` backend: base URL for an OpenAI-compatible endpoint |

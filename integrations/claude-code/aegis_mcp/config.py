@@ -61,6 +61,16 @@ class Config:
     summary_min_confidence: float = 0.0  # skip a summary below this confidence
     summary_scan_top_k: int = 1000  # candidate records pulled per run
 
+    # LLM fact extraction for capture (opt-in; see ROADMAP 2.1). Default `none`
+    # keeps the heuristic capture path. When enabled, a session transcript is
+    # distilled into durable facts stored as semantic memories instead of raw
+    # marker-matched sentences.
+    extract_mode: str = "none"  # "none"|"fake"|"claude-code"|"anthropic"|"openai"
+    extract_model: str = ""  # optional model override for the selected backend
+    extract_api_base: str = ""  # openai backend: base URL for openai-compatible APIs
+    extract_max_facts: int = 12  # cap facts stored per session
+    extract_max_input_chars: int = 24000  # cap transcript chars sent to the model
+
 
 # Map each config field to its environment variable name.
 _ENV = {
@@ -93,6 +103,11 @@ _ENV = {
     "summary_max_clusters_per_run": "AEGIS_SUMMARY_MAX_CLUSTERS_PER_RUN",
     "summary_min_confidence": "AEGIS_SUMMARY_MIN_CONFIDENCE",
     "summary_scan_top_k": "AEGIS_SUMMARY_SCAN_TOP_K",
+    "extract_mode": "AEGIS_EXTRACT_MODE",
+    "extract_model": "AEGIS_EXTRACT_MODEL",
+    "extract_api_base": "AEGIS_EXTRACT_API_BASE",
+    "extract_max_facts": "AEGIS_EXTRACT_MAX_FACTS",
+    "extract_max_input_chars": "AEGIS_EXTRACT_MAX_INPUT_CHARS",
 }
 
 _BOOL = {"recall_enabled", "capture_enabled"}
@@ -102,6 +117,7 @@ _INT = {
     "recall_max_chars_per_memory", "recall_char_budget",
     "summary_min_age_ms", "summary_min_cluster", "summary_max_cluster",
     "summary_max_clusters_per_run", "summary_scan_top_k",
+    "extract_max_facts", "extract_max_input_chars",
 }
 _FLOAT = {"recall_min_score", "recall_dedup_threshold", "capture_min_salience",
           "summary_max_importance", "summary_min_confidence"}
