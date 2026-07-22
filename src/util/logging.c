@@ -82,7 +82,10 @@ void aegis_log_emit(AegisLogLevel level, const char *fmt, ...) {
     int len = snprintf(line, sizeof(line), "%s %s [aegisdb] %s\n", ts,
                        level_tag(level), msg);
     if (len < 0) return;
-    if (len > (int)sizeof(line)) len = (int)sizeof(line);
+    /* On truncation snprintf returns the would-be length; the buffer holds only
+     * sizeof-1 chars + NUL. Clamp to the actual char count so we never write the
+     * trailing NUL or read one byte past the buffer. */
+    if (len >= (int)sizeof(line)) len = (int)sizeof(line) - 1;
     fwrite(line, 1, (size_t)len, stderr);
     fflush(stderr);
 }

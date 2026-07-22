@@ -12,4 +12,8 @@ int fs_mkdir_p(const char *path);
  * without this). Returns 0 on success, -1 on failure (errno set). */
 int fs_fsync_dir(const char *dir);
 
+/* fsync the directory containing `path` (the parent of a file just renamed or
+ * created there). Returns 0 on success, -1 on failure (errno set). */
+int fs_fsync_parent(const char *path);
+
 #endif /* AEGISDB_FSUTIL_H */

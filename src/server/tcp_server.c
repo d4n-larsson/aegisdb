@@ -364,6 +364,9 @@ static int make_listener(int port) {
 
 int tcp_server_run(AegisDB *db) {
     signal(SIGPIPE, SIG_IGN);
+    /* Clear any stop request left by a prior run/partial-spawn so a restart in
+     * the same process (e.g. tests) doesn't exit immediately. */
+    atomic_store_explicit(&g_stop, 0, memory_order_relaxed);
 
     int nthreads = db->config.io_threads;
     if (nthreads < 1) nthreads = 1;

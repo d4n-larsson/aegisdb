@@ -34,3 +34,16 @@ int fs_fsync_dir(const char *dir) {
     if (close(fd) != 0) rc = -1;
     return rc;
 }
+
+int fs_fsync_parent(const char *path) {
+    char dir[1400];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (slash == dir)
+        dir[1] = '\0'; /* parent is the root "/" */
+    else if (slash)
+        *slash = '\0';
+    else
+        return fs_fsync_dir("."); /* bare filename -> current directory */
+    return fs_fsync_dir(dir);
+}

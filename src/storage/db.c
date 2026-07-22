@@ -282,7 +282,7 @@ static int copy_log_prefix(int src_fd, const char *dst_path, uint64_t n) {
         if (fwrite(buf, 1, (size_t)got, dst) != (size_t)got) { ok = 0; break; }
         done += (uint64_t)got;
     }
-    if (fflush(dst) != 0) ok = 0;
+    if (ok && (fflush(dst) != 0 || fsync(fileno(dst)) != 0)) ok = 0;
     if (fclose(dst) != 0) ok = 0;
     if (!ok) unlink(dst_path);
     return ok ? 0 : -1;
@@ -298,6 +298,7 @@ static int write_meta_file(const char *path, uint64_t nid) {
     memcpy(buf + 5, &ver, 4);
     memcpy(buf + 9, &nid, 8);
     int ok = (fwrite(buf, 1, sizeof(buf), f) == sizeof(buf));
+    if (ok && (fflush(f) != 0 || fsync(fileno(f)) != 0)) ok = 0;
     if (fclose(f) != 0) ok = 0;
     if (!ok) unlink(path);
     return ok ? 0 : -1;
@@ -368,15 +369,23 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
                       (unsigned long long)covered, live,
                       (unsigned long long)nid, db->config.embedding_dimensions,
                       enc_fields);
+    if (mn < 0 || (size_t)mn >= sizeof(man)) {
+        LOG_ERROR("snapshot: manifest too large");
+        return DB_SNAPSHOT_ERR; /* truncated: mn would over-read man in fwrite */
+    }
     snprintf(manifest, sizeof(manifest), "%s/manifest.json", dir);
     FILE *mf = fopen(manifest, "wb");
-    if (!mf || mn < 0 || fwrite(man, 1, (size_t)mn, mf) != (size_t)mn) {
-        if (mf) fclose(mf);
+    int mok = (mf && fwrite(man, 1, (size_t)mn, mf) == (size_t)mn);
+    if (mok && (fflush(mf) != 0 || fsync(fileno(mf)) != 0)) mok = 0;
+    if (mf && fclose(mf) != 0) mok = 0;
+    if (!mok) {
         unlink(manifest);
         LOG_ERROR("snapshot: manifest write failed (%s)", manifest);
         return DB_SNAPSHOT_ERR;
     }
-    fclose(mf);
+    /* Make the snapshot's directory entries durable so a crash right after this
+     * call can't leave a snapshot reported as written but partially absent. */
+    fs_fsync_dir(dir);
 
     if (out) {
         snprintf(out->dir, sizeof(out->dir), "%s", dir);

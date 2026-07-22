@@ -119,13 +119,28 @@ int tag_index_add(TagIndex *t, const char *tag, uint64_t id) {
 }
 
 void tag_index_remove(TagIndex *t, const char *tag, uint64_t id) {
-    TagNode *n = find_node(t, tag);
-    if (!n) return;
-    size_t pos = id_lower_bound(n->ids, n->n, id);
-    if (pos < n->n && n->ids[pos] == id) {
-        memmove(&n->ids[pos], &n->ids[pos + 1],
-                (n->n - pos - 1) * sizeof(uint64_t));
-        n->n--;
+    size_t b = hash_str(tag);
+    TagNode *prev = NULL;
+    for (TagNode *n = t->buckets[b]; n; prev = n, n = n->next) {
+        if (strcmp(n->tag, tag) != 0) continue;
+        size_t pos = id_lower_bound(n->ids, n->n, id);
+        if (pos < n->n && n->ids[pos] == id) {
+            memmove(&n->ids[pos], &n->ids[pos + 1],
+                    (n->n - pos - 1) * sizeof(uint64_t));
+            n->n--;
+        }
+        /* Reclaim a now-empty node instead of leaving it in the chain, where
+         * repeated add/remove of distinct tags would grow the bucket unbounded. */
+        if (n->n == 0) {
+            if (prev)
+                prev->next = n->next;
+            else
+                t->buckets[b] = n->next;
+            free(n->ids);
+            free(n->tag);
+            free(n);
+        }
+        return;
     }
 }
 

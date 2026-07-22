@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <unistd.h>
 
+#include "aegisdb/fsutil.h"
 #include "aegisdb/log.h"
 #include "aegisdb/logging.h"
 
@@ -80,6 +81,8 @@ int encrypt_migrate_run(const Config *cfg) {
         unlink(path_new);
         return -1;
     }
+    /* Make the swap durable: fsync the directory so the rename survives a crash. */
+    fs_fsync_parent(path_log);
 
     /* Drop the now-stale plaintext checkpoints; the next start rebuilds encrypted
      * ones from the log. (Even if left, a plaintext checkpoint fails to decrypt

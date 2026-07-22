@@ -165,6 +165,31 @@ static void test_decode_rejects_truncated(void) {
     record_free(&r);
 }
 
+/* A corrupt/tampered frame carrying an out-of-range MemoryType (only 0..2 are
+ * valid) must be rejected rather than decoded into an invalid enum. */
+static void test_decode_rejects_bad_type(void) {
+    MemoryRecord r;
+    record_init(&r);
+    r.id = 7;
+    r.type = MEM_EPISODIC;
+    const char *payload = "x";
+    r.data = strdup(payload);
+    r.data_len = 1;
+
+    uint8_t *buf = NULL;
+    size_t len = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&r, &buf, &len));
+    /* Layout: ver(1) + id(8) + type(1)... -> the type byte is at offset 9. */
+    TEST_ASSERT_GREATER_THAN_size_t(9, len);
+    buf[9] = 5; /* not a valid MemoryType */
+
+    MemoryRecord d;
+    TEST_ASSERT_EQUAL_INT(-1, record_decode(buf, len, &d));
+
+    free(buf);
+    record_free(&r);
+}
+
 static void test_clone_is_deep(void) {
     MemoryRecord r;
     record_init(&r);
@@ -283,6 +308,7 @@ int main(void) {
     RUN_TEST(test_encode_decode_with_embedding_and_agent);
     RUN_TEST(test_encode_decode_with_relationship);
     RUN_TEST(test_decode_rejects_truncated);
+    RUN_TEST(test_decode_rejects_bad_type);
     RUN_TEST(test_decode_rejects_embedding_overflow);
     RUN_TEST(test_encode_rejects_relationship_overflow);
     RUN_TEST(test_clone_rejects_embedding_overflow);

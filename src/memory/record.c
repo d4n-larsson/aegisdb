@@ -191,11 +191,19 @@ int record_encode(const MemoryRecord *r, uint8_t **out, size_t *out_len) {
     put_u64(&b, r->expires_at);
     put_lenstr(&b, r->agent_id, r->agent_id ? strlen(r->agent_id) : 0);
 
+    /* Like rel_count below, these counts are width-limited on the wire; a silent
+     * truncation would desync decode (the element loops write the untruncated
+     * count) and produce an undecodable, durable frame. Refuse instead. */
+    if (r->tag_count > UINT16_MAX) { free(b.p); return -1; }
     put_u16(&b, (uint16_t)r->tag_count);
     for (size_t i = 0; i < r->tag_count; i++)
         put_lenstr(&b, r->tags[i], strlen(r->tags[i]));
 
     /* v2: vec_count, dim, then vec_count*dim floats (contiguous vectors). */
+    if (r->vec_count > UINT32_MAX || r->embedding_dim > UINT32_MAX) {
+        free(b.p);
+        return -1;
+    }
     put_u32(&b, (uint32_t)r->vec_count);
     put_u32(&b, (uint32_t)r->embedding_dim);
     for (size_t i = 0; i < r->vec_count * r->embedding_dim; i++)
@@ -287,6 +295,7 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
     if (ver != 1 && ver != 2) goto fail; /* read v1 (single vec) and v2 */
     out->id = get_u64(&c);
     out->type = (MemoryType)get_u8(&c);
+    if (out->type > MEM_SEMANTIC) goto fail; /* reject a corrupt/out-of-range enum */
     out->created = get_u64(&c);
     out->updated = get_u64(&c);
     out->importance = get_f32(&c);
