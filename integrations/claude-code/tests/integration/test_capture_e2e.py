@@ -46,6 +46,32 @@ class TestCaptureE2E(unittest.TestCase):
             self.assertTrue(res["ok"])
             self.assertTrue(any("tabs" in m["text"].lower() for m in res["memories"]))
 
+    def test_extraction_stores_semantic_facts_recallable(self):
+        """ROADMAP 2.1: with extract_mode set, capture distils the transcript into
+        semantic facts that land in the DB and are recallable."""
+        with AegisServer() as srv:
+            cfg = make_config(srv, extract_mode="fake")
+            provider = FakeProvider(srv.dim)
+            transcript = _write_transcript([
+                ("assistant", "We decided to deploy production via make ship."),
+                ("assistant", "The database connection pool max is twenty."),
+                ("user", "do not remember my secret api key sk-xyz"),  # ephemeral
+            ])
+            try:
+                stored = run_capture({"transcript_path": transcript}, cfg, provider)
+                self.assertGreaterEqual(stored, 2)
+            finally:
+                os.remove(transcript)
+
+            tools = MemoryTools(cfg, AegisClient(cfg.aegis_host, cfg.aegis_port), provider)
+            # facts are stored as semantic (type visible via a broad search)
+            res = tools.search(query="how do we deploy?", top_k=10)
+            self.assertTrue(res["ok"])
+            texts = " ".join(m["text"].lower() for m in res["memories"])
+            self.assertIn("make ship", texts)
+            # the ephemeral secret was dropped before extraction
+            self.assertNotIn("secret api key", texts)
+
     def test_nonsalient_session_stores_nothing(self):
         with AegisServer() as srv:
             cfg = make_config(srv)

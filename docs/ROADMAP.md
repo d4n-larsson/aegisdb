@@ -89,11 +89,17 @@ end. Nothing here needs a model on the hot path.*
 
 ---
 
-## Horizon 2 — Next: memory that stays coherent  🚧 *in progress*
+## Horizon 2 — Next: memory that stays coherent  🚧 *core shipped*
+
+*2.1 extraction, 2.2 dedup+provenance, and 2.3 decay/forgetting are all shipped
+and measurable. The one remaining thread is wiring extracted facts through
+supersession when they **contradict** an existing memory (recall-then-compare) —
+both halves now exist (extraction + the server `supersedes` mechanism); connecting
+them is the follow-up.*
 
 *Theme: the memory-quality layer. Turn existing primitives into real policy.*
 
-### 2.1 Extraction (write-path quality)
+### 2.1 Extraction (write-path quality) — *shipped (`extract_mode`)*
 - **Why now:** today the caller decides what to insert. Owning "turn this
   conversation into durable facts worth keeping" is the difference between a DB
   and a memory *product* (mem0's core pitch).
@@ -102,6 +108,17 @@ end. Nothing here needs a model on the hot path.*
   writes them through the dedup/contradiction policy below.
 - **Leverages:** the existing summarizer provider seam
   (`none`/`fake`/`claude-code`/`anthropic`/`openai`) — reuse it, don't reinvent.
+- **Shipped:** `aegis_mcp/extract.py` — an `ExtractionProvider` seam
+  (`none`/`fake`/`claude-code`/`anthropic`/`openai`). When `extract_mode` is on,
+  `run_capture` distils the transcript into durable facts stored as **semantic**
+  memories (so they dedup/supersede via 2.2 and resist decay via 2.3) instead of
+  raw marker-matched sentences; ephemeral content is dropped before the model
+  sees it; the heuristic marker path is the `none` fallback. Robust JSON parsing,
+  bounded input, best-effort (never breaks capture).
+- **Next:** route extracted facts through supersession when they contradict an
+  existing memory (recall-then-compare) — the semantic contradiction detection
+  deferred from 2.2, now that both extraction and the server-side `supersedes`
+  mechanism exist.
 
 ### 2.2 Dedup + contradiction resolution — *provenance + measurement shipped*
 - **Why now:** unbounded, self-contradicting memory is worse than none.

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 from .client import AegisClient
 from .embeddings import EmbeddingProvider
+from .extract import make_extraction_provider
 from .tools import MemoryTools
 
 # Phrases that signal a salient outcome worth remembering, with a weight.
@@ -138,13 +139,64 @@ def filter_candidates(candidates, config) -> list:
             if not c.ephemeral and c.salience >= config.capture_min_salience]
 
 
+def _drop_ephemeral(texts: list) -> list:
+    """Remove snippets the user marked not-for-long-term-memory (FR-014) before
+    they reach the extractor, so the ephemeral guarantee holds regardless of the
+    model's behavior."""
+    return [t for t in texts
+            if not any(m in t.lower() for m in _EPHEMERAL_MARKERS)]
+
+
+def extract_facts(texts: list, config) -> list | None:
+    """LLM extraction path (ROADMAP 2.1): distil the transcript into durable
+    Facts. Returns a list[Fact] (possibly empty) when an extractor ran, or None
+    when extraction is disabled/unavailable/failed so the caller falls back to
+    heuristic capture. Never raises."""
+    provider = make_extraction_provider(config)
+    if not provider.available():
+        return None
+    kept = _drop_ephemeral(texts)
+    if not kept:
+        return []
+    blob = "\n".join(kept)
+    cap = getattr(config, "extract_max_input_chars", 24000)
+    if cap and len(blob) > cap:
+        blob = blob[-cap:]  # keep the most recent turns
+    try:
+        return provider.extract(blob, getattr(config, "extract_max_facts", 12))
+    except Exception:
+        return None  # never let extraction break capture
+
+
 def run_capture(event: dict, config, provider: EmbeddingProvider,
                 client: AegisClient | None = None) -> int:
     """Capture salient memories for an ended session. Returns the number stored.
-    Never raises; backend failures result in 0 stored (FR-009)."""
+    Never raises; backend failures result in 0 stored (FR-009).
+
+    When LLM extraction is enabled (`extract_mode` != none) and available, the
+    transcript is distilled into durable facts stored as SEMANTIC memories (so
+    they participate in dedup/supersession and are protected from decay). The
+    heuristic marker path is the fallback when extraction is off or fails."""
     if not config.capture_enabled:
         return 0
     texts = load_transcript(event.get("transcript_path"))
+
+    facts = extract_facts(texts, config)
+    if facts is not None:  # extractor ran (even if it found nothing)
+        if not facts:
+            return 0
+        if client is None:
+            client = AegisClient.from_config(config)
+        tools = MemoryTools(config, client, provider)
+        stored = 0
+        for f in facts:
+            res = tools.save(f.text, tags=f.tags, importance=f.importance,
+                             semantic=True, confidence=f.confidence)
+            if res.get("ok"):
+                stored += 1
+        return stored
+
+    # heuristic fallback (extraction disabled/unavailable)
     survivors = filter_candidates(derive_candidates(texts, config), config)
     if not survivors:
         return 0
