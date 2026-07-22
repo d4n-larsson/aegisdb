@@ -110,6 +110,21 @@ aegis_status_t qe_count(AegisDB *db, const SearchParams *p, size_t *out_count,
  * Requires at least one positive filter (type/tags/time) — refuses an
  * unfiltered bulk delete with INVALID_REQUEST. Returns the count in
  * *out_deleted. */
+/* Export a subject's records (ROADMAP 3.2): live records owned by `ns`, id-order,
+ * with id > after_id, up to `limit`. Allocates *out_records (record_free each,
+ * then free the array); *out_has_more (may be NULL) signals another page. Used
+ * for compliance "export what you store about me". */
+aegis_status_t qe_export(AegisDB *db, const char *ns, uint64_t after_id,
+                         size_t limit, MemoryRecord **out_records, size_t *out_n,
+                         int *out_has_more);
+
+/* Right-to-be-forgotten (ROADMAP 3.2): tombstone every record owned by `ns`
+ * (which must be non-empty — a global purge is refused). The caller then runs
+ * compaction so the payloads leave the on-disk log. `dry_run` counts without
+ * deleting. Reports the count in *out_count. */
+aegis_status_t qe_purge_namespace(AegisDB *db, const char *ns, int dry_run,
+                                  size_t *out_count);
+
 aegis_status_t qe_delete_by_query(AegisDB *db, const SearchParams *p,
                                   const char *ns, size_t *out_deleted);
 

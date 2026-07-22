@@ -178,15 +178,22 @@ behind the provider seam.*
   overwritten.
 - **Leverages:** the append-only log, snapshots, recovery replay.
 
-### 3.2 Right-to-be-forgotten & export
+### 3.2 Right-to-be-forgotten & export — *shipped (`export` / `purge`)*
 - **Why now:** table stakes for any B2B memory sale. For a *memory* product,
   "forget everything about user X" and "export what you store about me" are not
   optional.
 - **Build:** compliance-grade hard delete scoped by namespace (verified through
   compaction so data actually leaves disk), plus a per-subject export.
 - **Leverages:** namespaces/tenancy, compaction, snapshots.
+- **Shipped:** `export` (subject's records, id-paginated via `after_id`/`cursor`)
+  and `purge` (tombstone every record in a namespace, then compact so the
+  payloads leave `memory.log`). Both are subject-scoped — a namespaced token acts
+  only on its own tenant, a spoofed `agent_id` is ignored, and a subjectless
+  export/purge is refused; `purge` is `rw`-only with a `dry_run` preview.
 - **Done when:** a hard-delete provably removes a subject's data from the log and
-  all indexes after compaction, with a test that greps the on-disk log.
+  all indexes after compaction, with a test that greps the on-disk log. ✅ — the
+  contract test asserts the purged plaintext is absent from `memory.log` after
+  compaction while a co-tenant's data survives.
 
 ### 3.3 Hosted tier & operability
 - **Why now:** distribution. The C core's durability/encryption/replication become
