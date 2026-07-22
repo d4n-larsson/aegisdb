@@ -89,13 +89,13 @@ end. Nothing here needs a model on the hot path.*
 
 ---
 
-## Horizon 2 — Next: memory that stays coherent  🚧 *core shipped*
+## Horizon 2 — Next: memory that stays coherent  ✅ *complete*
 
-*2.1 extraction, 2.2 dedup+provenance, and 2.3 decay/forgetting are all shipped
-and measurable. The one remaining thread is wiring extracted facts through
-supersession when they **contradict** an existing memory (recall-then-compare) —
-both halves now exist (extraction + the server `supersedes` mechanism); connecting
-them is the follow-up.*
+*2.1 extraction (+ contradiction → supersession), 2.2 dedup + provenance, and
+2.3 decay/forgetting are all shipped and measurable. The server owns the
+mechanical primitives (`consolidate`+`supersedes`, `forget`); the integration
+owns the model-driven judgment (extraction, contradiction detection, distillation)
+behind the provider seam.*
 
 *Theme: the memory-quality layer. Turn existing primitives into real policy.*
 
@@ -115,10 +115,13 @@ them is the follow-up.*
   raw marker-matched sentences; ephemeral content is dropped before the model
   sees it; the heuristic marker path is the `none` fallback. Robust JSON parsing,
   bounded input, best-effort (never breaks capture).
-- **Next:** route extracted facts through supersession when they contradict an
-  existing memory (recall-then-compare) — the semantic contradiction detection
-  deferred from 2.2, now that both extraction and the server-side `supersedes`
-  mechanism exist.
+- **Shipped (contradiction → supersession):** on capture, each extracted fact
+  recalls similar existing memories and the extractor judges which it makes
+  obsolete (`judge_supersedes`); those are tombstoned with a `supersedes`
+  provenance link (via `insert` + `relate` + `delete`) instead of accumulating a
+  contradiction. Gated by `extract_supersede` (needs embeddings + a backend);
+  the deterministic `fake` backend makes it testable. This closes the semantic
+  contradiction thread deferred from 2.2.
 
 ### 2.2 Dedup + contradiction resolution — *provenance + measurement shipped*
 - **Why now:** unbounded, self-contradicting memory is worse than none.

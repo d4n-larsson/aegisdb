@@ -70,6 +70,13 @@ class Config:
     extract_api_base: str = ""  # openai backend: base URL for openai-compatible APIs
     extract_max_facts: int = 12  # cap facts stored per session
     extract_max_input_chars: int = 24000  # cap transcript chars sent to the model
+    # Contradiction -> supersession (ROADMAP 2.1 follow-up): when an extracted
+    # fact updates/contradicts an existing memory, replace it (tombstone + a
+    # `supersedes` provenance link) instead of accumulating both. Needs
+    # embeddings (to find similar candidates) + an extractor backend (to judge).
+    extract_supersede: bool = True  # active only when extract_mode is on
+    extract_supersede_top_k: int = 5  # similar candidates considered per new fact
+    extract_supersede_min_score: float = 0.6  # cosine floor for a candidate
 
 
 # Map each config field to its environment variable name.
@@ -108,19 +115,23 @@ _ENV = {
     "extract_api_base": "AEGIS_EXTRACT_API_BASE",
     "extract_max_facts": "AEGIS_EXTRACT_MAX_FACTS",
     "extract_max_input_chars": "AEGIS_EXTRACT_MAX_INPUT_CHARS",
+    "extract_supersede": "AEGIS_EXTRACT_SUPERSEDE",
+    "extract_supersede_top_k": "AEGIS_EXTRACT_SUPERSEDE_TOP_K",
+    "extract_supersede_min_score": "AEGIS_EXTRACT_SUPERSEDE_MIN_SCORE",
 }
 
-_BOOL = {"recall_enabled", "capture_enabled"}
+_BOOL = {"recall_enabled", "capture_enabled", "extract_supersede"}
 _INT = {
     "aegis_port", "connect_timeout_ms", "read_timeout_ms",
     "embedding_dimensions", "recall_time_budget_ms", "recall_top_k",
     "recall_max_chars_per_memory", "recall_char_budget",
     "summary_min_age_ms", "summary_min_cluster", "summary_max_cluster",
     "summary_max_clusters_per_run", "summary_scan_top_k",
-    "extract_max_facts", "extract_max_input_chars",
+    "extract_max_facts", "extract_max_input_chars", "extract_supersede_top_k",
 }
 _FLOAT = {"recall_min_score", "recall_dedup_threshold", "capture_min_salience",
-          "summary_max_importance", "summary_min_confidence"}
+          "summary_max_importance", "summary_min_confidence",
+          "extract_supersede_min_score"}
 
 
 def _coerce(name: str, value):

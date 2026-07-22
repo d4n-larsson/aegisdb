@@ -7,7 +7,7 @@ from types import SimpleNamespace
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from aegis_mcp.extract import (Fact, FakeExtractionProvider, NoneExtractionProvider,
-                               _parse_facts, make_extraction_provider)
+                               _parse_facts, _parse_indices, make_extraction_provider)
 
 
 class TestParseFacts(unittest.TestCase):
@@ -66,6 +66,39 @@ class TestFakeProvider(unittest.TestCase):
         facts = p.extract(text, 12)
         self.assertEqual(len(facts), 2)  # deduped
         self.assertEqual(len(p.extract("a b c d\ne f g h\ni j k l", 2)), 2)  # cap
+
+
+class TestParseIndices(unittest.TestCase):
+    def test_valid_and_bounded(self):
+        self.assertEqual(_parse_indices("[0, 2]", 3), [0, 2])
+        self.assertEqual(_parse_indices("[5]", 3), [])          # out of range dropped
+        self.assertEqual(_parse_indices("[1,1,1]", 3), [1])     # deduped
+        self.assertEqual(_parse_indices("```json\n[0]\n```", 3), [0])
+        self.assertEqual(_parse_indices("supersedes: [1] only", 3), [1])
+
+    def test_malformed_returns_empty(self):
+        self.assertEqual(_parse_indices("nope", 3), [])
+        self.assertEqual(_parse_indices("", 3), [])
+        self.assertEqual(_parse_indices('{"a":1}', 3), [])
+
+
+class TestJudgeSupersedes(unittest.TestCase):
+    def test_none_supersedes_nothing(self):
+        self.assertEqual(NoneExtractionProvider().judge_supersedes("x", ["y"]), [])
+
+    def test_fake_supersedes_same_subject_not_identical(self):
+        p = FakeExtractionProvider()
+        new = "The deploy command is make release"
+        cands = [
+            "The deploy command is make ship",   # same subject, updated -> supersede
+            "The deploy command is make release",  # identical -> duplicate, not supersede
+            "Database migrations run with make migrate",  # unrelated
+        ]
+        self.assertEqual(p.judge_supersedes(new, cands), [0])
+
+    def test_fake_empty(self):
+        self.assertEqual(FakeExtractionProvider().judge_supersedes("", ["a b c"]), [])
+        self.assertEqual(FakeExtractionProvider().judge_supersedes("a b", []), [])
 
 
 class TestFactory(unittest.TestCase):
