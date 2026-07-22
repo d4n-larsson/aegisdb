@@ -716,6 +716,66 @@ static void test_consolidate(void) {
     TEST_ASSERT_EQUAL_size_t(0, merged);
 }
 
+/* forget: importance*recency retention below the floor is tombstoned; high
+ * importance is retained and non-target types (semantic) are protected. */
+static void test_forget(void) {
+    uint64_t ep_ids[3];
+    for (int i = 0; i < 3; i++) {
+        MemoryRecord in = make_input(MEM_EPISODIC, "noise");
+        in.importance = 0.01f; /* low value */
+        MemoryRecord out;
+        TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &in, NULL, 0, &out));
+        ep_ids[i] = out.id;
+        record_free(&out);
+    }
+    MemoryRecord keep_in = make_input(MEM_EPISODIC, "critical");
+    keep_in.importance = 0.9f; /* high value -> retained */
+    MemoryRecord keep_out;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &keep_in, NULL, 0, &keep_out));
+    uint64_t keep = keep_out.id;
+    record_free(&keep_out);
+
+    MemoryRecord sem_in = make_input(MEM_SEMANTIC, "durable fact");
+    sem_in.importance = 0.01f; /* low, but protected by type */
+    MemoryRecord sem_out;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &sem_in, NULL, 0, &sem_out));
+    uint64_t sem = sem_out.id;
+    record_free(&sem_out);
+
+    const uint64_t half_life = 1000000000ULL; /* huge -> recency ~ 1, age ~ 0 */
+    size_t scanned = 0, forgotten = 0;
+
+    /* dry_run: reports would-forget, deletes nothing */
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+        qe_forget(&g_db, NULL, MEM_EPISODIC, half_life, 0.05f, 1, 0,
+                  &scanned, &forgotten));
+    TEST_ASSERT_EQUAL_size_t(4, scanned);   /* 3 noise + keep */
+    TEST_ASSERT_EQUAL_size_t(3, forgotten); /* the 3 low-value */
+    MemoryRecord r;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_get(&g_db, ep_ids[0], NULL, &r));
+    record_free(&r); /* dry run left it */
+
+    /* real forget */
+    scanned = forgotten = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+        qe_forget(&g_db, NULL, MEM_EPISODIC, half_life, 0.05f, 0, 0,
+                  &scanned, &forgotten));
+    TEST_ASSERT_EQUAL_size_t(3, forgotten);
+    for (int i = 0; i < 3; i++)
+        TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_get(&g_db, ep_ids[i], NULL, &r));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_get(&g_db, keep, NULL, &r)); /* high imp kept */
+    record_free(&r);
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_get(&g_db, sem, NULL, &r)); /* semantic protected */
+    record_free(&r);
+
+    /* idempotent */
+    scanned = forgotten = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+        qe_forget(&g_db, NULL, MEM_EPISODIC, half_life, 0.05f, 0, 0,
+                  &scanned, &forgotten));
+    TEST_ASSERT_EQUAL_size_t(0, forgotten);
+}
+
 static void test_working_memory_promote(void) {
     MemoryRecord in = make_input(MEM_WORKING, "scratch note");
     MemoryRecord out;
@@ -925,6 +985,7 @@ int main(void) {
     RUN_TEST(test_ttl_lazy_expiry);
     RUN_TEST(test_ttl_sweep_tombstones);
     RUN_TEST(test_consolidate);
+    RUN_TEST(test_forget);
     RUN_TEST(test_working_memory_promote);
     RUN_TEST(test_relate_and_traverse);
     RUN_TEST(test_traverse_wide_graph);

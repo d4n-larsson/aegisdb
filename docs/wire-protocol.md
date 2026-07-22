@@ -321,6 +321,41 @@ than silent data loss — the memory inspector (and `get`/`search`, which return
 
 ---
 
+### `forget`
+
+Decay-based forgetting: a maintenance pass that tombstones **aging, low-value**
+records so a long-running corpus (and its in-RAM indexes) plateaus instead of
+growing without bound. A record's **retention** is
+
+```
+retention = importance × 0.5^(age / half_life_ms)      age measured from `updated`
+```
+
+and it is forgotten when `retention < min_retention`. High-importance and
+recently-touched records survive; old, low-importance ones age out. Requires `rw`
+scope; a namespaced token forgets only its own tenant. Idempotent. Forgotten
+records reclaim disk on the next compaction, exactly like TTL expiry.
+
+```json
+{ "operation": "forget", "half_life_ms": 604800000, "min_retention": 0.05 }
+→ { "ok": true, "scanned": 1840, "forgotten": 1712, "dry_run": false }
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `half_life_ms` | integer | Recency half-life; default 7 days. Floored at 1s. |
+| `min_retention` | number | Forget when `retention` falls below this; default `0.05` |
+| `type` | string | Which type to sweep; **default `episodic`** — the high-volume, low-individual-value events. Curated `semantic` facts are protected unless you name the type explicitly |
+| `dry_run` | boolean | Default `false`. When `true`, counts what *would* be forgotten and tombstones nothing — preview a policy before applying it |
+| `max_forget` | integer | Safety cap on deletions this pass (`0`/absent = unbounded) |
+
+`scanned` is how many records of the target type were examined; `forgotten` is
+how many crossed the threshold (tombstoned, or counted under `dry_run`). This is
+the mechanical importance×recency policy; model-driven "is this still relevant?"
+judgment belongs in a client/maintenance job on top.
+
+---
+
 ### `search`
 
 Unified search with mutually combinable filters. The time filter activates only

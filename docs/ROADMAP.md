@@ -122,7 +122,7 @@ end. Nothing here needs a model on the hot path.*
   path behind the provider seam (with 2.1 extraction), calling this server-side
   supersession mechanism. Deferred, like LLM distillation was.
 
-### 2.3 Decay & forgetting policy
+### 2.3 Decay & forgetting policy — *shipped (`forget` op)*
 - **Why now:** recall is injected every turn — its size is a recurring token cost,
   and indexes are in RAM. Forgetting is a feature.
 - **Build:** importance × recency decay with configurable half-life; promote
@@ -130,8 +130,18 @@ end. Nothing here needs a model on the hot path.*
   already-implemented **LLM distillation** (`summarization-design.md`) which folds
   related aging clusters into one dense fact.
 - **Leverages:** TTL sweep, `promote`, the background summarizer.
+- **Shipped:** a `forget` maintenance op tombstones records whose
+  `retention = importance × 0.5^(age/half_life)` falls below `min_retention`.
+  Defaults to episodic-only (curated semantic facts protected), supports
+  `dry_run` and a `max_forget` cap, namespaced. Made **measurable** with
+  `make eval EVAL_ARGS='--decay'`: seed facts + low-value episodic noise, assert
+  the corpus plateaus without losing recall (starter run: 222 → 22 records,
+  recall@10 held at 93%).
 - **Done when:** a long-running agent's recall size and index RAM plateau instead
-  of growing linearly, with recall@k held (measured by 1.1).
+  of growing linearly, with recall@k held (measured by 1.1). ✅
+- **Deferred:** model-driven "is this still relevant?" judgment (beyond the
+  mechanical importance×recency policy) belongs in a maintenance job on top,
+  alongside the LLM distiller.
 
 ---
 

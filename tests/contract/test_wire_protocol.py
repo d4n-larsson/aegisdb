@@ -603,6 +603,46 @@ def test_consolidate(binary, port):
               "second consolidate is a no-op")
 
 
+def test_forget(binary, port):
+    print("[forget: decay-based forgetting (ROADMAP 2.3)]")
+    with Server(binary, port, phase=4) as srv:
+        def ins(t, imp, tag, typ="episodic"):
+            r = srv.req({"operation": "insert", "type": typ, "data": "x",
+                         "importance": imp, "tags": [tag]})
+            return r["record"]["id"]
+        keep = ins("k", 0.9, "keep")           # high importance -> retained
+        low = [ins("n", 0.01, "noise") for _ in range(4)]  # low -> forgotten
+        sem = ins("s", 0.01, "fact", "semantic")           # protected by type
+
+        # dry_run: reports what WOULD go, deletes nothing
+        r = srv.req({"operation": "forget", "min_retention": 0.05, "dry_run": True})
+        check(r.get("ok") is True and r.get("dry_run") is True and r.get("forgotten") == 4,
+              "dry_run reports 4 would-forget without deleting")
+        n = srv.req({"operation": "count", "tags": ["noise"], "match": "any"})
+        check(n.get("count") == 4, "dry_run left the low-value records in place")
+
+        # real forget: low-importance episodic tombstoned
+        r = srv.req({"operation": "forget", "min_retention": 0.05})
+        check(r.get("ok") is True and r.get("forgotten") == 4 and r.get("dry_run") is False,
+              "forget tombstones the 4 low-value episodic records")
+        check(srv.req({"operation": "get", "id": keep}).get("ok") is True,
+              "high-importance record is retained")
+        check(srv.req({"operation": "get", "id": low[0]}).get("ok") is False,
+              "low-importance record is forgotten")
+        check(srv.req({"operation": "get", "id": sem}).get("ok") is True,
+              "semantic record is protected (default type=episodic)")
+
+        # idempotent: nothing left below the threshold
+        r = srv.req({"operation": "forget", "min_retention": 0.05})
+        check(r.get("forgotten") == 0, "second forget is a no-op")
+
+        # max_forget caps deletions
+        for _ in range(5):
+            ins("n2", 0.01, "noise2")
+        r = srv.req({"operation": "forget", "min_retention": 0.05, "max_forget": 2})
+        check(r.get("forgotten") == 2, "max_forget caps the number tombstoned")
+
+
 def test_snapshot(binary, port):
     print("[backup: online snapshot + recover]")
     with Server(binary, port, phase=4) as srv:
@@ -1520,6 +1560,7 @@ def main():
     test_concurrency(binary, 19479)
     test_bulk_ops(binary, 19480)
     test_consolidate(binary, 19481)
+    test_forget(binary, 19499)
     test_multivector(binary, 19482)
     test_include_embeddings(binary, 19487)
     test_search_explain(binary, 19498)

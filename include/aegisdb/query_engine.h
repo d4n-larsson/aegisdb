@@ -126,6 +126,18 @@ size_t qe_sweep_expired(AegisDB *db, uint64_t now);
 aegis_status_t qe_consolidate(AegisDB *db, const char *ns, float min_similarity,
                               size_t *out_clusters, size_t *out_merged);
 
+/* Decay-based forgetting (ROADMAP 2.3): tombstone aging, low-value records so the
+ * corpus and its in-RAM indexes plateau instead of growing without bound.
+ * Retention = importance * 0.5^(age/half_life) (age from `updated`); a record is
+ * forgotten when retention < min_retention. Scoped to one `type` (episodic is the
+ * intended default — curated semantic facts should be protected) and to `ns`.
+ * `dry_run` counts what would be forgotten without deleting; `max_forget` (0 =
+ * unbounded) caps deletions. Reports *out_scanned (examined) and *out_forgotten. */
+aegis_status_t qe_forget(AegisDB *db, const char *ns, MemoryType type,
+                         uint64_t half_life_ms, float min_retention, int dry_run,
+                         size_t max_forget, size_t *out_scanned,
+                         size_t *out_forgotten);
+
 /* Promote a working record to a persisted one. When `ns` is non-NULL the new
  * record is pinned to that namespace (agent_id). */
 aegis_status_t qe_promote(AegisDB *db, const char *session_id,
