@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AegisDB Memory Inspector</title>
+<style>
+  :root {
+    --bg:#f7f8fa; --panel:#fff; --ink:#1c2230; --muted:#5b6472; --line:#e2e6ec;
+    --accent:#3b6ef5; --accent-soft:#e8efff; --chip:#eef1f6; --danger:#c8362e;
+    --sim:#3b6ef5; --wt:#8a5cf6; --rc:#22a06b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#0e1116; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e; --line:#2a313c;
+      --accent:#5b8bff; --accent-soft:#16233f; --chip:#1f262f; --danger:#f0736a;
+    }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         background:var(--bg); color:var(--ink); }
+  header { display:flex; align-items:center; gap:16px; padding:12px 20px;
+           background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0; font-weight:650; letter-spacing:.2px; }
+  header h1 .a { color:var(--accent); }
+  .stats { display:flex; gap:18px; margin-left:auto; flex-wrap:wrap; }
+  .stat { font-size:12px; color:var(--muted); }
+  .stat b { display:block; font-size:16px; color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums; }
+  main { display:grid; grid-template-columns:280px 1fr; gap:0; height:calc(100vh - 58px); }
+  aside { padding:18px; border-right:1px solid var(--line); background:var(--panel);
+          overflow:auto; }
+  aside label { display:block; font-size:12px; color:var(--muted); margin:14px 0 4px; font-weight:600; }
+  aside input, aside select { width:100%; padding:7px 9px; border:1px solid var(--line);
+          border-radius:7px; background:var(--bg); color:var(--ink); font:inherit; }
+  .modes { display:flex; gap:6px; margin-bottom:8px; }
+  .modes button { flex:1; padding:7px; border:1px solid var(--line); background:var(--bg);
+          color:var(--muted); border-radius:7px; cursor:pointer; font:inherit; font-weight:600; }
+  .modes button.on { background:var(--accent-soft); color:var(--accent); border-color:var(--accent); }
+  .go { margin-top:16px; width:100%; padding:9px; border:0; border-radius:7px;
+        background:var(--accent); color:#fff; font:inherit; font-weight:650; cursor:pointer; }
+  .hint { font-size:11px; color:var(--muted); margin-top:10px; }
+  section.results { overflow:auto; padding:0; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:9px 14px; border-bottom:1px solid var(--line);
+           font-size:13px; vertical-align:top; }
+  th { position:sticky; top:0; background:var(--panel); color:var(--muted); font-size:11px;
+       text-transform:uppercase; letter-spacing:.5px; z-index:1; }
+  tbody tr { cursor:pointer; }
+  tbody tr:hover { background:var(--accent-soft); }
+  td.id { color:var(--muted); font-variant-numeric:tabular-nums; }
+  td.data { max-width:520px; }
+  td.score { font-variant-numeric:tabular-nums; font-weight:600; }
+  .chip { display:inline-block; background:var(--chip); color:var(--muted); border-radius:5px;
+          padding:1px 7px; font-size:11px; margin:0 4px 2px 0; }
+  .type { text-transform:uppercase; font-size:10px; letter-spacing:.5px; font-weight:700; }
+  .type.semantic { color:var(--wt); } .type.episodic { color:var(--rc); } .type.working { color:var(--accent); }
+  .empty { padding:40px; text-align:center; color:var(--muted); }
+  /* detail drawer */
+  .drawer { position:fixed; top:0; right:0; width:min(460px,100%); height:100%; background:var(--panel);
+            border-left:1px solid var(--line); box-shadow:-8px 0 24px rgba(0,0,0,.12);
+            transform:translateX(100%); transition:transform .18s ease; overflow:auto; z-index:10; }
+  .drawer.open { transform:none; }
+  .drawer .dh { display:flex; align-items:center; gap:10px; padding:16px 20px; border-bottom:1px solid var(--line);
+                position:sticky; top:0; background:var(--panel); }
+  .drawer .dh .x { margin-left:auto; cursor:pointer; color:var(--muted); font-size:20px; border:0; background:none; }
+  .drawer .body { padding:20px; }
+  .kv { display:grid; grid-template-columns:110px 1fr; gap:6px 12px; margin-bottom:16px; font-size:13px; }
+  .kv .k { color:var(--muted); }
+  .kv .v { word-break:break-word; font-variant-numeric:tabular-nums; }
+  .breakdown { background:var(--bg); border:1px solid var(--line); border-radius:9px; padding:14px; margin-bottom:16px; }
+  .breakdown h3 { margin:0 0 10px; font-size:12px; text-transform:uppercase; letter-spacing:.5px; color:var(--muted); }
+  .bar { margin:8px 0; }
+  .bar .lab { display:flex; justify-content:space-between; font-size:12px; margin-bottom:3px; }
+  .bar .track { height:7px; background:var(--chip); border-radius:4px; overflow:hidden; }
+  .bar .fill { height:100%; border-radius:4px; }
+  .formula { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; color:var(--muted);
+             margin-top:10px; padding-top:10px; border-top:1px dashed var(--line); }
+  .edit label { display:block; font-size:12px; color:var(--muted); margin:12px 0 4px; }
+  .edit input, .edit textarea { width:100%; padding:8px; border:1px solid var(--line); border-radius:7px;
+             background:var(--bg); color:var(--ink); font:inherit; }
+  .edit textarea { min-height:70px; resize:vertical; }
+  .actions { display:flex; gap:10px; margin-top:18px; }
+  .actions button { flex:1; padding:9px; border-radius:7px; border:0; font:inherit; font-weight:650; cursor:pointer; }
+  .save { background:var(--accent); color:#fff; }
+  .del { background:transparent; color:var(--danger); border:1px solid var(--danger)!important; }
+  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--ink);
+           color:var(--bg); padding:10px 18px; border-radius:8px; font-size:13px; opacity:0;
+           transition:opacity .2s; pointer-events:none; z-index:20; }
+  .toast.show { opacity:1; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="a">Aegis</span>DB · Memory Inspector</h1>
+  <div class="stats" id="stats"></div>
+</header>
+<main>
+  <aside>
+    <div class="modes">
+      <button id="mBrowse" class="on" onclick="setMode('browse')">Browse</button>
+      <button id="mSemantic" onclick="setMode('semantic')">Semantic</button>
+    </div>
+    <div id="semBox" style="display:none">
+      <label>Query text</label>
+      <input id="q" placeholder="what should surface?" onkeydown="if(event.key==='Enter')run()">
+      <div class="hint" id="embHint"></div>
+    </div>
+    <label>Namespace (agent_id)</label>
+    <input id="ns" placeholder="(all)">
+    <label>Type</label>
+    <select id="type"><option value="">(any)</option><option>semantic</option><option>episodic</option><option>working</option></select>
+    <label>Tags (comma-separated)</label>
+    <input id="tags" placeholder="e.g. deploy,ops">
+    <label>Match</label>
+    <select id="match"><option value="all">all</option><option value="any">any</option></select>
+    <label>Limit (top_k)</label>
+    <input id="topk" type="number" value="50" min="1" max="1000">
+    <button class="go" onclick="run()">Search</button>
+    <div class="hint">Rows are clickable — open one to see its provenance, the ranking breakdown (semantic), and to edit or delete it.</div>
+  </aside>
+  <section class="results" id="results"><div class="empty">Run a search to list memories.</div></section>
+</main>
+
+<div class="drawer" id="drawer">
+  <div class="dh"><b>Memory</b> <span id="dId" class="chip"></span><button class="x" onclick="closeDrawer()">×</button></div>
+  <div class="body" id="dbody"></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+let MODE = "browse", CFG = {}, LAST = [];
+
+async function api(path, payload) {
+  const r = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"},
+                              body: JSON.stringify(payload)});
+  return r.json();
+}
+function toast(m){ const t=document.getElementById("toast"); t.textContent=m; t.classList.add("show");
+  setTimeout(()=>t.classList.remove("show"), 1800); }
+function esc(s){ return (s??"").toString().replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+function setMode(m){
+  MODE=m;
+  document.getElementById("mBrowse").classList.toggle("on", m==="browse");
+  document.getElementById("mSemantic").classList.toggle("on", m==="semantic");
+  document.getElementById("semBox").style.display = m==="semantic" ? "" : "none";
+}
+
+async function loadConfig(){
+  CFG = await (await fetch("/api/config")).json();
+  document.getElementById("embHint").textContent =
+    CFG.embedder==="none" ? "⚠ bridge started with --embedder none; semantic search disabled"
+                          : `embedder: ${CFG.embedder} · dim ${CFG.embedding_dim} (must match the stored vectors)`;
+}
+async function loadStats(){
+  const r = await api("/api/query", {operation:"stats"});
+  if(!r.ok){ return; }
+  const mem = r.memory||{}; const idx = r.indexes||{};
+  const el = document.getElementById("stats");
+  const fmtB = b => b>1e6 ? (b/1e6).toFixed(1)+" MB" : b>1e3 ? (b/1e3).toFixed(0)+" KB" : (b||0)+" B";
+  el.innerHTML = [
+    ["records", r.records], ["tombstones", r.tombstones],
+    ["semantic", idx.semantic ?? "–"], ["tags", idx.tags ?? "–"],
+    ["index RAM", fmtB(mem.index_bytes_total)], ["phase", r.phase],
+  ].map(([k,v])=>`<div class="stat">${k}<b>${v}</b></div>`).join("");
+}
+
+async function run(){
+  const topk = Math.max(1, Math.min(1000, +document.getElementById("topk").value||50));
+  const ns = document.getElementById("ns").value.trim();
+  const type = document.getElementById("type").value;
+  const tags = document.getElementById("tags").value.split(",").map(s=>s.trim()).filter(Boolean);
+  const match = document.getElementById("match").value;
+  const req = {operation:"search", top_k:topk, include_embeddings:false};
+  if(ns) req.agent_id = ns;
+  if(type) req.type = type;
+  if(tags.length){ req.tags = tags; req.match = match; }
+
+  if(MODE==="semantic"){
+    const text = document.getElementById("q").value.trim();
+    if(!text){ toast("enter a query"); return; }
+    if(CFG.embedder==="none"){ toast("semantic disabled (no embedder)"); return; }
+    const e = await api("/api/embed", {text});
+    if(e.error){ toast(e.error); return; }
+    req.embedding = e.embedding;
+    req.explain = true;
+  } else {
+    req.start_time = 0; req.end_time = 9999999999999; // browse = time scan over all
+  }
+  const r = await api("/api/query", req);
+  if(!r.ok){ toast(r.error?.code || "search failed"); render([]); return; }
+  LAST = r.records || [];
+  render(LAST);
+}
+
+function render(recs){
+  const el = document.getElementById("results");
+  if(!recs.length){ el.innerHTML = `<div class="empty">No memories matched.</div>`; return; }
+  const sem = MODE==="semantic";
+  const rows = recs.map((rec,i)=>{
+    const tags = (rec.tags||[]).map(t=>`<span class="chip">${esc(t)}</span>`).join("");
+    const score = sem && rec.explain ? `<td class="score">${rec.explain.score.toFixed(3)}</td>` : (sem?`<td></td>`:"");
+    return `<tr onclick="openDetail(${i})">
+      <td class="id">${rec.id}</td>
+      <td><span class="type ${esc(rec.type)}">${esc(rec.type)}</span></td>
+      <td class="data">${esc((rec.data||"").slice(0,140))}${(rec.data||"").length>140?"…":""}<div>${tags}</div></td>
+      ${score}
+    </tr>`;
+  }).join("");
+  el.innerHTML = `<table><thead><tr><th>id</th><th>type</th><th>memory</th>${sem?"<th>score</th>":""}</tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function bar(label, val, max, color){
+  const pct = Math.max(0, Math.min(100, (val/max)*100));
+  return `<div class="bar"><div class="lab"><span>${label}</span><span>${val.toFixed(3)}</span></div>
+    <div class="track"><div class="fill" style="width:${pct}%;background:${color}"></div></div></div>`;
+}
+
+function openDetail(i){
+  const rec = LAST[i];
+  const d = document.getElementById("drawer");
+  document.getElementById("dId").textContent = "#"+rec.id;
+  const ts = t => t ? new Date(+t).toISOString().replace("T"," ").replace(".000Z"," UTC") : "–";
+  let html = `<div class="kv">
+    <div class="k">type</div><div class="v"><span class="type ${esc(rec.type)}">${esc(rec.type)}</span></div>
+    <div class="k">created</div><div class="v">${ts(rec.created)}</div>
+    <div class="k">updated</div><div class="v">${ts(rec.updated)}</div>
+    ${rec.agent_id?`<div class="k">namespace</div><div class="v">${esc(rec.agent_id)}</div>`:""}
+    <div class="k">importance</div><div class="v">${rec.importance ?? "–"}</div>
+    <div class="k">confidence</div><div class="v">${rec.confidence ?? "–"}</div>
+    ${rec.expires_at?`<div class="k">expires</div><div class="v">${ts(rec.expires_at)}</div>`:""}
+    ${(rec.relationships&&rec.relationships.length)?`<div class="k">relations</div><div class="v">${rec.relationships.map(r=>`${esc(r.kind||"→")} #${r.to_id}`).join(", ")}</div>`:""}
+  </div>`;
+
+  if(rec.explain){
+    const e = rec.explain;
+    html += `<div class="breakdown"><h3>Why this ranked here</h3>`;
+    if(e.semantic){
+      html += bar("similarity (cosine)", e.similarity, 1, "var(--sim)");
+      html += bar("weight (imp × conf)", e.weight, 1, "var(--wt)");
+      html += bar("recency factor", e.recency_factor, 1, "var(--rc)");
+      html += `<div class="formula">score = weight × similarity × recency = <b>${e.score.toFixed(4)}</b></div>`;
+    } else {
+      html += `<div class="formula">non-semantic result — ordered by time, not score</div>`;
+    }
+    html += `</div>`;
+  }
+
+  const editable = rec.type==="semantic";
+  html += `<div class="edit">
+    <label>data ${editable?"":"(read-only — only semantic memories are editable)"}</label>
+    <textarea id="eData" ${editable?"":"disabled"}>${esc(rec.data||"")}</textarea>
+    <label>importance</label><input id="eImp" type="number" step="0.05" min="0" max="1" value="${rec.importance ?? ""}" ${editable?"":"disabled"}>
+    <label>confidence</label><input id="eConf" type="number" step="0.05" min="0" max="1" value="${rec.confidence ?? ""}" ${editable?"":"disabled"}>
+    <label>tags (comma-separated)</label><input id="eTags" value="${esc((rec.tags||[]).join(", "))}" ${editable?"":"disabled"}>
+    <div class="actions">
+      ${editable?`<button class="save" onclick="saveRec(${rec.id})">Save</button>`:""}
+      <button class="del" onclick="delRec(${rec.id})">Delete</button>
+    </div>
+  </div>`;
+  document.getElementById("dbody").innerHTML = html;
+  d.classList.add("open");
+}
+function closeDrawer(){ document.getElementById("drawer").classList.remove("open"); }
+
+async function saveRec(id){
+  const req = {operation:"update", id,
+    data: document.getElementById("eData").value,
+    importance: parseFloat(document.getElementById("eImp").value),
+    confidence: parseFloat(document.getElementById("eConf").value),
+    tags: document.getElementById("eTags").value.split(",").map(s=>s.trim()).filter(Boolean)};
+  const r = await api("/api/query", req);
+  if(r.ok){ toast("saved"); closeDrawer(); await loadStats(); run(); }
+  else toast(r.error?.code || "update failed");
+}
+async function delRec(id){
+  if(!confirm("Delete memory #"+id+"? This writes a tombstone.")) return;
+  const r = await api("/api/query", {operation:"delete", id});
+  if(r.ok){ toast("deleted"); closeDrawer(); await loadStats(); run(); }
+  else toast(r.error?.code || "delete failed");
+}
+
+(async ()=>{ await loadConfig(); await loadStats(); })();
+</script>
+</body>
+</html>

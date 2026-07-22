@@ -55,6 +55,35 @@ def hashing_embedder(dim: int) -> Callable[[str], List[float]]:
     return embed
 
 
+def subword_embedder(dim: int) -> Callable[[str], List[float]]:
+    """Like the hashing embedder but adds character-trigram features per token, so
+    morphological variants overlap ("deploy" ~ "deploys" ~ "deployment"). More
+    forgiving of paraphrase than exact-unigram hashing, still deterministic. Used
+    as the inspector default; the eval harness keeps `hashing` for a stable,
+    reproducible baseline."""
+
+    def embed(text: str) -> List[float]:
+        vec = [0.0] * dim
+        for tok in _tokens(text):
+            # whole-token signal (exact match)
+            b = _h(tok, "b") % dim
+            vec[b] += 1.0 if (_h(tok, "s") & 1) else -1.0
+            # character trigrams over ^token$ for fuzzy/subword overlap
+            w = f"^{tok}$"
+            for i in range(len(w) - 2):
+                tri = w[i:i + 3]
+                tb = _h(tri, "tb") % dim
+                vec[tb] += 0.5 if (_h(tri, "ts") & 1) else -0.5
+        norm = math.sqrt(sum(x * x for x in vec))
+        if norm > 0:
+            vec = [x / norm for x in vec]
+        else:
+            vec[0] = 1.0
+        return vec
+
+    return embed
+
+
 def command_embedder(dim: int, cmd: str) -> Callable[[str], List[float]]:
     """Shell out to an external embedder for higher-fidelity runs. `cmd` receives
     the text on stdin and must print a JSON array of exactly `dim` floats. Kept
@@ -75,6 +104,8 @@ def command_embedder(dim: int, cmd: str) -> Callable[[str], List[float]]:
 def resolve_embedder(name: str, dim: int, cmd: str | None = None) -> Callable[[str], List[float]]:
     if name == "hashing":
         return hashing_embedder(dim)
+    if name == "subword":
+        return subword_embedder(dim)
     if name == "command":
         if not cmd:
             raise ValueError("--embedder command requires --embedder-cmd")

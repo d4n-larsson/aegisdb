@@ -48,7 +48,7 @@ mem0 / Zep / Letta compete, and where a plain vector DB cannot follow.
 
 ---
 
-## Horizon 1 — Now: trust the wedge
+## Horizon 1 — Now: trust the wedge  ✅ *complete*
 
 *Theme: make the coding-agent memory use case demoable and trustworthy end to
 end. Nothing here needs a model on the hot path.*
@@ -77,7 +77,7 @@ end. Nothing here needs a model on the hot path.*
 - **Done when:** every hit can answer "why am I seeing this?" without server-side
   guesswork.
 
-### 1.3 Memory-inspection surface
+### 1.3 Memory-inspection surface — *shipped (`make inspector`)*
 - **Why now:** the single most effective *sales/adoption* artifact — let a human
   see and correct what the agent believes. The repo already has dashboard muscle
   (Grafana).
