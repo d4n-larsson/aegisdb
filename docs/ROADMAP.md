@@ -169,12 +169,20 @@ behind the provider seam.*
 
 *Theme: the capabilities that turn "interesting" into "we can deploy this."*
 
-### 3.1 Temporal / bitemporal queries
+### 3.1 Temporal / bitemporal queries — *shipped (`history` / `get?as_of`)*
 - **Why now:** "what did the agent know at time T?" is a real differentiator (part
   of Zep's pitch) and enterprises pay for it. The append-only log already contains
   the history.
-- **Build:** point-in-time reads over the log's history; validity intervals on
-  facts (valid-from/valid-to) so superseded facts remain auditable rather than
+- **Shipped:** `history` (every version of an id in causal order, each with a
+  derived `[valid_from, valid_to)` interval + `deleted` flag) and `get` with
+  `as_of` (the version live at a past time), both reconstructed from the log via a
+  scan under `log_lock`, namespace-scoped. **Caveat (documented):** history depth
+  is bounded by compaction — it reconstructs from the live log, so a full archival
+  trail needs a snapshot or deferred compaction. A compaction-immune history log
+  would be the next step toward true bitemporality.
+- **Build (original):** point-in-time reads over the log's history; validity
+  intervals on facts (valid-from/valid-to) so superseded facts remain auditable
+  rather than
   overwritten.
 - **Leverages:** the append-only log, snapshots, recovery replay.
 

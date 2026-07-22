@@ -643,6 +643,67 @@ def test_forget(binary, port):
         check(r.get("forgotten") == 2, "max_forget caps the number tombstoned")
 
 
+def test_temporal(binary, port):
+    print("[temporal: history + point-in-time get (ROADMAP 3.1)]")
+    with Server(binary, port, phase=4) as srv:
+        r = srv.req({"operation": "insert", "type": "semantic", "data": "sky is blue"})
+        rid, t1 = r["record"]["id"], r["record"]["updated"]
+        time.sleep(0.01)
+        t2 = srv.req({"operation": "update", "id": rid, "data": "sky is azure"})["record"]["updated"]
+        time.sleep(0.01)
+        t3 = srv.req({"operation": "update", "id": rid, "data": "sky is grey"})["record"]["updated"]
+        check(t1 < t2 < t3, "each version has a distinct, increasing timestamp")
+
+        # history: the full version trail with validity intervals
+        h = srv.req({"operation": "history", "id": rid})
+        check(h.get("ok") and h.get("count") == 3, "history returns every version")
+        vs = h["versions"]
+        check([v["data"] for v in vs] == ["sky is blue", "sky is azure", "sky is grey"],
+              "versions are in causal order")
+        check(vs[0]["valid_to"] == vs[1]["valid_from"] == t2,
+              "validity intervals chain (valid_to == next valid_from)")
+        check(vs[-1]["valid_to"] == 0, "the current version has an open validity interval")
+
+        # point-in-time get: "what did the agent know at time T?"
+        check(srv.req({"operation": "get", "id": rid, "as_of": t1})["record"]["data"] == "sky is blue",
+              "as_of t1 -> the original")
+        check(srv.req({"operation": "get", "id": rid, "as_of": t2})["record"]["data"] == "sky is azure",
+              "as_of t2 -> the second version")
+        check(srv.req({"operation": "get", "id": rid, "as_of": t1 - 1})["error"]["code"] == "NOT_FOUND",
+              "as_of before creation -> NOT_FOUND")
+
+        # delete, then the past is still reconstructable while the present is gone
+        time.sleep(0.01)
+        srv.req({"operation": "delete", "id": rid})
+        check(srv.req({"operation": "get", "id": rid})["error"]["code"] == "NOT_FOUND",
+              "current get after delete -> NOT_FOUND")
+        check(srv.req({"operation": "get", "id": rid, "as_of": t3})["record"]["data"] == "sky is grey",
+              "as_of before the delete still reconstructs the record")
+        hd = srv.req({"operation": "history", "id": rid})
+        check(hd["count"] == 4 and hd["versions"][-1]["deleted"] is True,
+              "history includes the tombstone as the final version")
+
+        check(srv.req({"operation": "history", "id": 999999})["error"]["code"] == "NOT_FOUND",
+              "history of an unknown id -> NOT_FOUND")
+
+
+def test_temporal_isolation(binary, port):
+    print("[temporal: tenant isolation]")
+    lines = ["admintok", "acme_rw acme rw", "beta_rw beta rw"]
+    with Server(binary, port, phase=4, token_lines=lines) as srv:
+        rid = srv.req({"operation": "insert", "type": "semantic", "data": "acme fact",
+                       "token": "acme_rw"})["record"]["id"]
+        # another tenant can neither read its history nor reconstruct it
+        check(srv.req({"operation": "history", "id": rid, "token": "beta_rw"})["error"]["code"] == "NOT_FOUND",
+              "cross-tenant history -> NOT_FOUND")
+        check(srv.req({"operation": "get", "id": rid, "as_of": 9999999999999,
+                       "token": "beta_rw"})["error"]["code"] == "NOT_FOUND",
+              "cross-tenant as_of get -> NOT_FOUND")
+        # the owner can
+        check(srv.req({"operation": "history", "id": rid, "token": "acme_rw"})["count"] == 1,
+              "owner reads its own history")
+
+
 def test_export_and_purge(binary, port):
     print("[export + right-to-be-forgotten (ROADMAP 3.2)]")
     with Server(binary, port, phase=4) as srv:
@@ -1645,6 +1706,8 @@ def main():
     test_forget(binary, 19499)
     test_export_and_purge(binary, 19500)
     test_export_purge_isolation(binary, 19501)
+    test_temporal(binary, 19502)
+    test_temporal_isolation(binary, 19503)
     test_multivector(binary, 19482)
     test_include_embeddings(binary, 19487)
     test_search_explain(binary, 19498)

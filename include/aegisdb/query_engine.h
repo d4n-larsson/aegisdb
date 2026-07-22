@@ -125,6 +125,16 @@ aegis_status_t qe_export(AegisDB *db, const char *ns, uint64_t after_id,
 aegis_status_t qe_purge_namespace(AegisDB *db, const char *ns, int dry_run,
                                   size_t *out_count);
 
+/* Temporal reads (ROADMAP 3.1), reconstructed from the append-only log.
+ * qe_history returns every version of `id` in append (causal) order — the audit
+ * trail — allocating *out_versions (record_free each, then free the array).
+ * qe_get_as_of returns the version live at time `as_of` (ms), or NOT_FOUND if the
+ * record did not exist or was deleted by then. Both enforce `ns` ownership. */
+aegis_status_t qe_history(AegisDB *db, uint64_t id, const char *ns,
+                          MemoryRecord **out_versions, size_t *out_n);
+aegis_status_t qe_get_as_of(AegisDB *db, uint64_t id, const char *ns,
+                            uint64_t as_of, MemoryRecord *out);
+
 aegis_status_t qe_delete_by_query(AegisDB *db, const SearchParams *p,
                                   const char *ns, size_t *out_deleted);
 
