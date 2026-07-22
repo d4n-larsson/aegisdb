@@ -52,7 +52,7 @@ DEPS := $(CORE_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(CJSON_OBJ:.o=.d) \
 
 PYTHON ?= python3
 
-.PHONY: all clean test integration check bench wire-bench fuzz fuzz-regress fuzz-corpus
+.PHONY: all clean test integration check eval bench wire-bench fuzz fuzz-regress fuzz-corpus
 all: $(BIN)
 
 $(BIN): $(CORE_OBJ) $(CJSON_OBJ) $(MAIN_OBJ)
@@ -83,6 +83,13 @@ test: $(TEST_BIN)
 # Wire-protocol contract tests: drive the running server over TCP.
 integration: $(BIN)
 	$(PYTHON) tests/contract/test_wire_protocol.py $(BIN)
+
+# Recall-quality eval: seed a labelled corpus, run queries, report recall@k/MRR
+# (ROADMAP Horizon 1.1). Report-only by default; add EVAL_ARGS='--gate-recall-at
+# 5 --gate-threshold 0.8' to fail on a regression. Uses the deterministic hashing
+# embedder so it needs no model/API.
+eval: $(BIN)
+	$(PYTHON) eval/recall_eval.py $(BIN) $(EVAL_ARGS)
 
 # Line-coverage report (gcov; no lcov/gcovr needed). Rebuilds everything
 # instrumented, runs the unit tests AND the contract suite, and aggregates.
