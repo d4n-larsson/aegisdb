@@ -440,6 +440,11 @@ static int passes_filters(const MemoryRecord *r, const SearchParams *p) {
 typedef struct {
     MemoryRecord rec;
     float score;
+    /* Ranking breakdown captured at scoring time so a hit can explain *why* it
+     * ranked here (ROADMAP 1.2). Only meaningful for semantic queries. */
+    float sim;     /* raw cosine similarity [-1,1] */
+    float weight;  /* importance*confidence actually applied (1.0 if that was <=0) */
+    float recency; /* recency-decay multiplier in (0,1]; 1.0 when no half-life */
 } Cand;
 
 /* A candidate's log offset + similarity score, snapshotted under the index lock
@@ -601,15 +606,22 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
              * an optional exponential recency decay by age since `updated`. */
             float sim = snap[i].score;
             float w = r.importance * r.confidence;
-            float score = (w > 0 ? w : 1.0f) * sim;
+            float wapplied = w > 0 ? w : 1.0f;
+            float recency = 1.0f;
             if (p->half_life_ms) {
                 double age = now > r.updated ? (double)(now - r.updated) : 0.0;
                 /* 0.5^(age/half_life) == exp(-ln2 * age/half_life) */
-                score *= (float)exp(-0.6931471805599453 * age /
-                                    (double)p->half_life_ms);
+                recency = (float)exp(-0.6931471805599453 * age /
+                                     (double)p->half_life_ms);
             }
-            cands[m].score = score;
+            cands[m].sim = sim;
+            cands[m].weight = wapplied;
+            cands[m].recency = recency;
+            cands[m].score = wapplied * sim * recency;
         } else {
+            cands[m].sim = 0;
+            cands[m].weight = r.importance * r.confidence;
+            cands[m].recency = 1.0f;
             cands[m].score = 0;
         }
         m++;
@@ -623,6 +635,12 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
 
 aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
                          MemoryRecord **out_records, size_t *out_n) {
+    return qe_search_ex(db, p, out_records, NULL, out_n);
+}
+
+aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
+                            MemoryRecord **out_records,
+                            SearchExplain **out_explain, size_t *out_n) {
     aegis_status_t st = require_phase(db, p->embedding_dim ? 3 : 2);
     if (st != AEGIS_OK) return st;
     if (p->embedding_dim &&
@@ -725,15 +743,40 @@ aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
     size_t start = offset < sel_n ? offset : sel_n;
     size_t rn = sel_n - start;
     MemoryRecord *res = malloc((rn ? rn : 1) * sizeof(MemoryRecord));
+    SearchExplain *exp = NULL;
+    if (out_explain) {
+        exp = malloc((rn ? rn : 1) * sizeof(SearchExplain));
+        if (!exp) {
+            free(res);
+            for (size_t i = 0; i < sel_n; i++) record_free(&ranked[i].rec);
+            free(ranked);
+            return AEGIS_ERR_INTERNAL;
+        }
+    }
     if (!res) {
+        free(exp);
         for (size_t i = 0; i < sel_n; i++) record_free(&ranked[i].rec);
         free(ranked);
         return AEGIS_ERR_INTERNAL;
     }
     for (size_t i = 0; i < start; i++) record_free(&ranked[i].rec);
-    for (size_t i = start; i < sel_n; i++) res[i - start] = ranked[i].rec;
+    for (size_t i = start; i < sel_n; i++) {
+        res[i - start] = ranked[i].rec;
+        if (exp) {
+            exp[i - start] = (SearchExplain){
+                .semantic = semantic,
+                .similarity = ranked[i].sim,
+                .importance = ranked[i].rec.importance,
+                .confidence = ranked[i].rec.confidence,
+                .weight = ranked[i].weight,
+                .recency_factor = ranked[i].recency,
+                .score = ranked[i].score,
+            };
+        }
+    }
     free(ranked);
     *out_records = res;
+    if (out_explain) *out_explain = exp;
     *out_n = rn;
     return AEGIS_OK;
 }
@@ -1182,6 +1225,21 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
 }
 
 /* ----- dispatch / wire handlers ---------------------------------------- */
+
+/* Ranking breakdown for one hit (ROADMAP 1.2): explains why it ranked here.
+ * score == weight * similarity * recency_factor for semantic queries. */
+static cJSON *search_explain_json(const SearchExplain *e) {
+    cJSON *o = cJSON_CreateObject();
+    if (!o) return NULL;
+    cJSON_AddBoolToObject(o, "semantic", e->semantic);
+    cJSON_AddNumberToObject(o, "score", e->score);
+    if (e->semantic) cJSON_AddNumberToObject(o, "similarity", e->similarity);
+    cJSON_AddNumberToObject(o, "importance", e->importance);
+    cJSON_AddNumberToObject(o, "confidence", e->confidence);
+    cJSON_AddNumberToObject(o, "weight", e->weight);
+    cJSON_AddNumberToObject(o, "recency_factor", e->recency_factor);
+    return o;
+}
 
 static cJSON *resp_record(const MemoryRecord *r, int include_embeddings) {
     cJSON *o = json_ok();
@@ -1737,9 +1795,14 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req, const char *ns) {
     p.embedding = emb;
     p.embedding_dim = en;
 
+    /* Opt-in per-hit ranking breakdown (ROADMAP 1.2): off by default so normal
+     * responses stay lean; clients/inspection UIs pass "explain": true. */
+    int explain = jr_bool(req, "explain", 0);
     MemoryRecord *recs = NULL;
+    SearchExplain *expl = NULL;
     size_t n = 0;
-    aegis_status_t st = qe_search(db, &p, &recs, &n);
+    aegis_status_t st =
+        qe_search_ex(db, &p, &recs, explain ? &expl : NULL, &n);
     free(tags);
     free(emb);
     if (st != AEGIS_OK) return json_error_status(st);
@@ -1748,10 +1811,14 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req, const char *ns) {
     cJSON *o = json_ok();
     cJSON *arr = cJSON_AddArrayToObject(o, "records");
     for (size_t i = 0; i < n; i++) {
-        cJSON_AddItemToArray(arr, json_record(&recs[i], inc_emb));
+        cJSON *jr = json_record(&recs[i], inc_emb);
+        if (explain && expl) cJSON_AddItemToObject(jr, "explain",
+                                                   search_explain_json(&expl[i]));
+        cJSON_AddItemToArray(arr, jr);
         record_free(&recs[i]);
     }
     free(recs);
+    free(expl);
     cJSON_AddNumberToObject(o, "total", (double)n);
     return o;
 }

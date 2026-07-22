@@ -53,7 +53,7 @@ mem0 / Zep / Letta compete, and where a plain vector DB cannot follow.
 *Theme: make the coding-agent memory use case demoable and trustworthy end to
 end. Nothing here needs a model on the hot path.*
 
-### 1.1 Recall-quality eval harness *(foundational — do first)*
+### 1.1 Recall-quality eval harness *(foundational — do first)* — *shipped (`make eval`)*
 - **Why now:** we just made *bugs* regression-tested; memory *quality* is
   currently unmeasured, so every change to scoring/recall is a guess. Everything
   downstream (decay, extraction, distillation tuning) needs a scoreboard.
@@ -66,7 +66,7 @@ end. Nothing here needs a model on the hot path.*
 - **Done when:** `make eval` prints recall@k/MRR against a checked-in dataset, and
   a scoring change moves the numbers visibly.
 
-### 1.2 Provenance on every retrieved memory
+### 1.2 Provenance on every retrieved memory — *score breakdown shipped*
 - **Why now:** trust starts with "where did this come from and when?" Cheap given
   the data already stored.
 - **Build:** surface per-hit provenance in `search`/`recall` responses — source,

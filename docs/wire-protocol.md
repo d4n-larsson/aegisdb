@@ -359,11 +359,35 @@ when **both** `start_time` and `end_time` are present.
 | `half_life_ms` | integer | Semantic only: recency half-life — multiply each score by `0.5^(age/half_life)`, age measured from `updated`; 0/absent = no decay |
 | `max_importance` | number | Keep only records with `importance` ≤ this value (candidate selection) |
 | `order` | string | `oldest` \| `recent` (default). Non-semantic only: when a bounded time scan truncates, `oldest` keeps the aging tail instead of the most-recent records — so a large namespace still surfaces its oldest candidates |
+| `explain` | boolean | Defaults to `false`. When `true`, each returned record gains an `explain` object with the per-hit ranking breakdown (see below) so a client/inspection UI can show *why* a memory surfaced |
 
 `max_importance` combined with `type` + a time range and `order: "oldest"` is how
 a summarization/maintenance job selects the oldest, lowest-value records to
 distill (server-side, so the client doesn't over-fetch and filter). `order` has
 no effect on semantic (embedding) queries, which rank by similarity.
+
+**Ranking explanation (`explain: true`)**: each record carries an `explain`
+object so retrieval is inspectable rather than a black box:
+
+```json
+{
+  "explain": {
+    "semantic": true,
+    "score": 0.8945,
+    "similarity": 0.9939,
+    "importance": 0.9,
+    "confidence": 1.0,
+    "weight": 0.9,
+    "recency_factor": 1.0
+  }
+}
+```
+
+For semantic queries `score == weight × similarity × recency_factor`, where
+`weight = importance × confidence` (or `1.0` if that product is ≤ 0) and
+`recency_factor = 0.5^(age/half_life)` (`1.0` when no `half_life_ms` is set).
+`similarity` is the raw cosine ([-1, 1]). For non-semantic queries `semantic` is
+`false`, `similarity`/`score` are `0`, and results are ordered by time, not score.
 
 **Response (success)**:
 
