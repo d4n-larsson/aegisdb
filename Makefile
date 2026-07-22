@@ -52,7 +52,7 @@ DEPS := $(CORE_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(CJSON_OBJ:.o=.d) \
 
 PYTHON ?= python3
 
-.PHONY: all clean test integration check eval bench wire-bench fuzz fuzz-regress fuzz-corpus
+.PHONY: all clean test integration check eval inspector inspector-test bench wire-bench fuzz fuzz-regress fuzz-corpus
 all: $(BIN)
 
 $(BIN): $(CORE_OBJ) $(CJSON_OBJ) $(MAIN_OBJ)
@@ -90,6 +90,17 @@ integration: $(BIN)
 # embedder so it needs no model/API.
 eval: $(BIN)
 	$(PYTHON) eval/recall_eval.py $(BIN) $(EVAL_ARGS)
+
+# Memory-inspection UI (ROADMAP 1.3): a local HTTP bridge that proxies to a
+# running aegisdb and serves the browser inspector. Point it at your server with
+# INSPECTOR_ARGS='--aegis-port 9470 --token <tok> --embedding-dim <dim>'.
+inspector:
+	$(PYTHON) tools/inspector/bridge.py $(INSPECTOR_ARGS)
+
+# Smoke test for the bridge: spawns a server + bridge and exercises every UI
+# endpoint (config/stats/browse/embed/explain/edit/delete + the op allowlist).
+inspector-test: $(BIN)
+	$(PYTHON) tools/inspector/test_bridge.py $(BIN)
 
 # Line-coverage report (gcov; no lcov/gcovr needed). Rebuilds everything
 # instrumented, runs the unit tests AND the contract suite, and aggregates.
