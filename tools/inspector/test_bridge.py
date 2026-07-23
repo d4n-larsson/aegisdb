@@ -90,7 +90,10 @@ def main():
         check(cfg.get("embedding_dim") == DIM and cfg.get("embedder") == "subword",
               "/api/config reports embedder + dim")
         page = urllib.request.urlopen("http://127.0.0.1:%d/" % HPORT).read().decode()
-        check("<title>AegisDB Memory Inspector</title>" in page, "/ serves the UI")
+        check("Memory Inspector</title>" in page, "/ serves the UI")
+        check('href="/aegis.css"' in page, "/ links the shared identity")
+        css = urllib.request.urlopen("http://127.0.0.1:%d/aegis.css" % HPORT).read().decode()
+        check("--brass" in css and "--episodic" in css, "/aegis.css serves the shared tokens")
 
         st = http("/api/query", {"operation": "stats"})
         check(st.get("ok") and st["records"] == 2, "stats via bridge")

@@ -10,26 +10,15 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Archivo+Expanded:wght@600;700;800&family=Hanken+Grotesk:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <!-- Shared AegisDB visual identity (palette, type, memory-type colours). -->
+  <link rel="stylesheet" href="aegis.css">
 
   <style>
+    /* Palette, type, and memory-type colours come from aegis.css (the shared
+       identity). Only page-layout tokens live here. */
     :root {
-      --ink:    #14110E;
-      --ink-2:  #1C1813;
-      --ink-3:  #221D17;
-      --line:   #342D24;
-      --paper:  #ECE6D8;
-      --dim:    #8E867A;
-      --dim-2:  #645C51;
-      --brass:  #C9A24B;
-      --brass-d:#A6802F;
-      --episodic:#B5532E;
-      --semantic:#C9A24B;
-      --working: #5E8C84;
       --gutter: 84px;
       --maxw: 1140px;
-      --disp: "Archivo Expanded", "Arial Black", sans-serif;
-      --body: "Hanken Grotesk", system-ui, sans-serif;
-      --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
     }
     * { box-sizing: border-box; }
     html { scroll-behavior: smooth; }
@@ -47,10 +36,7 @@
       background:
         radial-gradient(120% 70% at 78% -10%, rgba(201,162,75,0.07), transparent 60%);
     }
-    a { color: var(--brass); text-decoration: none; }
-    a:hover { color: var(--paper); }
-    ::selection { background: var(--brass); color: var(--ink); }
-    :focus-visible { outline: 2px solid var(--brass); outline-offset: 3px; border-radius: 2px; }
+    /* a, ::selection, :focus-visible now come from aegis.css */
     .skip-link {
       position: absolute; left: -9999px; top: 0; z-index: 100;
       background: var(--brass); color: var(--ink); padding: 10px 16px;

@@ -1,0 +1,62 @@
+/* AegisDB — shared visual identity.
+ *
+ * The single source of truth for palette, typography, and base treatment across
+ * every AegisDB surface: the landing site, the memory inspector, and (as far as
+ * it allows) the Grafana dashboard. Edit the identity HERE, not per-surface.
+ *
+ * Aesthetic: a warm archival "ledger" — ink, brass, and paper; monospace data;
+ * hairline rules. It reads like a durable, line-numbered log, which is what
+ * AegisDB is. The three memory types each carry a fixed colour so a record's
+ * kind is legible at a glance everywhere it appears.
+ *
+ * Fonts (load once per surface): Archivo Expanded (display), Hanken Grotesk
+ * (body), IBM Plex Mono (data/labels) —
+ * https://fonts.googleapis.com/css2?family=Archivo+Expanded:wght@600;700;800&family=Hanken+Grotesk:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap
+ */
+:root {
+  /* surfaces (dark, warm) */
+  --ink:    #14110E; /* page background            */
+  --ink-2:  #1C1813; /* raised surface / panel      */
+  --ink-3:  #221D17; /* higher surface / hover      */
+  --line:   #342D24; /* hairline rules & borders    */
+
+  /* text */
+  --paper:  #ECE6D8; /* primary text                */
+  --dim:    #8E867A; /* secondary text              */
+  --dim-2:  #645C51; /* faint text / disabled       */
+
+  /* brass — the one accent */
+  --brass:   #C9A24B;
+  --brass-d: #A6802F; /* pressed / deep              */
+  --brass-hi:#D9B25C; /* hover                       */
+
+  /* memory types — fixed hues, used everywhere a kind is shown */
+  --episodic: #B5532E; /* terracotta */
+  --semantic: #C9A24B; /* brass      */
+  --working:  #5E8C84; /* teal       */
+
+  --danger: #C0553C;
+
+  /* type */
+  --disp: "Archivo Expanded", "Arial Black", sans-serif;
+  --body: "Hanken Grotesk", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --radius: 3px; /* AegisDB corners are nearly square — this is a ledger */
+}
+
+a { color: var(--brass); text-decoration: none; }
+a:hover { color: var(--paper); }
+::selection { background: var(--brass); color: var(--ink); }
+:focus-visible { outline: 2px solid var(--brass); outline-offset: 3px; border-radius: 2px; }
+
+.mono { font-family: var(--mono); }
+
+/* Memory-type marker — a monospace kind label. Compose `.mtype` with a modifier
+   (`.mtype--episodic|--semantic|--working`) so the colour is consistent across
+   the inspector, the site, and any future surface. */
+.mtype { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.06em;
+         text-transform: uppercase; font-weight: 600; }
+.mtype--episodic { color: var(--episodic); }
+.mtype--semantic { color: var(--semantic); }
+.mtype--working  { color: var(--working); }

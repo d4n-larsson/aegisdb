@@ -8,6 +8,11 @@ editing or deleting it.
 
 ![inspector](../../docs/img) <!-- add a screenshot here -->
 
+The inspector wears the shared **AegisDB visual identity** (`site/aegis.css` — the
+ink/brass/paper ledger palette, the memory-type colours, and the type system used
+by the landing site). The bridge serves that one file at `/aegis.css`, so the
+inspector and the site never drift.
+
 ## Run
 
 The inspector talks to a **running** aegisdb; start your server first, then:
