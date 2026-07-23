@@ -114,6 +114,34 @@ def load_transcript(path: str | None) -> list:
 # paragraph.
 _SENT = re.compile(r"[^.!?\n]+[.!?]?")
 
+# Reject code / tool-output before it can score "salient". Transcripts are full
+# of line-numbered file reads, diffs, and shell commands, and the salience
+# markers match as SUBSTRINGS — e.g. `position: fixed` hits "fixed",
+# `"tags":["user","preference"]` hits "prefer" — so raw source lines were being
+# stored as memories. None of that is a durable fact worth remembering.
+_LINE_NO = re.compile(r"^\s*\d{1,6}([\t|:]|\s{2,})")  # `cat -n` / Read output: "46\t…"
+_SHELL = re.compile(r"^\s*[$#>]\s|^\s*(sed|grep|awk|echo|cat|make|docker|npm|pip|"
+                    r"cd|git|curl|python3?|nc|sudo|chmod|mkdir|rm|ls|tail|head)\b")
+_DIFF = re.compile(r"^\s*([-+][^-+ ]|@@ )")
+_CODE_TOKEN = re.compile(
+    r"=>|::|</|/>|/\*|\bvar\(--|\bfunction\b|\bconst\b|\blet\b|\bdef\b|\bclass\b|"
+    r"\bimport\b|\breturn\b|#include|\btypedef\b|\bstruct\b")
+
+
+def looks_like_code(text: str) -> bool:
+    """True if `text` looks like source code or tool output rather than prose."""
+    t = text.strip()
+    if not t:
+        return False
+    if _LINE_NO.match(t) or _SHELL.match(t) or _DIFF.match(t):
+        return True
+    if t.count(";") >= 2:  # code/CSS stacks semicolons; prose almost never does
+        return True
+    if _CODE_TOKEN.search(t):
+        return True
+    sym = sum(c in "{}[]()<>=|/\\`" for c in t)
+    return len(t) >= 12 and sym / len(t) > 0.08
+
 
 def derive_candidates(texts, config) -> list:
     candidates = []
@@ -122,6 +150,8 @@ def derive_candidates(texts, config) -> list:
         for sent in _SENT.findall(text):
             sent = sent.strip()
             if len(sent) < 8:
+                continue
+            if looks_like_code(sent):  # skip source lines / shell / diffs / tool output
                 continue
             cand = score_text(sent)
             if cand.salience <= 0:
