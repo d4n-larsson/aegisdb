@@ -85,3 +85,31 @@ owns embedding for both memories and queries. See `embedders.py`.
 
 `relevant` lists the memory labels that *should* surface for the query. Add
 scenarios by dropping in another JSON file and pointing `--dataset` at it.
+
+## A/B task benchmark — does memory *help*? (`ab_tasks.py`)
+
+The recall eval above measures whether the right memory *ranks*. This measures
+whether memory changes **task outcomes**: each task teaches a fact in one
+"session" (stored in AegisDB), then answers a question in a fresh session two
+ways — **ON** (recall + inject the memory) and **OFF** (no memory) — and reports
+the success rate of each and the **lift** (ON − OFF). That is the core "is this
+useful?" number: if memory doesn't lift success, it isn't earning its tokens.
+
+```sh
+make eval-tasks                                   # default: fake model (CI)
+make eval-tasks EVAL_ARGS='--model claude-code'   # a real lift, via the claude CLI
+make eval-tasks EVAL_ARGS='--model anthropic --judge --min-lift 0.3'
+python3 eval/ab_tasks.py ./build/aegisdb --json
+```
+
+The **answer model** is a seam (`fake` | `claude-code` | `anthropic` | `openai`,
+see `models.py`). The default **`fake`** model answers only from injected
+context, so ON succeeds and OFF fails — it proves the harness isolates the memory
+effect (ON 100% / OFF 0% / lift +100%) without a model. A **real backend** gives
+a real, smaller lift (it can guess some OFF answers and paraphrases ON ones — use
+`--judge` for rubric grading rather than keyword match). `--min-lift` gates CI.
+
+Dataset (`datasets/ab_tasks.json`): each task is
+`{"id", "memories": [...], "question", "expect_any": [distinctive tokens]}`
+(optional `"rubric"` for `--judge`). Each task runs in its own namespace, so the
+ON arm only recalls that task's memory.

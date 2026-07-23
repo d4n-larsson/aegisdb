@@ -52,7 +52,7 @@ DEPS := $(CORE_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(CJSON_OBJ:.o=.d) \
 
 PYTHON ?= python3
 
-.PHONY: all clean test integration check eval inspector inspector-test bench wire-bench fuzz fuzz-regress fuzz-corpus
+.PHONY: all clean test integration check eval eval-tasks inspector inspector-test bench wire-bench fuzz fuzz-regress fuzz-corpus
 all: $(BIN)
 
 $(BIN): $(CORE_OBJ) $(CJSON_OBJ) $(MAIN_OBJ)
@@ -90,6 +90,13 @@ integration: $(BIN)
 # embedder so it needs no model/API.
 eval: $(BIN)
 	$(PYTHON) eval/recall_eval.py $(BIN) $(EVAL_ARGS)
+
+# A/B task benchmark: does memory lift task success? Teaches a fact, then answers
+# a fresh question with memory ON vs OFF and reports the lift (ROADMAP 1.1+).
+# Default `fake` answer model runs in CI; point at a real one for a real number:
+# EVAL_ARGS='--model claude-code' (or --model anthropic --judge).
+eval-tasks: $(BIN)
+	$(PYTHON) eval/ab_tasks.py $(BIN) $(EVAL_ARGS)
 
 # Memory-inspection UI (ROADMAP 1.3): a local HTTP bridge that proxies to a
 # running aegisdb and serves the browser inspector. Point it at your server with
