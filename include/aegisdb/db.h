@@ -31,6 +31,12 @@ typedef struct {
     atomic_uint_fast64_t unauthorized;    /* auth rejections (subset of errors) */
     atomic_uint_fast64_t dispatch_micros; /* cumulative in-dispatch time (µs) */
     atomic_uint_fast64_t by_op[MOP__N];   /* per-operation request count */
+    /* Memory-quality outcomes (ROADMAP 3.3 observability): cumulative records
+     * removed by each maintenance policy, so operators can watch dedup/decay/
+     * erase activity — not just request counts. */
+    atomic_uint_fast64_t memories_merged;    /* records consolidate merged away */
+    atomic_uint_fast64_t memories_forgotten; /* records forget aged out */
+    atomic_uint_fast64_t memories_purged;    /* records purge erased (RTBF) */
 } Metrics;
 
 typedef struct {

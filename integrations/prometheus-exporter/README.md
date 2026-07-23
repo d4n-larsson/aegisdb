@@ -103,6 +103,9 @@ plus an `aegisdb_scrape_error{error="…"}` sample, so you alert on
 | `aegisdb_requests_total`, `aegisdb_errors_total`, `aegisdb_unauthorized_total` | counter | use `rate()` for QPS / error-rate |
 | `aegisdb_dispatch_seconds_total` | counter | cumulative in-dispatch time |
 | `aegisdb_requests_by_op_total{op}` | counter | per operation |
+| `aegisdb_memories_merged_total` | counter | records merged away by `consolidate` (dedup) |
+| `aegisdb_memories_forgotten_total` | counter | records aged out by `forget` (decay) |
+| `aegisdb_memories_purged_total` | counter | records erased by `purge` (right-to-be-forgotten) |
 | `aegisdb_tenant_records{namespace}`, `aegisdb_tenant_bytes{namespace}` | gauge | only when tenant quotas are configured |
 | `aegisdb_replication_*{role}` | gauge | only when the node replicates (lag_bytes, connected, offsets, replicas) |
 

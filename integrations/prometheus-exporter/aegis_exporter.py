@@ -214,6 +214,20 @@ def render(stats: dict, *, up: bool = True, scrape_seconds: float | None = None,
           "Requests per operation.",
           [({"op": op}, v) for op, v in by_op.items()])
 
+    # ---- memory-quality outcomes (dedup / decay / erase) ----
+    if "memories_merged" in m:
+        e.counter("aegisdb_memories_merged_total",
+                  "Records merged away by consolidate (dedup).",
+                  m.get("memories_merged"))
+    if "memories_forgotten" in m:
+        e.counter("aegisdb_memories_forgotten_total",
+                  "Records aged out by forget (decay).",
+                  m.get("memories_forgotten"))
+    if "memories_purged" in m:
+        e.counter("aegisdb_memories_purged_total",
+                  "Records erased by purge (right-to-be-forgotten).",
+                  m.get("memories_purged"))
+
     # ---- per-tenant usage (only present when quotas are configured) ----
     tenants = stats.get("tenants") or []
     e.add("aegisdb_tenant_records", "gauge",

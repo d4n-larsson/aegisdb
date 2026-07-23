@@ -643,6 +643,45 @@ def test_forget(binary, port):
         check(r.get("forgotten") == 2, "max_forget caps the number tombstoned")
 
 
+def test_memory_quality_metrics(binary, port):
+    print("[metrics: memory-quality outcomes (ROADMAP 3.3)]")
+    with Server(binary, port, phase=4) as srv:
+        m0 = srv.req({"operation": "stats"})["metrics"]
+        check(m0.get("memories_forgotten") == 0 and m0.get("memories_merged") == 0
+              and m0.get("memories_purged") == 0, "outcome counters start at zero")
+
+        # forget: low-value episodic age out
+        for i in range(3):
+            srv.req({"operation": "insert", "type": "episodic",
+                     "data": f"noise {i}", "importance": 0.01})
+        srv.req({"operation": "forget", "min_retention": 0.05})
+
+        # consolidate: near-duplicate semantic merge
+        dim = 384
+        base = [1.0] + [0.0] * (dim - 1)
+        near = [0.999, 0.001] + [0.0] * (dim - 2)
+        srv.req({"operation": "insert", "type": "semantic", "data": "d", "embedding": base})
+        srv.req({"operation": "insert", "type": "semantic", "data": "d", "embedding": near})
+        srv.req({"operation": "consolidate", "min_similarity": 0.95})
+
+        # purge: erase a namespace
+        for i in range(2):
+            srv.req({"operation": "insert", "type": "episodic", "data": f"a{i}",
+                     "agent_id": "alice"})
+        srv.req({"operation": "purge", "agent_id": "alice"})
+
+        m = srv.req({"operation": "stats"})["metrics"]
+        check(m.get("memories_forgotten") == 3, "memories_forgotten counts forget")
+        check(m.get("memories_merged") == 1, "memories_merged counts consolidate")
+        check(m.get("memories_purged") == 2, "memories_purged counts purge")
+
+        # a dry-run must not move the counters
+        srv.req({"operation": "insert", "type": "episodic", "data": "z", "importance": 0.01})
+        srv.req({"operation": "forget", "min_retention": 0.05, "dry_run": True})
+        m2 = srv.req({"operation": "stats"})["metrics"]
+        check(m2.get("memories_forgotten") == 3, "dry-run forget does not increment the counter")
+
+
 def test_temporal(binary, port):
     print("[temporal: history + point-in-time get (ROADMAP 3.1)]")
     with Server(binary, port, phase=4) as srv:
@@ -1708,6 +1747,7 @@ def main():
     test_export_purge_isolation(binary, 19501)
     test_temporal(binary, 19502)
     test_temporal_isolation(binary, 19503)
+    test_memory_quality_metrics(binary, 19504)
     test_multivector(binary, 19482)
     test_include_embeddings(binary, 19487)
     test_search_explain(binary, 19498)

@@ -941,6 +941,9 @@ aegis_status_t qe_purge_namespace(AegisDB *db, const char *ns, int dry_run,
     }
     free(ids);
     *out_count = count;
+    if (!dry_run)
+        atomic_fetch_add_explicit(&db->metrics.memories_purged, count,
+                                  memory_order_relaxed);
     return AEGIS_OK;
 }
 
@@ -1229,6 +1232,8 @@ aegis_status_t qe_consolidate(AegisDB *db, const char *ns, float min_similarity,
         free(recs);
     }
     free(ids);
+    atomic_fetch_add_explicit(&db->metrics.memories_merged, *out_merged,
+                              memory_order_relaxed);
     return AEGIS_OK;
 }
 
@@ -1293,6 +1298,9 @@ aegis_status_t qe_forget(AegisDB *db, const char *ns, MemoryType type,
         }
     }
     free(ids);
+    if (!dry_run)
+        atomic_fetch_add_explicit(&db->metrics.memories_forgotten, *out_forgotten,
+                                  memory_order_relaxed);
     return AEGIS_OK;
 }
 
@@ -1723,6 +1731,12 @@ static cJSON *handle_stats(AegisDB *db) {
             (double)atomic_load_explicit(&mt->unauthorized, memory_order_relaxed));
         cJSON_AddNumberToObject(m, "dispatch_micros",
             (double)atomic_load_explicit(&mt->dispatch_micros, memory_order_relaxed));
+        cJSON_AddNumberToObject(m, "memories_merged",
+            (double)atomic_load_explicit(&mt->memories_merged, memory_order_relaxed));
+        cJSON_AddNumberToObject(m, "memories_forgotten",
+            (double)atomic_load_explicit(&mt->memories_forgotten, memory_order_relaxed));
+        cJSON_AddNumberToObject(m, "memories_purged",
+            (double)atomic_load_explicit(&mt->memories_purged, memory_order_relaxed));
         cJSON *bo = cJSON_AddObjectToObject(m, "by_op");
         if (bo)
             for (int i = 0; i < MOP__N; i++)
