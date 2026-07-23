@@ -162,9 +162,25 @@
 let MODE = "browse", CFG = {}, LAST = [];
 
 async function api(path, payload) {
-  const r = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"},
-                              body: JSON.stringify(payload)});
-  return r.json();
+  // Parse defensively: if the inspector isn't reached through the bridge, /api/*
+  // returns non-JSON (or the fetch fails), which must surface as a clean error,
+  // not an uncaught JSON.parse exception.
+  try {
+    const r = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"},
+                                body: JSON.stringify(payload)});
+    return JSON.parse(await r.text());
+  } catch (e) {
+    return {ok:false, error:{code:"NO_BRIDGE", message:"not connected to the AegisDB bridge"}};
+  }
+}
+function disconnected() {
+  document.getElementById("results").innerHTML =
+    '<div class="empty" style="line-height:1.9">Not connected to the AegisDB bridge.<br><br>'
+    + 'Start it and open the URL it prints:<br>'
+    + '<span class="mono" style="color:var(--brass)">make inspector INSPECTOR_ARGS=\'--aegis-port 9470\'</span><br>'
+    + '<span class="mono" style="color:var(--dim)">then</span> '
+    + '<span class="mono" style="color:var(--brass)">http://127.0.0.1:8600/</span><br><br>'
+    + 'Opening the file directly (or via an IDE preview) can\'t reach the database API.</div>';
 }
 function toast(m){ const t=document.getElementById("toast"); t.textContent=m; t.classList.add("show");
   setTimeout(()=>t.classList.remove("show"), 1800); }
@@ -178,7 +194,8 @@ function setMode(m){
 }
 
 async function loadConfig(){
-  CFG = await (await fetch("/api/config")).json();
+  const r = await fetch("/api/config");
+  CFG = JSON.parse(await r.text()); // throws if not the bridge -> caught by init
   document.getElementById("embHint").textContent =
     CFG.embedder==="none" ? "⚠ bridge started with --embedder none; semantic search disabled"
                           : `embedder: ${CFG.embedder} · dim ${CFG.embedding_dim} (must match the stored vectors)`;
@@ -311,7 +328,12 @@ async function delRec(id){
   else toast(r.error?.code || "delete failed");
 }
 
-(async ()=>{ await loadConfig(); await loadStats(); })();
+(async ()=>{
+  if(location.protocol === "file:"){ disconnected(); return; }
+  try { await loadConfig(); }
+  catch(e){ disconnected(); return; } // opened outside the bridge
+  await loadStats();
+})();
 </script>
 </body>
 </html>
