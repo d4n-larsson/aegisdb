@@ -6,7 +6,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from aegis_mcp.capture import (score_text, derive_candidates, filter_candidates,
-                               load_transcript, run_capture)
+                               load_transcript, run_capture, looks_like_code)
 from aegis_mcp.config import Config
 from aegis_mcp.embeddings import NoneProvider
 
@@ -83,6 +83,46 @@ class TestCapturePipeline(unittest.TestCase):
     def test_load_transcript_missing_file(self):
         self.assertEqual(load_transcript(None), [])
         self.assertEqual(load_transcript("/no/such/path.jsonl"), [])
+
+
+class TestSkipCode(unittest.TestCase):
+    """Code/tool-output must not be captured, even when it contains a salience
+    marker as a substring (the bug: `position: fixed` -> "fixed")."""
+
+    def test_flags_code_and_tool_output(self):
+        for t in [
+            '46\tcontent: ""; position: fixed; inset: 0; z-index: 0;',   # Read output + "fixed"
+            '104\techo \'{"tags":["user","preference"]}\' | nc localhost 9470',  # "prefer"
+            "$ make ship",
+            "const x = () => foo.bar;",
+            "  --brass: var(--accent);",
+            "+    return AEGIS_OK;",
+            "if (retention >= min) { keep(); }",
+        ]:
+            self.assertTrue(looks_like_code(t), t)
+
+    def test_passes_prose(self):
+        for t in [
+            "We decided to deploy via make ship going forward.",
+            "The team always prefers spaces over tabs as a convention.",
+            "Root cause was a stale cache; clear it on boot.",  # one ';' is fine
+            "Remember to rotate the signing keys weekly.",
+        ]:
+            self.assertFalse(looks_like_code(t), t)
+
+    def test_derive_skips_code_with_marker_substring(self):
+        # a CSS line containing "fixed" and a JSON line containing "preference"
+        # must NOT become memories; the real decision beside them must.
+        texts = [
+            '46\tbody { position: fixed; }',
+            'req: {"tags":["user","preference"],"data":"x"}',
+            "We decided to use tabs going forward.",
+        ]
+        cands = derive_candidates(texts, Config())
+        out = [c.text for c in cands]
+        self.assertTrue(any("tabs going forward" in t for t in out))
+        self.assertFalse(any("position: fixed" in t for t in out))
+        self.assertFalse(any("preference" in t for t in out))
 
 
 class TestCaptureExtraction(unittest.TestCase):
