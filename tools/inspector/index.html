@@ -8,11 +8,25 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo+Expanded:wght@600;700;800&family=Hanken+Grotesk:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<!-- Shared AegisDB visual identity (served by the bridge at /aegis.css). -->
-<link rel="stylesheet" href="/aegis.css">
 <style>
-  /* Palette + type come from the shared identity (aegis.css). This file is only
-     the inspector's layout, in the same ink/brass/paper ledger language. */
+  /* AegisDB shared visual identity. These tokens are inlined (not linked) so the
+     inspector is self-contained and renders correctly however it is opened —
+     through the bridge, from the filesystem, or an IDE preview. Keep them in sync
+     with the canonical source, site/aegis.css (the drift guard in test_bridge.py
+     enforces it). */
+  :root {
+    --ink:#14110E; --ink-2:#1C1813; --ink-3:#221D17; --line:#342D24;
+    --paper:#ECE6D8; --dim:#8E867A; --dim-2:#645C51;
+    --brass:#C9A24B; --brass-d:#A6802F; --brass-hi:#D9B25C;
+    --episodic:#B5532E; --semantic:#C9A24B; --working:#5E8C84; --danger:#C0553C;
+    --disp:"Archivo Expanded","Arial Black",sans-serif;
+    --body:"Hanken Grotesk",system-ui,sans-serif;
+    --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
+    --radius:3px;
+  }
+  ::selection { background:var(--brass); color:var(--ink); }
+  :focus-visible { outline:2px solid var(--brass); outline-offset:2px; border-radius:2px; }
+
   * { box-sizing:border-box; }
   body { margin:0; font:15px/1.55 var(--body); background:var(--ink); color:var(--paper);
          -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; }

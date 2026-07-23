@@ -8,10 +8,11 @@ editing or deleting it.
 
 ![inspector](../../docs/img) <!-- add a screenshot here -->
 
-The inspector wears the shared **AegisDB visual identity** (`site/aegis.css` — the
-ink/brass/paper ledger palette, the memory-type colours, and the type system used
-by the landing site). The bridge serves that one file at `/aegis.css`, so the
-inspector and the site never drift.
+The inspector wears the shared **AegisDB visual identity** — the ink/brass/paper
+ledger palette, the memory-type colours, and the type system used by the landing
+site. The tokens are **inlined** so the page renders correctly however it's
+opened (through the bridge, from the filesystem, or an IDE preview); a drift guard
+in `test_bridge.py` keeps them matching the canonical source, `site/aegis.css`.
 
 ## Run
 

@@ -74,14 +74,6 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, fh.read(), "text/html; charset=utf-8")
             except OSError:
                 self._send(500, {"error": "index.html not found"})
-        elif self.path == "/aegis.css":
-            # The shared visual identity, from the repo's single source of truth
-            # (site/aegis.css) so the inspector and the landing site never drift.
-            try:
-                with open(os.path.join(HERE, "..", "..", "site", "aegis.css"), "rb") as fh:
-                    self._send(200, fh.read(), "text/css; charset=utf-8")
-            except OSError:
-                self._send(404, {"error": "aegis.css not found"})
         elif self.path == "/api/config":
             self._send(200, {
                 "embedder": CONFIG["embedder_name"],
