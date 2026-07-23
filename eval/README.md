@@ -85,3 +85,61 @@ owns embedding for both memories and queries. See `embedders.py`.
 
 `relevant` lists the memory labels that *should* surface for the query. Add
 scenarios by dropping in another JSON file and pointing `--dataset` at it.
+
+## A/B task benchmark — does memory *help*? (`ab_tasks.py`)
+
+The recall eval above measures whether the right memory *ranks*. This measures
+whether memory changes **task outcomes**: each task teaches a fact in one
+"session" (stored in AegisDB), then answers a question in a fresh session two
+ways — **ON** (recall + inject the memory) and **OFF** (no memory) — and reports
+the success rate of each and the **lift** (ON − OFF). That is the core "is this
+useful?" number: if memory doesn't lift success, it isn't earning its tokens.
+
+```sh
+make eval-tasks                                   # default: fake model (CI)
+make eval-tasks EVAL_ARGS='--model claude-code'   # a real lift, via the claude CLI
+make eval-tasks EVAL_ARGS='--model anthropic --judge --min-lift 0.3'
+python3 eval/ab_tasks.py ./build/aegisdb --json
+```
+
+The **answer model** is a seam (`fake` | `claude-code` | `anthropic` | `openai`,
+see `models.py`). The default **`fake`** model answers only from injected
+context, so ON succeeds and OFF fails — it proves the harness isolates the memory
+effect (ON 100% / OFF 0% / lift +100%) without a model. A **real backend** gives
+a real, smaller lift (it can guess some OFF answers and paraphrases ON ones — use
+`--judge` for rubric grading rather than keyword match). `--min-lift` gates CI.
+
+Dataset (`datasets/ab_tasks.json`): each task is
+`{"id", "memories": [...], "question", "expect_any": [distinctive tokens]}`
+(optional `"rubric"` for `--judge`). Each task runs in its own namespace, so the
+ON arm only recalls that task's memory.
+
+### Recorded result
+
+`make eval-tasks EVAL_ARGS='--model claude-code'`, 10 coding-agent tasks:
+
+```
+with memory (ON):    100%
+without memory (OFF): 20%
+lift:                +80%   (ON − OFF)
+```
+
+Memory took a 20% agent to 100% on cross-session recall. Both OFF successes were
+`tests` and `style` — see the caveat below.
+
+### ⚠ The OFF arm must have no side channel
+
+The measured lift is only honest if the OFF (no-memory) arm genuinely *cannot*
+obtain the answer another way. The **`claude-code` backend runs `claude -p`
+inside the repo with tool access**, so on tasks whose fictional fact happens to
+match AegisDB's real code, OFF just reads the files and "passes" — in the run
+above, `tests` (`make integration`) and `style` (`snake_case`) OFF answers cited
+the actual source, not the task's fact. So:
+
+- The **+80%** above is a **lower bound**: on the 8 tasks whose facts aren't in
+  the environment, ON won 8/8 while OFF scored 0. A sandboxed backend would push
+  OFF toward 0% and the lift toward +100% on this set.
+- For a **clean, publishable number**, use an API backend with no filesystem/tools
+  (`--model anthropic|openai`, `--judge` for paraphrase-tolerant grading), or
+  author facts that can't be inferred from the environment. The default `fake`
+  model has no side channel by construction.

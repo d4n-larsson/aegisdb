@@ -1,0 +1,67 @@
+{
+  "name": "coding_agent_ab",
+  "description": "A/B tasks: each teaches a fact in one 'session' (stored in AegisDB), then a fresh session asks a question only answerable from that memory. We compare answer quality with memory ON (recalled + injected) vs OFF (no memory). expect_any lists distinctive tokens a correct answer must contain; for a real model, add --judge for rubric grading.",
+  "embedding_dim": 256,
+  "tasks": [
+    {
+      "id": "deploy",
+      "memories": ["Production deploys go through `make ship`; the staging smoke-test step is flaky and often needs one retry."],
+      "question": "How do I deploy this project to production?",
+      "expect_any": ["make ship"]
+    },
+    {
+      "id": "rollback",
+      "memories": ["To roll back a bad release, run `make rollback VERSION=<prev>` — it re-points the load balancer to the previous image."],
+      "question": "What's the command to roll back a bad release?",
+      "expect_any": ["make rollback"]
+    },
+    {
+      "id": "db_pool",
+      "memories": ["The Postgres connection pool max is 20; exceeding it causes 'too many clients' errors under load."],
+      "question": "What is our Postgres connection pool maximum?",
+      "expect_any": ["20", "twenty"]
+    },
+    {
+      "id": "auth",
+      "memories": ["Authentication uses short-lived JWTs signed with RS256; the public keys are served from /.well-known/jwks.json."],
+      "question": "What algorithm do we sign auth tokens with?",
+      "expect_any": ["RS256"]
+    },
+    {
+      "id": "rate_limit",
+      "memories": ["The login endpoint is rate-limited to 5 attempts per minute per IP, returning HTTP 429 after that."],
+      "question": "What is the login rate limit?",
+      "expect_any": ["5 attempts", "5 per minute", "5/min", "five attempts"]
+    },
+    {
+      "id": "tests",
+      "memories": ["Run unit tests with `make test` and the integration suite with `make integration`; `make check` runs both."],
+      "question": "How do I run the integration tests?",
+      "expect_any": ["make integration", "make check"]
+    },
+    {
+      "id": "style",
+      "memories": ["Code style: snake_case for functions and variables, PascalCase for types. Run `make fmt` before committing."],
+      "question": "What naming convention do we use for functions?",
+      "expect_any": ["snake_case", "snake case"]
+    },
+    {
+      "id": "cache",
+      "memories": ["The product catalog is cached in Redis with a 5-minute TTL; after a price change, invalidate the catalog:* keys."],
+      "question": "How long is the product catalog cached for?",
+      "expect_any": ["5-minute", "5 minute", "five minute", "5 min"]
+    },
+    {
+      "id": "secrets",
+      "memories": ["Secrets are injected as environment variables from Vault at boot; never commit them or read them from files."],
+      "question": "Where do our secrets come from at runtime?",
+      "expect_any": ["vault"]
+    },
+    {
+      "id": "incident",
+      "memories": ["Incident: a memory leak in the image-resize worker OOM-killed pods hourly; root cause was an unbounded LRU cache, fixed by capping it at 512 entries."],
+      "question": "What caused the image-resize worker to keep getting OOM-killed?",
+      "expect_any": ["unbounded lru", "lru cache", "unbounded cache"]
+    }
+  ]
+}
