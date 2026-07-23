@@ -216,6 +216,39 @@ services:
       - grafana-data:/var/lib/grafana
     restart: unless-stopped
 
+  # Memory inspector (opt-in): `docker compose --profile inspector up -d`, then
+  # open http://127.0.0.1:8600/. A browser UI to browse/search memories, see why
+  # each hit ranked (the search `explain` breakdown), and edit or delete them.
+  # It is a tiny stdlib-Python HTTP->TCP bridge (no build) that proxies an
+  # allow-listed set of ops to the server and serves the UI — the page cannot
+  # speak the raw wire protocol itself, so it needs this. Loopback-only by
+  # default (it hands out an authenticated proxy to the database); set
+  # AEGIS_INSPECTOR_BIND=0.0.0.0 to expose it. Semantic search needs an embedder
+  # matching the stored vectors — the default `subword` is for demo/eval data;
+  # for a real corpus, browse/provenance/edit/delete work regardless.
+  inspector:
+    profiles: ["inspector"]
+    image: python:3.12-slim
+    container_name: aegisdb-inspector
+    depends_on:
+      aegisdb:
+        condition: service_healthy
+    ports:
+      - "${AEGIS_INSPECTOR_BIND:-127.0.0.1}:${AEGIS_INSPECTOR_HOST_PORT:-8600}:8600"
+    volumes:
+      # The bridge is source-only (stdlib); mount it + the shared embedder module
+      # it imports (../../eval) at the layout it expects. Read-only.
+      - ./tools/inspector:/app/tools/inspector:ro
+      - ./eval:/app/eval:ro
+    environment:
+      AEGIS_TOKEN: "${AEGIS_AUTH_TOKEN:-}"   # admin token if the server enforces auth
+    command: >
+      python3 /app/tools/inspector/bridge.py
+      --aegis-host aegisdb --aegis-port ${AEGIS_PORT:-9470}
+      --http-port 8600 --bind 0.0.0.0
+      --embedding-dim ${AEGIS_EMBEDDING_DIM:-384}
+    restart: unless-stopped
+
 volumes:
   aegis-data:
   prometheus-data:

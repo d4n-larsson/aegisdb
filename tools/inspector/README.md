@@ -8,9 +8,27 @@ editing or deleting it.
 
 ![inspector](../../docs/img) <!-- add a screenshot here -->
 
+The inspector wears the shared **AegisDB visual identity** — the ink/brass/paper
+ledger palette, the memory-type colours, and the type system used by the landing
+site. The tokens are **inlined** so the page renders correctly however it's
+opened (through the bridge, from the filesystem, or an IDE preview); a drift guard
+in `test_bridge.py` keeps them matching the canonical source, `site/aegis.css`.
+
 ## Run
 
-The inspector talks to a **running** aegisdb; start your server first, then:
+The inspector is an HTTP→TCP **bridge** that a browser talks to (a web page can't
+speak the raw wire protocol). It needs a **running** aegisdb.
+
+**With Docker Compose** — the inspector is its own opt-in profile:
+
+```sh
+docker compose --profile inspector up -d --build
+```
+
+Then open <http://127.0.0.1:8600/>. (A plain `docker compose up` starts only the
+server; the inspector is opt-in, like `metrics`/`monitoring`.)
+
+**Without Docker** — start your server, then run the bridge on the host:
 
 ```sh
 make inspector INSPECTOR_ARGS='--aegis-port 9470'
@@ -18,7 +36,9 @@ make inspector INSPECTOR_ARGS='--aegis-port 9470'
 python3 tools/inspector/bridge.py --aegis-port 9470
 ```
 
-Open <http://127.0.0.1:8600/>.
+Open the URL the bridge prints — <http://127.0.0.1:8600/>. Don't open
+`index.html` as a file: it needs the bridge for the database API (it'll say so if
+you do).
 
 With auth enabled, pass the token (kept server-side, never sent to the browser):
 

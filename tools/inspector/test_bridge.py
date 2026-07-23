@@ -58,7 +58,28 @@ def http(path, payload=None):
         return json.loads(e.read())
 
 
+def check_identity_drift():
+    """The inspector inlines the brand tokens (so it renders standalone); this
+    guards them against drifting from the canonical source, site/aegis.css."""
+    print("[inspector identity drift guard]")
+    import re
+    with open(os.path.join(HERE, "index.html")) as fh:
+        page = fh.read()
+    with open(os.path.join(ROOT, "site", "aegis.css")) as fh:
+        css = fh.read()
+
+    def token(text, name):
+        m = re.search(r"--%s:\s*(#[0-9A-Fa-f]{3,6})" % re.escape(name), text)
+        return m.group(1).upper() if m else None
+
+    for name in ("ink", "brass", "paper", "line", "episodic", "semantic", "working"):
+        a, b = token(page, name), token(css, name)
+        check(a is not None and a == b,
+              f"--{name} matches site/aegis.css ({a} == {b})")
+
+
 def main():
+    check_identity_drift()
     datadir = tempfile.mkdtemp(prefix="aegis_inspector_")
     srv = subprocess.Popen([BIN, "--data-dir", datadir, "--port", str(APORT),
                             "--phase", "4", "--embedding-dim", str(DIM)],
@@ -90,7 +111,10 @@ def main():
         check(cfg.get("embedding_dim") == DIM and cfg.get("embedder") == "subword",
               "/api/config reports embedder + dim")
         page = urllib.request.urlopen("http://127.0.0.1:%d/" % HPORT).read().decode()
-        check("<title>AegisDB Memory Inspector</title>" in page, "/ serves the UI")
+        check("Memory Inspector</title>" in page, "/ serves the UI")
+        # Self-contained: tokens are inlined so it renders however it's opened.
+        check("--brass:#C9A24B" in page and "--ink:#14110E" in page,
+              "/ inlines the shared identity tokens (renders without the bridge)")
 
         st = http("/api/query", {"operation": "stats"})
         check(st.get("ok") and st["records"] == 2, "stats via bridge")

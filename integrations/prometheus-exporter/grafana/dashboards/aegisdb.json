@@ -193,7 +193,11 @@
         { "refId": "B", "expr": "sum(rate(aegisdb_memories_forgotten_total[$__rate_interval]))", "legendFormat": "forgotten (decay)", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } },
         { "refId": "C", "expr": "sum(rate(aegisdb_memories_purged_total[$__rate_interval]))", "legendFormat": "purged (right-to-be-forgotten)", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } }
       ],
-      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 } }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 } }, "overrides": [
+        { "matcher": { "id": "byName", "options": "merged (consolidate)" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "#C9A24B" } } ] },
+        { "matcher": { "id": "byName", "options": "forgotten (decay)" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "#5E8C84" } } ] },
+        { "matcher": { "id": "byName", "options": "purged (right-to-be-forgotten)" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "#B5532E" } } ] }
+      ] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
