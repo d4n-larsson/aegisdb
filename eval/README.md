@@ -116,30 +116,35 @@ ON arm only recalls that task's memory.
 
 ### Recorded result
 
-`make eval-tasks EVAL_ARGS='--model claude-code'`, 10 coding-agent tasks:
+`make eval-tasks EVAL_ARGS='--model claude-code --sandbox'`, 10 coding-agent tasks:
 
 ```
 with memory (ON):    100%
-without memory (OFF): 20%
-lift:                +80%   (ON − OFF)
+without memory (OFF):  0%
+lift:                +100%   (ON − OFF)
 ```
 
-Memory took a 20% agent to 100% on cross-session recall. Both OFF successes were
-`tests` and `style` — see the caveat below.
+Memory is the entire difference between a 0% and a 100% agent on cross-session
+recall: sandboxed, the model correctly answers "I don't know" on every OFF task
+and gets all 10 right when the memory is recalled and injected.
 
 ### ⚠ The OFF arm must have no side channel
 
-The measured lift is only honest if the OFF (no-memory) arm genuinely *cannot*
-obtain the answer another way. The **`claude-code` backend runs `claude -p`
-inside the repo with tool access**, so on tasks whose fictional fact happens to
-match AegisDB's real code, OFF just reads the files and "passes" — in the run
-above, `tests` (`make integration`) and `style` (`snake_case`) OFF answers cited
-the actual source, not the task's fact. So:
+The lift is only honest if the OFF (no-memory) arm genuinely *cannot* obtain the
+answer another way. Two things can leak, and `--sandbox` closes both:
 
-- The **+80%** above is a **lower bound**: on the 8 tasks whose facts aren't in
-  the environment, ON won 8/8 while OFF scored 0. A sandboxed backend would push
-  OFF toward 0% and the lift toward +100% on this set.
-- For a **clean, publishable number**, use an API backend with no filesystem/tools
-  (`--model anthropic|openai`, `--judge` for paraphrase-tolerant grading), or
-  author facts that can't be inferred from the environment. The default `fake`
-  model has no side channel by construction.
+- **Filesystem / tools.** The `claude-code` backend runs `claude -p` **in the
+  repo with tool access**, so on a task whose fictional fact matches AegisDB's
+  real code, OFF just reads the files and "passes". Without `--sandbox` this run
+  scored OFF 20% (`tests` → `make integration`, `style` → `snake_case`, both read
+  from source) for a +80% lower bound. `--sandbox` runs from an empty dir with
+  tools disabled (`--disallowedTools`), so OFF has nothing to read → OFF 0%.
+- **A lenient judge.** `--judge` grades with the model. A naive "is this answer
+  correct?" prompt rubber-stamps "I don't know" as acceptable — a sandboxed
+  `--judge` run scored OFF 80% purely from that. The grader now grades *factual
+  match* and explicitly fails unsure/omitting answers; keyword grading (distinct
+  tokens) is the most reliable for a curated dataset.
+
+So: **`--sandbox`** for a clean baseline, and either keyword grading or the
+hardened `--judge`. API backends (`--model anthropic|openai`, no filesystem/tools)
+are side-channel-free by default; the `fake` model is by construction.
