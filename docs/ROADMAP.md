@@ -203,13 +203,24 @@ behind the provider seam.*
   contract test asserts the purged plaintext is absent from `memory.log` after
   compaction while a co-tenant's data survives.
 
-### 3.3 Hosted tier & operability
+### 3.3 Hosted tier & operability — *observability shipped*
 - **Why now:** distribution. The C core's durability/encryption/replication become
   a sales line only if it's trivial to run.
 - **Build:** one-line deploy (the `docker-compose.yml` is step one), first-class
   metrics (extend the existing Grafana dashboard: recall latency, index RAM,
   eviction/decay rates, distillation lag), SDKs, and framework adapters beyond MCP.
 - **Leverages:** replication, snapshots/restore, health/stats endpoints, encryption.
+- **Already in place:** one-command deploy (`docker compose up`, with
+  `backup`/`summarize`/`metrics`/`monitoring` profiles), a Prometheus exporter,
+  and an auto-provisioned Grafana dashboard.
+- **Shipped:** made the **memory-quality layer observable** — cumulative outcome
+  counters (`memories_merged`/`memories_forgotten`/`memories_purged`) in the stats
+  `metrics`, surfaced by the exporter (`aegisdb_memories_*_total`) and a new
+  "Memory-quality activity" dashboard panel. So the Horizon-2/3 work (dedup, decay,
+  erase) is now visible in production, not just in the eval harness — the roadmap's
+  "eviction/decay rates".
+- **Remaining:** a standalone, pip-installable client SDK and framework adapters
+  beyond MCP; recall-latency histogram + distillation-lag metrics.
 
 ---
 

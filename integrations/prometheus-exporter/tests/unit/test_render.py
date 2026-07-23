@@ -26,6 +26,7 @@ SAMPLE = {
                "index_bytes_limit": 55000},
     "metrics": {"requests": 42, "errors": 1, "unauthorized": 0,
                 "dispatch_micros": 5000000,
+                "memories_merged": 4, "memories_forgotten": 11, "memories_purged": 2,
                 "by_op": {"insert": 7, "get": 30, "stats": 5}},
 }
 
@@ -90,6 +91,19 @@ class TestRender(unittest.TestCase):
         # 5_000_000 micros -> 5.0 seconds
         self.assertEqual(float(_value(text, "aegisdb_dispatch_seconds_total")), 5.0)
         self.assertIn('aegisdb_requests_by_op_total{op="get"} 30', text)
+
+    def test_memory_quality_counters(self):
+        text = render(SAMPLE, up=True)
+        self.assertEqual(_value(text, "aegisdb_memories_merged_total"), "4")
+        self.assertEqual(_value(text, "aegisdb_memories_forgotten_total"), "11")
+        self.assertEqual(_value(text, "aegisdb_memories_purged_total"), "2")
+        self.assertIn("# TYPE aegisdb_memories_forgotten_total counter", text)
+
+    def test_memory_quality_absent_when_missing(self):
+        # older servers without these fields -> the metrics are simply omitted
+        s = dict(SAMPLE, metrics={"requests": 1, "errors": 0, "unauthorized": 0})
+        text = render(s, up=True)
+        self.assertNotIn("aegisdb_memories_forgotten_total", text)
 
     def test_type_headers_present(self):
         text = render(SAMPLE, up=True)
