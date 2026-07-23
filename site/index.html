@@ -264,6 +264,7 @@
         <nav aria-label="Primary">
           <a href="#tokens" class="nav-hide">why</a>
           <a href="#what" class="nav-hide">memory</a>
+          <a href="#curation" class="nav-hide">curation</a>
           <a href="#wire" class="nav-hide">protocol</a>
           <a href="#claude" class="nav-hide">claude&nbsp;code</a>
           <a href="#start">get&nbsp;started</a>
@@ -410,11 +411,68 @@
       </div>
     </section>
 
+    <!-- MEMORY QUALITY -->
+    <section class="rec" id="curation">
+      <div class="off mono">0x0400</div>
+      <div class="col">
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0005</b>&nbsp;·&nbsp;type=semantic</p>
+        <h2 class="title">Memory that curates itself.</h2>
+        <p class="lede">A store that only grows becomes noise. AegisDB keeps memory coherent — collapsing duplicates, retiring what's gone stale, and letting a new fact supersede the one it contradicts — and every recall can show its work.</p>
+        <div class="feats">
+          <div class="feat se" data-k="0x0400">
+            <h3><span class="bar"></span>Dedup with a paper trail</h3>
+            <p><span class="mono">consolidate</span> merges near-duplicate facts into one survivor and records a <b>supersedes</b> link to each record it absorbs — an auditable merge, not silent loss.</p>
+          </div>
+          <div class="feat wk" data-k="0x0410">
+            <h3><span class="bar"></span>Decay, not hoarding</h3>
+            <p><span class="mono">forget</span> ages out low-value records by <b>importance × recency</b>, so a long-running corpus — and its RAM — plateaus instead of growing without bound.</p>
+          </div>
+          <div class="feat se" data-k="0x0420">
+            <h3><span class="bar"></span>Contradictions resolve</h3>
+            <p>When capture learns a fact that updates an old one, the new version <b>supersedes</b> it — "prefers X, <i>not</i> Y" — instead of stacking both.</p>
+          </div>
+          <div class="feat" data-k="0x0430">
+            <h3><span class="bar"></span>Explainable recall</h3>
+            <p>Ask <span class="mono">search</span> to <span class="mono">explain</span> and every hit returns its ranking breakdown — <b>similarity × weight × recency = score</b>. No black box.</p>
+          </div>
+          <div class="feat" data-k="0x0440">
+            <h3><span class="bar"></span>Prove it, don't guess</h3>
+            <p><span class="mono">make eval</span> scores recall@k / MRR against a labelled corpus — including the dedup and decay policies — so a memory-quality change is gated on numbers, not vibes.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CONTROL / COMPLIANCE -->
+    <section class="rec" id="control">
+      <div class="off mono">0x0480</div>
+      <div class="col">
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0006</b>&nbsp;·&nbsp;type=meta</p>
+        <h2 class="title">Yours to inspect, replay, and erase.</h2>
+        <p class="lede">It's your data on your box — so you can see all of it, reconstruct any past state, and truly delete it. No console, no support ticket, no export request.</p>
+        <div class="feats">
+          <div class="feat" data-k="0x0480">
+            <h3><span class="bar"></span>Browse it in a UI</h3>
+            <p>A local <b>memory inspector</b>: search records, see why each hit ranked, and edit or delete one by hand. <span class="mono">docker compose --profile inspector up</span>.</p>
+          </div>
+          <div class="feat ep" data-k="0x0490">
+            <h3><span class="bar"></span>Replay any past state</h3>
+            <p><span class="mono">history</span> returns every version of a record with validity intervals; <span class="mono">get</span> with <span class="mono">as_of</span> reconstructs it as of any past moment — <b>what did the agent know at T?</b></p>
+          </div>
+          <div class="feat wk" data-k="0x04A0">
+            <h3><span class="bar"></span>Right to be forgotten</h3>
+            <p><span class="mono">export</span> dumps everything stored about a subject; <span class="mono">purge</span> hard-deletes a namespace and compacts, so the bytes <b>actually leave the on-disk log</b>.</p>
+          </div>
+        </div>
+        <!-- TODO: drop a memory-inspector screenshot at docs/img/inspector.png and surface it here (e.g. a .twoup with the "Browse it in a UI" copy). -->
+      </div>
+    </section>
+
     <!-- PERFORMANCE -->
     <section class="rec" id="speed">
       <div class="off mono">0x0500</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0005</b>&nbsp;·&nbsp;type=semantic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0007</b>&nbsp;·&nbsp;type=semantic</p>
         <div class="twoup">
           <div>
             <h2 class="title">Fast enough to be invisible.</h2>
@@ -438,7 +496,7 @@ read (get)     <span class="ar">→</span> p50 0.8 ms over the wire
     <section class="rec" id="wire">
       <div class="off mono">0x0640</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0006</b>&nbsp;·&nbsp;type=semantic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0008</b>&nbsp;·&nbsp;type=semantic</p>
         <h2 class="title">One JSON line in. One JSON line back.</h2>
         <p class="lede">The wire protocol is newline-delimited JSON over TCP. No SDK, no driver — any language that can open a socket can speak it.</p>
         <p class="cap">store a memory, then recall it</p>
@@ -459,7 +517,7 @@ read (get)     <span class="ar">→</span> p50 0.8 ms over the wire
     <section class="rec" id="claude">
       <div class="off mono">0x07A0</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0007</b>&nbsp;·&nbsp;type=semantic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0009</b>&nbsp;·&nbsp;type=semantic</p>
         <div class="twoup">
           <div>
             <h2 class="title">Long-term memory for Claude&nbsp;Code.</h2>
@@ -496,7 +554,7 @@ read (get)     <span class="ar">→</span> p50 0.8 ms over the wire
     <section class="rec" id="start">
       <div class="off mono">0x0940</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0008</b>&nbsp;·&nbsp;type=episodic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0010</b>&nbsp;·&nbsp;type=episodic</p>
         <h2 class="title">Run it, talk to it.</h2>
         <p class="lede">Pull the image or build from source — either way you're holding a connection in seconds.</p>
         <div class="start-log">
@@ -538,7 +596,7 @@ docker exec aegisdb aegisdb client search --tags user</code>
     <section class="rec" id="team">
       <div class="off mono">0x0B20</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0009</b>&nbsp;·&nbsp;type=meta</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0011</b>&nbsp;·&nbsp;type=meta</p>
         <h2 class="title">Set up shared memory for a team.</h2>
         <p class="lede">One server, one tenant token per project, and Claude&nbsp;Code wired in with <span class="mono">uvx</span> — no clone anywhere. Uses the published image and the <a href="https://pypi.org/project/aegisdb-mcp/"><span class="mono">aegisdb-mcp</span></a> PyPI package.</p>
         <div class="start-log">
