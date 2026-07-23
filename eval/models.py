@@ -62,17 +62,34 @@ class _CLIAnswerModel(AnswerModel):
         return (out or "").strip()
 
 
+# Tools the sandbox forbids, so the OFF arm can't read the repo / browse / recall
+# its own memory to obtain an answer the benchmark is supposed to withhold.
+_SANDBOX_DENY = ["Bash", "Read", "Grep", "Glob", "Edit", "Write", "NotebookEdit",
+                 "WebFetch", "WebSearch", "Task"]
+
+
 class ClaudeCodeAnswerModel(_CLIAnswerModel):
-    def __init__(self, model="", timeout_s=120.0):
-        self._model, self._timeout = model or "", timeout_s
+    def __init__(self, model="", timeout_s=120.0, sandbox=False):
+        self._model, self._timeout, self._sandbox = model or "", timeout_s, sandbox
+        self._cwd = None
 
     def available(self) -> bool:
         return shutil.which("claude") is not None
 
     def _complete(self, prompt: str) -> str | None:
         cmd = ["claude", "-p", prompt] + (["--model", self._model] if self._model else [])
+        cwd = None
+        if self._sandbox:
+            # Run from an empty dir with tools disabled: no repo files, no project
+            # hooks/MCP — the model must answer from the prompt alone.
+            if self._cwd is None:
+                import tempfile
+                self._cwd = tempfile.mkdtemp(prefix="aegis_ab_sandbox_")
+            cwd = self._cwd
+            cmd += ["--disallowedTools", *_SANDBOX_DENY]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=self._timeout)
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=self._timeout, cwd=cwd)
         except (subprocess.TimeoutExpired, OSError):
             return None
         return r.stdout if r.returncode == 0 else None
@@ -131,11 +148,11 @@ class OpenAIAnswerModel(_CLIAnswerModel):
         return (r.choices[0].message.content or "") if r.choices else ""
 
 
-def resolve_model(name: str, model_name="", api_base="") -> AnswerModel:
+def resolve_model(name: str, model_name="", api_base="", sandbox=False) -> AnswerModel:
     if name == "fake":
         return FakeAnswerModel()
     if name == "claude-code":
-        return ClaudeCodeAnswerModel(model_name)
+        return ClaudeCodeAnswerModel(model_name, sandbox=sandbox)
     if name == "anthropic":
         return AnthropicAnswerModel(model_name)
     if name == "openai":

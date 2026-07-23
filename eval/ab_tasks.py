@@ -54,12 +54,17 @@ def grade(answer, task, model, judge):
     if exp and not judge:
         return any(k.lower() in a for k in exp)
     if judge:
-        rubric = task.get("rubric") or (
-            "The answer is correct if it conveys: " + "; ".join(task.get("expect_any", [])))
+        rubric = task.get("rubric") or ("it states: " + "; ".join(task.get("expect_any", [])))
+        # Grade factual match, not appropriateness — otherwise the judge rubber-
+        # stamps "I don't know" as an acceptable answer (it does, by default).
         v = model.answer(
-            f"Question: {task['question']}\nAnswer given: {answer}\n"
-            f"Grading rubric: {rubric}\nIs the answer correct? Reply only YES or NO.")
-        return v.strip().lower().startswith("y")
+            "You grade whether an answer states a specific required fact.\n"
+            f"Question: {task['question']}\n"
+            f"Answer to grade: {answer}\n"
+            f"The answer is CORRECT only if {rubric}. If it says it doesn't know, "
+            "is unsure, or omits that fact, it is INCORRECT.\n"
+            "Reply with exactly one word: YES or NO.")
+        return v.strip().lower().startswith("yes")
     return bool(exp) and any(k.lower() in a for k in exp)
 
 
@@ -74,7 +79,7 @@ def run(args):
         ds = json.load(fh)
     dim = ds.get("embedding_dim", 256)
     embed = resolve_embedder(args.embedder, dim, args.embedder_cmd)
-    model = resolve_model(args.model, args.model_name, args.api_base)
+    model = resolve_model(args.model, args.model_name, args.api_base, args.sandbox)
     if not model.available():
         print(f"model backend '{args.model}' unavailable "
               f"(missing SDK/key/CLI); nothing to measure", file=sys.stderr)
@@ -139,6 +144,9 @@ def main():
     ap.add_argument("--port", type=int, default=9972)
     ap.add_argument("--top-k", type=int, default=5, help="memories recalled for the ON arm")
     ap.add_argument("--judge", action="store_true", help="grade with the model (LLM-as-judge)")
+    ap.add_argument("--sandbox", action="store_true",
+                    help="claude-code: run from an empty dir with tools disabled, so the "
+                         "OFF arm has no filesystem/memory side channel (a clean baseline)")
     ap.add_argument("--min-lift", type=float, default=None, help="fail if ON−OFF < this (0..1)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
