@@ -69,16 +69,38 @@ running): `uvx --from aegisdb-mcp aegisdb-init` — see
 - **Working memory** — volatile per-session ring buffer with TTL and promotion
 - **Retrieval** — lookup by ID, time-range search, tag search (`all`/`any`),
   semantic (embedding) search ranked by cosine similarity weighted by
-  importance × confidence; `count` and `consolidate` (dedup) over the same filters
+  importance × confidence, plus `count` over the same filters
+- **Explainable ranking** — `search` with `explain:true` returns a per-hit
+  breakdown (similarity × weight × recency = score), so retrieval is inspectable,
+  not a black box
 - **Semantic scale** — exact cosine while small; past `--ann-threshold` an HNSW
   graph for sublinear approximate top-K, built off the write path and sharded so
   the build parallelizes (`--ann-shard-target`), optionally int8-quantized
 - **Relationships** — directed edges between records, graph traversal, and
   agent-namespace isolation
+- **Memory that curates itself** — `consolidate` collapses near-duplicate
+  semantic facts (recording a `supersedes` provenance link, not silent loss);
+  `forget` ages out low-value records by importance × recency decay so a
+  long-running corpus and its RAM plateau — both measurable via `make eval`
+- **Time travel** — `history` returns every version of a record with validity
+  intervals, and `get` with `as_of` reconstructs it as of a past time ("what did
+  the agent know at T?") from the append-only log
+- **Right to be forgotten** — `export` dumps a subject's records (per-namespace,
+  paginated) and `purge` hard-deletes a namespace and compacts, so the payloads
+  actually leave the on-disk log — the compliance answer to "erase everything
+  about X"
+- **Memory inspector** — a local browser UI to browse/search memories, see *why*
+  each hit ranked, and edit or delete them (`docker compose --profile inspector up`)
+- **Measurable recall** — `make eval` scores retrieval quality (recall@k / MRR)
+  against a labelled corpus, with modes for the dedup and decay policies, so
+  memory-quality changes are gated on numbers, not vibes
+- **Smarter capture (Claude Code)** — the MCP integration can distil sessions
+  into durable facts with an LLM (`extract_mode`), deduping and superseding
+  contradictions on write — behind a provider seam (`claude-code`/`anthropic`/`openai`)
 - **Multi-tenant auth** — optional bearer tokens (constant-time check; `ping` exempt), each bound to a namespace + scope (`ro`/`rw`/admin) so one server safely isolates many tenants
 - **Per-tenant limits** — optional storage quotas (records/bytes) and a request rate limit per namespace, so one team member's runaway agent can't fill the disk or monopolize the shared server
 - **Encryption at rest** — optional XChaCha20-Poly1305 (vendored, no crypto dependency) over the log + checkpoints; opt-in via `--encryption-key-file`, with an offline migrator and encrypted backups/replicas
-- **Observability** — `stats` op plus a drop-in [Prometheus exporter + Grafana dashboard](integrations/prometheus-exporter/) (`docker compose --profile monitoring up`)
+- **Observability** — `stats` op (incl. memory-quality counters: merged / forgotten / purged) plus a drop-in [Prometheus exporter + Grafana dashboard](integrations/prometheus-exporter/) (`docker compose --profile monitoring up`)
 - **Operations** — online `snapshot`/restore backups and read replicas
 - **Concurrency** — sharded `poll()` event-loop threads (`--io-threads`); selectable `fsync` durability (`sync` / `batch` / `interval`)
 
