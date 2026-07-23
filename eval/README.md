@@ -113,3 +113,33 @@ Dataset (`datasets/ab_tasks.json`): each task is
 `{"id", "memories": [...], "question", "expect_any": [distinctive tokens]}`
 (optional `"rubric"` for `--judge`). Each task runs in its own namespace, so the
 ON arm only recalls that task's memory.
+
+### Recorded result
+
+`make eval-tasks EVAL_ARGS='--model claude-code'`, 10 coding-agent tasks:
+
+```
+with memory (ON):    100%
+without memory (OFF): 20%
+lift:                +80%   (ON − OFF)
+```
+
+Memory took a 20% agent to 100% on cross-session recall. Both OFF successes were
+`tests` and `style` — see the caveat below.
+
+### ⚠ The OFF arm must have no side channel
+
+The measured lift is only honest if the OFF (no-memory) arm genuinely *cannot*
+obtain the answer another way. The **`claude-code` backend runs `claude -p`
+inside the repo with tool access**, so on tasks whose fictional fact happens to
+match AegisDB's real code, OFF just reads the files and "passes" — in the run
+above, `tests` (`make integration`) and `style` (`snake_case`) OFF answers cited
+the actual source, not the task's fact. So:
+
+- The **+80%** above is a **lower bound**: on the 8 tasks whose facts aren't in
+  the environment, ON won 8/8 while OFF scored 0. A sandboxed backend would push
+  OFF toward 0% and the lift toward +100% on this set.
+- For a **clean, publishable number**, use an API backend with no filesystem/tools
+  (`--model anthropic|openai`, `--judge` for paraphrase-tolerant grading), or
+  author facts that can't be inferred from the environment. The default `fake`
+  model has no side channel by construction.
