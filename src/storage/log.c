@@ -10,12 +10,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/random.h>
 #include <unistd.h>
 
 #include "aegisdb/aead.h"
 #include "aegisdb/crc32.h"
 #include "aegisdb/logging.h"
+#include "aegisdb/randutil.h"
 
 #define LOG_FRAME_MAGIC 0xA3D1B70Fu /* v2 plaintext frame sync marker */
 #define LOG_FRAME_MAGIC_ENC 0xA3D1B71Eu /* v3 encrypted (AEAD) frame sync marker */
@@ -25,20 +25,6 @@
 #define V3_FRAME_HEADER 36
 #define V3_AAD_LEN 32 /* magic+len+nonce: authenticated as AEAD associated data */
 #define V3_FRAME_OVERHEAD (V3_FRAME_HEADER + AEAD_TAG_LEN)
-
-/* Fill `n` bytes with cryptographic randomness (frame nonces). */
-static int fill_random(uint8_t *p, size_t n) {
-    size_t got = 0;
-    while (got < n) {
-        ssize_t r = getrandom(p + got, n - got, 0);
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        got += (size_t)r;
-    }
-    return 0;
-}
 
 static int read_full(int fd, off_t off, void *buf, size_t n) {
     uint8_t *p = buf;
@@ -125,7 +111,7 @@ static int migrate_legacy_log(const char *path) {
         return -1;
     }
 
-    char newpath[1200];
+    char newpath[AEGIS_PATH_MAX];
     snprintf(newpath, sizeof(newpath), "%s.migrate", path);
     int nfd = open(newpath, O_RDWR | O_CREAT | O_TRUNC, 0644);
     if (nfd < 0) {
@@ -322,7 +308,7 @@ static int log_append_encrypted(LogFile *lf, const uint8_t *payload, size_t len,
                                 uint64_t *out_offset) {
     uint8_t hdr[V3_FRAME_HEADER];
     uint8_t nonce[AEAD_NONCE_LEN];
-    if (fill_random(nonce, sizeof nonce) != 0) return -1;
+    if (aegis_fill_random(nonce, sizeof nonce) != 0) return -1;
     build_header_v3(hdr, len, nonce);
     uint8_t *ct = malloc(len ? len : 1);
     if (!ct) return -1;
@@ -457,7 +443,7 @@ static off_t find_next_frame(const LogFile *lf, off_t from, off_t end) {
     const uint32_t want_magic = enc ? LOG_FRAME_MAGIC_ENC : LOG_FRAME_MAGIC;
     const off_t hdr_len = enc ? V3_FRAME_HEADER : LOG_FRAME_HEADER;
     const off_t overhead = enc ? V3_FRAME_OVERHEAD : LOG_FRAME_HEADER;
-    enum { WIN = 65536 };
+    enum { WIN = AEGIS_IO_BUF_SIZE };
     uint8_t win[WIN];
     for (off_t base = from; base + hdr_len <= end;) {
         size_t want = (size_t)(end - base);

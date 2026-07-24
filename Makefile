@@ -4,7 +4,14 @@
 
 CC      ?= cc
 CSTD    := -std=c17
-CFLAGS  ?= -O2 -g -Wall -Wextra -Wno-unused-parameter
+CFLAGS  ?= -O2 -g -Wall -Wextra
+# Treat warnings as errors — off by default so a downstream build on a newer
+# compiler (which may introduce new warnings) isn't broken by them; CI turns it
+# on with `make ... WERROR=1` to keep the tree warning-clean.
+WERROR  ?= 0
+ifeq ($(WERROR),1)
+CFLAGS += -Werror
+endif
 # Version baked into the binary: `git describe` (tag-derived) by default,
 # overridable with `make VERSION=x.y.z`.
 GIT_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
@@ -115,7 +122,7 @@ inspector-test: $(BIN)
 # so gcov flushes their data — SIGKILL (the normal fast path) would drop it.
 # The unit-test and server binaries share the same instrumented core objects, so
 # .gcda counts accumulate across both into a combined figure.
-COV_CFLAGS := -O0 -g -fprofile-arcs -ftest-coverage -Wall -Wextra -Wno-unused-parameter
+COV_CFLAGS := -O0 -g -fprofile-arcs -ftest-coverage -Wall -Wextra
 .PHONY: coverage
 coverage:
 	$(MAKE) clean
@@ -165,7 +172,7 @@ CORPUS := tests/fuzz/corpus
 # target with -fsanitize=fuzzer so libFuzzer drives it.
 FUZZ_CC     ?= clang
 FUZZ_SAN    ?= -fsanitize=fuzzer-no-link,address,undefined
-FUZZ_CFLAGS := -O1 -g -fno-omit-frame-pointer $(FUZZ_SAN) -Wall -Wextra -Wno-unused-parameter
+FUZZ_CFLAGS := -O1 -g -fno-omit-frame-pointer $(FUZZ_SAN) -Wall -Wextra
 FUZZ_OBJDIR := $(BUILD)/fuzz-obj
 FUZZ_CORE_OBJ  := $(patsubst %.c,$(FUZZ_OBJDIR)/%.o,$(CORE_SRC))
 FUZZ_CJSON_OBJ := $(FUZZ_OBJDIR)/third_party/cjson/cJSON.o

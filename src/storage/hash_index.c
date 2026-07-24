@@ -94,8 +94,8 @@ size_t hash_index_bytes(const HashIndex *h) {
 
 size_t hash_index_count(const HashIndex *h) { return h->count; }
 
-/* Checkpoint v3: a 36-byte header followed by `count` 22-byte entries.
- * Header (little-endian): "AIDX", u32 version=3, u64 count, u64 covered_log_size,
+/* Checkpoint v4: a 36-byte header followed by `count` 30-byte entries.
+ * Header (little-endian): "AIDX", u32 version=4, u64 count, u64 covered_log_size,
  * u64 next_id, u32 crc. The CRC covers the header fields [0,32) AND the entries
  * (skipping the CRC field itself), so header corruption — a bad covered offset,
  * next_id, or count — is detected, not just entry corruption. */

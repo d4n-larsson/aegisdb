@@ -35,12 +35,13 @@
 #include <sys/types.h>
 
 #include "aegisdb/aead.h"
+#include "aegisdb/types.h"
 
 #define LOG_FRAME_HEADER 16 /* v2: magic(4) + len(4) + payload_crc(4) + hdr_crc(4) */
 
 typedef struct {
     int fd;
-    char path[1100];
+    char path[AEGIS_PATH_MAX];
     off_t size;             /* current valid end offset (bytes) */
     pthread_mutex_t wlock;  /* serializes appends */
     /* atomic: mutated under wlock, but log_flush_pending reads it lock-free. */

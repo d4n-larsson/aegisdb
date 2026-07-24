@@ -9,7 +9,15 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-add_compile_options(-Wall -Wextra -Wno-unused-parameter)
+add_compile_options(-Wall -Wextra)
+
+# Treat warnings as errors — off by default so a downstream build on a newer
+# compiler isn't broken by newly-introduced warnings; enable in CI with
+# -DAEGIS_WERROR=ON to keep the tree warning-clean.
+option(AEGIS_WERROR "Treat compiler warnings as errors" OFF)
+if(AEGIS_WERROR)
+  add_compile_options(-Werror)
+endif()
 
 # Opt-in host-CPU tuning (mirrors the Makefile's NATIVE=1): auto-vectorizes the
 # vector-search hot loops for a faster semantic search, but the binary uses

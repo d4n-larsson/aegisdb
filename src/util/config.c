@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "aegisdb/hexutil.h"
 #include "aegisdb/logging.h"
 #include "aegisdb/sha256.h"
 
@@ -612,25 +613,16 @@ static void token_digest(const AuthToken *t, uint8_t out[32]) {
         sha256((const uint8_t *)t->token, strlen(t->token), out);
 }
 
-static void hex_encode(const uint8_t *in, size_t n, char *out) {
-    static const char hx[] = "0123456789abcdef";
-    for (size_t i = 0; i < n; i++) {
-        out[2 * i] = hx[in[i] >> 4];
-        out[2 * i + 1] = hx[in[i] & 0xf];
-    }
-    out[2 * n] = '\0';
-}
-
 void config_token_fingerprint(const AuthToken *t, char out[13]) {
     uint8_t d[32];
     token_digest(t, d);
-    hex_encode(d, 6, out); /* first 6 bytes -> 12 hex chars */
+    aegis_hex_encode(d, 6, out); /* first 6 bytes -> 12 hex chars */
 }
 
 void config_key_fingerprint(const uint8_t key[AEAD_KEY_LEN], char out[13]) {
     uint8_t d[SHA256_DIGEST_LEN];
     sha256(key, AEAD_KEY_LEN, d);
-    hex_encode(d, 6, out); /* first 6 bytes of SHA-256(key) -> 12 hex chars */
+    aegis_hex_encode(d, 6, out); /* first 6 bytes of SHA-256(key) -> 12 hex chars */
 }
 
 int config_remove_token(Config *cfg, const char *id12) {
@@ -655,7 +647,7 @@ static const char *scope_name(int scope) {
 }
 
 int config_write_token_file(const Config *cfg, const char *path) {
-    char tmp[1100];
+    char tmp[AEGIS_PATH_MAX];
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     /* Create the temp file 0600 from the start (not fopen's umask-dependent mode
      * then a later chmod, which leaves a world-readable window). Clear any stale
@@ -675,7 +667,7 @@ int config_write_token_file(const Config *cfg, const char *path) {
         uint8_t d[32];
         char hex[65];
         token_digest(t, d);
-        hex_encode(d, 32, hex);
+        aegis_hex_encode(d, 32, hex);
         int n = t->namespace
                     ? fprintf(f, "sha256$%s %s %s\n", hex, t->namespace,
                               scope_name(t->scope))

@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "aegisdb/aead.h"
+#include "aegisdb/types.h"
 
 /* Baked in at build time from the git tag (-DAEGIS_VERSION_STRING=...); the
  * build systems derive it from `git describe`, and the release image/CI pass the
@@ -49,7 +50,7 @@ typedef struct {
 
 typedef struct {
     int listen_port;            /* default 9470 */
-    char data_dir[1024];        /* default "./data" */
+    char data_dir[AEGIS_DATA_DIR_MAX]; /* default "./data" */
     size_t max_payload_bytes;   /* default 1 MiB */
     size_t embedding_dimensions;/* default 384 */
     size_t ann_threshold;       /* live-vector count above which semantic search switches to HNSW; 0 = built-in default */
@@ -118,7 +119,7 @@ typedef struct {
     /* Path passed to --auth-token-file, retained so runtime token-admin ops
      * (token_add/token_revoke) can persist changes back to it. Empty when auth
      * was configured without a file (runtime changes then cannot persist). */
-    char auth_token_file[1024];
+    char auth_token_file[AEGIS_PATH_MAX];
 } Config;
 
 /* Populate cfg with documented defaults. */

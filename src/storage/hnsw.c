@@ -20,8 +20,8 @@
 
 #include "aegisdb/ckpt_crypt.h"
 #include "aegisdb/crc32.h"
-#include "aegisdb/vecmath.h"
 #include "aegisdb/hash_mix.h"
+#include "aegisdb/types.h"
 #include "aegisdb/vecmath.h"
 
 #define HNSW_FORMAT_MAGIC "AHNS"
@@ -236,7 +236,7 @@ static Cand heap_pop(Heap *h, int maxh) {
 
 static int cmp_cand_asc(const void *a, const void *b) {
     float x = ((const Cand *)a)->d, y = ((const Cand *)b)->d;
-    return (x > y) - (x < y);
+    return AEGIS_CMP3(x, y);
 }
 
 /* --------------------------------------------------------------- visited -- */

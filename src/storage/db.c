@@ -31,8 +31,9 @@ uint64_t db_next_id(AegisDB *db) {
 }
 
 int db_save_metadata(AegisDB *db) {
-    char tmp[1300];
-    snprintf(tmp, sizeof(tmp), "%s.tmp", db->path_meta);
+    char tmp[AEGIS_PATH_MAX];
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp", db->path_meta) >= (int)sizeof(tmp))
+        return -1; /* path too long: refuse rather than write a truncated name */
     FILE *f = fopen(tmp, "wb");
     if (!f) return -1;
     uint8_t buf[32] = {'A', 'M', 'E', 'T', 'A'};
@@ -272,7 +273,7 @@ static int snapshot_name_ok(const char *name) {
 static int copy_log_prefix(int src_fd, const char *dst_path, uint64_t n) {
     FILE *dst = fopen(dst_path, "wb");
     if (!dst) return -1;
-    char buf[65536];
+    char buf[AEGIS_IO_BUF_SIZE];
     uint64_t done = 0;
     int ok = 1;
     while (done < n) {
@@ -307,7 +308,7 @@ static int write_meta_file(const char *path, uint64_t nid) {
 int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
     if (!snapshot_name_ok(name)) return DB_SNAPSHOT_BADNAME;
 
-    char dir[1300];
+    char dir[AEGIS_PATH_MAX];
     snprintf(dir, sizeof(dir), "%s/snapshots/%s", db->config.data_dir, name);
     if (fs_mkdir_p(dir) != 0) {
         LOG_ERROR("snapshot: cannot create %s", dir);
@@ -331,8 +332,13 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
     pthread_rwlock_rdlock(&db->log_lock);
     uint64_t covered = (uint64_t)db->log.size;
     int src_fd = db->log.fd;
-    char logpath[1400];
-    snprintf(logpath, sizeof(logpath), "%s/memory.log", dir);
+    char logpath[AEGIS_PATH_MAX];
+    if (snprintf(logpath, sizeof(logpath), "%s/memory.log", dir) >= (int)sizeof(logpath)) {
+        pthread_rwlock_unlock(&db->log_lock);
+        pthread_rwlock_unlock(&db->index_lock);
+        LOG_ERROR("snapshot: directory path too long");
+        return DB_SNAPSHOT_ERR;
+    }
     int crc = copy_log_prefix(src_fd, logpath, covered);
     pthread_rwlock_unlock(&db->log_lock);
     pthread_rwlock_unlock(&db->index_lock);
@@ -342,8 +348,11 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
         return DB_SNAPSHOT_ERR;
     }
 
-    char metapath[1400];
-    snprintf(metapath, sizeof(metapath), "%s/metadata.db", dir);
+    char metapath[AEGIS_PATH_MAX];
+    if (snprintf(metapath, sizeof(metapath), "%s/metadata.db", dir) >= (int)sizeof(metapath)) {
+        LOG_ERROR("snapshot: directory path too long");
+        return DB_SNAPSHOT_ERR;
+    }
     if (write_meta_file(metapath, nid) != 0) {
         LOG_ERROR("snapshot: metadata write failed (%s)", metapath);
         return DB_SNAPSHOT_ERR;
@@ -360,7 +369,8 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
         snprintf(enc_fields, sizeof(enc_fields),
                  ",\"encrypted\":true,\"key_fingerprint\":\"%s\"", fp);
     }
-    char manifest[1400], man[768];
+    char manifest[AEGIS_PATH_MAX];
+    char man[768]; /* manifest JSON content (not a path) */
     int mn = snprintf(man, sizeof(man),
                       "{\"format\":1,\"created_ms\":%llu,\"version\":\"%s\","
                       "\"log_size\":%llu,\"record_count\":%zu,\"next_id\":%llu,"
@@ -373,7 +383,10 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
         LOG_ERROR("snapshot: manifest too large");
         return DB_SNAPSHOT_ERR; /* truncated: mn would over-read man in fwrite */
     }
-    snprintf(manifest, sizeof(manifest), "%s/manifest.json", dir);
+    if (snprintf(manifest, sizeof(manifest), "%s/manifest.json", dir) >= (int)sizeof(manifest)) {
+        LOG_ERROR("snapshot: directory path too long");
+        return DB_SNAPSHOT_ERR;
+    }
     FILE *mf = fopen(manifest, "wb");
     int mok = (mf && fwrite(man, 1, (size_t)mn, mf) == (size_t)mn);
     if (mok && (fflush(mf) != 0 || fsync(fileno(mf)) != 0)) mok = 0;

@@ -11,19 +11,11 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "aegisdb/hexutil.h"
 #include "aegisdb/sha256.h"
 #include "cJSON.h"
 
 /* ----- small helpers ---------------------------------------------------- */
-
-static void hex_encode(const uint8_t *in, size_t n, char *out) {
-    static const char *h = "0123456789abcdef";
-    for (size_t i = 0; i < n; i++) {
-        out[i * 2] = h[in[i] >> 4];
-        out[i * 2 + 1] = h[in[i] & 0xf];
-    }
-    out[n * 2] = '\0';
-}
 
 /* Parse an unsigned 64-bit value; returns 0 on success. */
 static int parse_u64(const char *s, uint64_t *out) {
@@ -304,7 +296,7 @@ static int random_hex(char *out, size_t nbytes) {
     int ok = fread(buf, 1, nbytes, f) == nbytes;
     fclose(f);
     if (!ok) return -1;
-    hex_encode(buf, nbytes, out);
+    aegis_hex_encode(buf, nbytes, out);
     return 0;
 }
 
@@ -348,7 +340,7 @@ int gen_token_main(int argc, char **argv) {
     uint8_t d[SHA256_DIGEST_LEN];
     sha256(tok, strlen(tok), d);
     char hex[2 * SHA256_DIGEST_LEN + 1];
-    hex_encode(d, SHA256_DIGEST_LEN, hex);
+    aegis_hex_encode(d, SHA256_DIGEST_LEN, hex);
 
     fprintf(stderr,
             "Add the first line to your --auth-token-file. The token is shown "
