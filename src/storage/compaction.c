@@ -46,8 +46,11 @@ static int locs_push(NewLoc **locs, size_t *n, size_t *cap, NewLoc v) {
  * that happened to race compaction rather than the whole live set. */
 int compaction_run_once(AegisDB *db) {
     LOG_DEBUG("compaction: starting log rewrite");
-    char newpath[1300];
-    snprintf(newpath, sizeof(newpath), "%s.compaction", db->path_log);
+    char newpath[AEGIS_PATH_MAX];
+    if (snprintf(newpath, sizeof(newpath), "%s.compaction", db->path_log) >= (int)sizeof(newpath)) {
+        LOG_ERROR("compaction: log path too long");
+        return -1;
+    }
     unlink(newpath); /* discard any stale partial file */
 
     /* Phase 1 (brief read lock): snapshot the live entries and the byte offset

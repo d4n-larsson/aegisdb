@@ -33,7 +33,7 @@ static int copy_file(const char *src, const char *dst) {
     if (!in) return -1;
     FILE *out = fopen(dst, "wb");
     if (!out) { fclose(in); return -1; }
-    char buf[65536];
+    char buf[AEGIS_IO_BUF_SIZE];
     size_t n;
     int ok = 1;
     while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
@@ -62,7 +62,7 @@ static char *read_text(const char *path) {
 
 int restore_run(const Config *cfg) {
     const char *src = cfg->restore_from;
-    char man_path[1300], src_log[1300], src_meta[1300];
+    char man_path[AEGIS_PATH_MAX], src_log[AEGIS_PATH_MAX], src_meta[AEGIS_PATH_MAX];
     snprintf(man_path, sizeof(man_path), "%s/manifest.json", src);
     snprintf(src_log, sizeof(src_log), "%s/memory.log", src);
     snprintf(src_meta, sizeof(src_meta), "%s/metadata.db", src);
@@ -141,7 +141,7 @@ int restore_run(const Config *cfg) {
     }
 
     /* Never clobber a live database. */
-    char dst_log[1300], dst_meta[1300];
+    char dst_log[AEGIS_PATH_MAX], dst_meta[AEGIS_PATH_MAX];
     snprintf(dst_log, sizeof(dst_log), "%s/memory.log", cfg->data_dir);
     snprintf(dst_meta, sizeof(dst_meta), "%s/metadata.db", cfg->data_dir);
     if (file_exists(dst_log)) {

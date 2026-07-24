@@ -77,10 +77,10 @@ typedef struct {
      * startup Config keeps its own), so runtime mutation is isolated. */
     pthread_rwlock_t auth_lock;
 
-    char path_log[1200];
-    char path_index[1200];
-    char path_meta[1200];
-    char path_sem[1200]; /* HNSW graph checkpoint */
+    char path_log[AEGIS_PATH_MAX];
+    char path_index[AEGIS_PATH_MAX];
+    char path_meta[AEGIS_PATH_MAX];
+    char path_sem[AEGIS_PATH_MAX]; /* HNSW graph checkpoint */
 
     volatile int running;
 } AegisDB;
@@ -131,7 +131,7 @@ int db_reset_replica(AegisDB *db);
 
 /* Result of a successful db_snapshot(): where it landed and what it covers. */
 typedef struct {
-    char dir[1300];        /* the snapshot directory that was written */
+    char dir[AEGIS_PATH_MAX];        /* the snapshot directory that was written */
     uint64_t log_size;     /* durable log bytes captured (the covered offset) */
     uint64_t next_id;      /* id high-water at snapshot time (restore floor) */
     uint64_t created_ms;   /* wall-clock time the snapshot was taken */

@@ -12,7 +12,7 @@
 #include <unistd.h>
 
 int fs_mkdir_p(const char *path) {
-    char tmp[1024];
+    char tmp[AEGIS_PATH_MAX];
     snprintf(tmp, sizeof(tmp), "%s", path);
     size_t len = strlen(tmp);
     if (len && tmp[len - 1] == '/') tmp[len - 1] = '\0';
@@ -36,7 +36,7 @@ int fs_fsync_dir(const char *dir) {
 }
 
 int fs_fsync_parent(const char *path) {
-    char dir[1400];
+    char dir[AEGIS_PATH_MAX];
     snprintf(dir, sizeof(dir), "%s", path);
     char *slash = strrchr(dir, '/');
     if (slash == dir)

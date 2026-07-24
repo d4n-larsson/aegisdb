@@ -9,11 +9,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/random.h>
 #include <unistd.h>
 
 #include "aegisdb/aead.h"
 #include "aegisdb/fsutil.h"
+#include "aegisdb/randutil.h"
+#include "aegisdb/types.h"
 
 #define CKPT_MAGIC 0x43454B41u /* "AKEC" LE: AegisDB checKpoint EnCryption */
 #define CKPT_VERSION 1u
@@ -27,22 +28,9 @@ static uint32_t get_u32le(const uint8_t *b) {
            ((uint32_t)b[3] << 24);
 }
 
-static int fill_random(uint8_t *p, size_t n) {
-    size_t got = 0;
-    while (got < n) {
-        ssize_t r = getrandom(p + got, n - got, 0);
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        got += (size_t)r;
-    }
-    return 0;
-}
-
 /* Write `buf`/`len` to `path` atomically: tmp + fsync + rename. */
 static int write_atomic(const char *path, const uint8_t *buf, size_t len) {
-    char tmp[1200];
+    char tmp[AEGIS_PATH_MAX];
     snprintf(tmp, sizeof tmp, "%s.tmp", path);
     int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0) return -1;
@@ -107,7 +95,7 @@ int ckpt_write(const char *path, const uint8_t *key, const uint8_t *plain,
     if (!env) return -1;
     put_u32le(env, CKPT_MAGIC);
     put_u32le(env + 4, CKPT_VERSION);
-    if (fill_random(env + 8, AEAD_NONCE_LEN) != 0) {
+    if (aegis_fill_random(env + 8, AEAD_NONCE_LEN) != 0) {
         free(env);
         return -1;
     }

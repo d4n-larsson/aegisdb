@@ -847,7 +847,7 @@ aegis_status_t qe_delete_by_query(AegisDB *db, const SearchParams *p,
 
 static int cmp_u64_asc(const void *a, const void *b) {
     uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
-    return (x > y) - (x < y);
+    return AEGIS_CMP3(x, y);
 }
 
 /* Snapshot every live record id (optionally only those > after_id) under the
