@@ -6,7 +6,7 @@ semantic queries — the **ranking breakdown** (why it surfaced: similarity ×
 weight × recency, from `search`'s `explain`), and correct a wrong memory by
 editing or deleting it.
 
-![inspector](../../docs/img) <!-- add a screenshot here -->
+![The AegisDB memory inspector](../../docs/img/inspector.png)
 
 The inspector wears the shared **AegisDB visual identity** — the ink/brass/paper
 ledger palette, the memory-type colours, and the type system used by the landing

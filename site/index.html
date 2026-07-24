@@ -465,7 +465,12 @@
             <p><span class="mono">export</span> dumps everything stored about a subject; <span class="mono">purge</span> hard-deletes a namespace and compacts, so the bytes <b>actually leave the on-disk log</b>.</p>
           </div>
         </div>
-        <!-- TODO: drop a memory-inspector screenshot at docs/img/inspector.png and surface it here (e.g. a .twoup with the "Browse it in a UI" copy). -->
+        <figure style="margin:26px 0 0">
+          <img src="inspector.png" width="1908" height="1043" loading="lazy"
+               alt="The AegisDB memory inspector: a searchable list of memories with a detail panel showing a hit's provenance and its ranking breakdown (similarity × weight × recency)."
+               style="width:100%;height:auto;border:1px solid var(--line);border-radius:6px;display:block">
+          <figcaption class="cap" style="margin-top:10px">the memory inspector &middot; <span class="mono">make inspector</span></figcaption>
+        </figure>
       </div>
     </section>
 
