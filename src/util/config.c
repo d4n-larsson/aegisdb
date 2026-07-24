@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "aegisdb/fsutil.h"
 #include "aegisdb/hexutil.h"
 #include "aegisdb/logging.h"
 #include "aegisdb/sha256.h"
@@ -647,20 +648,14 @@ static const char *scope_name(int scope) {
 }
 
 int config_write_token_file(const Config *cfg, const char *path) {
-    char tmp[AEGIS_PATH_MAX];
-    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    /* Create the temp file 0600 from the start (not fopen's umask-dependent mode
-     * then a later chmod, which leaves a world-readable window). Clear any stale
-     * .tmp first so O_EXCL then refuses to follow a pre-planted symlink. */
-    unlink(tmp);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0600);
-    if (fd < 0) return -1;
-    FILE *f = fdopen(fd, "w");
-    if (!f) {
-        close(fd);
-        unlink(tmp);
-        return -1;
-    }
+    /* Render the file into memory, then write it atomically+durably (0600, the
+     * file holds token digests). fs_write_atomic creates the temp 0600 from the
+     * start — no umask/symlink window — and fsyncs both the data and the parent
+     * directory, so a crash can't leave a torn or lost token file. */
+    char *content = NULL;
+    size_t clen = 0;
+    FILE *f = open_memstream(&content, &clen);
+    if (!f) return -1;
     int ok = 1;
     for (size_t i = 0; i < cfg->auth_token_count && ok; i++) {
         const AuthToken *t = &cfg->auth_tokens[i];
@@ -674,9 +669,8 @@ int config_write_token_file(const Config *cfg, const char *path) {
                     : fprintf(f, "sha256$%s\n", hex); /* global admin */
         if (n < 0) ok = 0;
     }
-    if (fflush(f) != 0) ok = 0;
-    if (fclose(f) != 0) ok = 0; /* closes fd; file was created 0600 */
-    if (ok && rename(tmp, path) != 0) ok = 0;
-    if (!ok) unlink(tmp);
+    if (fclose(f) != 0) ok = 0; /* flushes into content/clen */
+    if (ok) ok = (fs_write_atomic(path, content, clen, 0600) == 0);
+    free(content);
     return ok ? 0 : -1;
 }

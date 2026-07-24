@@ -30,34 +30,39 @@ uint64_t db_next_id(AegisDB *db) {
     return id;
 }
 
-int db_save_metadata(AegisDB *db) {
-    char tmp[AEGIS_PATH_MAX];
-    if (snprintf(tmp, sizeof(tmp), "%s.tmp", db->path_meta) >= (int)sizeof(tmp))
-        return -1; /* path too long: refuse rather than write a truncated name */
-    FILE *f = fopen(tmp, "wb");
-    if (!f) return -1;
-    uint8_t buf[32] = {'A', 'M', 'E', 'T', 'A'};
-    uint32_t ver = 1;
+/* The 32-byte metadata.db payload: "AMETA" magic, u32 version, u64 next_id, then
+ * zero padding. It persists a next_id high-water mark that recovery uses as a
+ * floor so ids can't be reused after a crash (#18). */
+#define AMETA_SIZE 32
+#define AMETA_VERSION 1u
+
+static void ameta_encode(uint8_t buf[AMETA_SIZE], uint64_t next_id) {
+    memset(buf, 0, AMETA_SIZE);
+    memcpy(buf, "AMETA", 5);
+    uint32_t ver = AMETA_VERSION;
     memcpy(buf + 5, &ver, 4);
+    memcpy(buf + 9, &next_id, 8);
+}
+
+/* Decode a 32-byte AMETA payload. Returns 0 and writes *next_id on a valid
+ * magic; -1 otherwise. */
+static int ameta_decode(const uint8_t buf[AMETA_SIZE], uint64_t *next_id) {
+    if (memcmp(buf, "AMETA", 5) != 0) return -1;
+    memcpy(next_id, buf + 9, 8);
+    return 0;
+}
+
+int db_save_metadata(AegisDB *db) {
     pthread_mutex_lock(&db->id_lock);
     uint64_t nid = db->next_id;
     pthread_mutex_unlock(&db->id_lock);
-    memcpy(buf + 9, &nid, 8);
-    int ok = (fwrite(buf, 1, sizeof(buf), f) == sizeof(buf));
-    /* Order the data before the rename: without fsync the atomic rename can be
-     * durable while the 32 bytes it points at are not, so a crash can leave a
-     * present-but-empty metadata.db. load_metadata_next_id then finds no AMETA
-     * magic and drops the next_id floor — reintroducing the id-reuse hazard
-     * (#18) this file exists to prevent. */
-    if (ok && (fflush(f) != 0 || fsync(fileno(f)) != 0)) ok = 0;
-    if (fclose(f) != 0) ok = 0;
-    if (!ok) {
-        unlink(tmp);
-        return -1;
-    }
-    if (rename(tmp, db->path_meta) != 0) return -1;
-    /* fsync the directory so the rename itself survives a crash. */
-    return fs_fsync_dir(db->config.data_dir);
+    uint8_t buf[AMETA_SIZE];
+    ameta_encode(buf, nid);
+    /* fs_write_atomic fsyncs the data before the rename and the directory after:
+     * without that a crash can leave a present-but-empty metadata.db, whereupon
+     * load_metadata_next_id finds no AMETA magic and drops the next_id floor —
+     * reintroducing the id-reuse hazard (#18) this file exists to prevent. */
+    return fs_write_atomic(db->path_meta, buf, sizeof(buf), 0644);
 }
 
 uint64_t db_index_bytes(AegisDB *db) {
@@ -292,17 +297,9 @@ static int copy_log_prefix(int src_fd, const char *dst_path, uint64_t n) {
 /* Write a standalone metadata.db carrying `nid` as the next_id floor (same
  * AMETA format as db_save_metadata, but to an arbitrary path). */
 static int write_meta_file(const char *path, uint64_t nid) {
-    FILE *f = fopen(path, "wb");
-    if (!f) return -1;
-    uint8_t buf[32] = {'A', 'M', 'E', 'T', 'A'};
-    uint32_t ver = 1;
-    memcpy(buf + 5, &ver, 4);
-    memcpy(buf + 9, &nid, 8);
-    int ok = (fwrite(buf, 1, sizeof(buf), f) == sizeof(buf));
-    if (ok && (fflush(f) != 0 || fsync(fileno(f)) != 0)) ok = 0;
-    if (fclose(f) != 0) ok = 0;
-    if (!ok) unlink(path);
-    return ok ? 0 : -1;
+    uint8_t buf[AMETA_SIZE];
+    ameta_encode(buf, nid);
+    return fs_write_atomic(path, buf, sizeof(buf), 0644);
 }
 
 int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
@@ -417,11 +414,10 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
 static uint64_t load_metadata_next_id(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
-    uint8_t buf[32];
+    uint8_t buf[AMETA_SIZE];
     uint64_t nid = 0;
-    if (fread(buf, 1, sizeof(buf), f) == sizeof(buf) &&
-        memcmp(buf, "AMETA", 5) == 0)
-        memcpy(&nid, buf + 9, 8);
+    if (fread(buf, 1, sizeof(buf), f) == sizeof(buf))
+        ameta_decode(buf, &nid); /* leaves nid=0 on a bad/missing magic */
     fclose(f);
     return nid;
 }

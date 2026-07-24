@@ -28,33 +28,6 @@ static uint32_t get_u32le(const uint8_t *b) {
            ((uint32_t)b[3] << 24);
 }
 
-/* Write `buf`/`len` to `path` atomically: tmp + fsync + rename. */
-static int write_atomic(const char *path, const uint8_t *buf, size_t len) {
-    char tmp[AEGIS_PATH_MAX];
-    snprintf(tmp, sizeof tmp, "%s.tmp", path);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0) return -1;
-    int ok = 1;
-    for (size_t off = 0; off < len;) {
-        ssize_t w = write(fd, buf + off, len - off);
-        if (w < 0) {
-            if (errno == EINTR) continue;
-            ok = 0;
-            break;
-        }
-        off += (size_t)w;
-    }
-    if (ok) ok = (fsync(fd) == 0);
-    close(fd);
-    if (!ok || rename(tmp, path) != 0) {
-        unlink(tmp);
-        return -1;
-    }
-    /* Order the rename itself: without a directory fsync the "atomic" rename can
-     * still be lost on a crash even though the file data was fsync'd above. */
-    return fs_fsync_parent(path);
-}
-
 /* Read the whole file at `path` into a fresh buffer. Returns 0/-1. */
 static int read_whole(const char *path, uint8_t **out, size_t *out_len) {
     int fd = open(path, O_RDONLY);
@@ -88,7 +61,7 @@ static int read_whole(const char *path, uint8_t **out, size_t *out_len) {
 
 int ckpt_write(const char *path, const uint8_t *key, const uint8_t *plain,
                size_t plain_len) {
-    if (!key) return write_atomic(path, plain, plain_len);
+    if (!key) return fs_write_atomic(path, plain, plain_len, 0600);
 
     size_t total = CKPT_HDR + plain_len + AEAD_TAG_LEN;
     uint8_t *env = malloc(total);
@@ -101,7 +74,7 @@ int ckpt_write(const char *path, const uint8_t *key, const uint8_t *plain,
     }
     aead_seal(key, env + 8, env, CKPT_HDR, plain, plain_len, env + CKPT_HDR,
               env + CKPT_HDR + plain_len);
-    int rv = write_atomic(path, env, total);
+    int rv = fs_write_atomic(path, env, total, 0600);
     free(env);
     return rv;
 }
