@@ -265,6 +265,7 @@
           <a href="#tokens" class="nav-hide">why</a>
           <a href="#what" class="nav-hide">memory</a>
           <a href="#curation" class="nav-hide">curation</a>
+          <a href="#proof" class="nav-hide">proof</a>
           <a href="#wire" class="nav-hide">protocol</a>
           <a href="#claude" class="nav-hide">claude&nbsp;code</a>
           <a href="#start">get&nbsp;started</a>
@@ -492,11 +493,37 @@ read (get)     <span class="ar">→</span> p50 0.8 ms over the wire
       </div>
     </section>
 
+    <!-- PROOF / EVALS -->
+    <section class="rec" id="proof">
+      <div class="off mono">0x0580</div>
+      <div class="col">
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0008</b>&nbsp;·&nbsp;type=semantic</p>
+        <div class="twoup">
+          <div>
+            <h2 class="title">Does the memory actually work? Measure it.</h2>
+            <p class="lede">Memory only earns its tokens if it changes outcomes — so AegisDB ships the benchmarks to prove it, not just claim it. Two evals, reproducible on your machine.</p>
+            <p class="lede">The task benchmark is a controlled A/B: teach a fact in one session, then answer a question in a <b>fresh</b> session — with recalled memory versus without. Sandboxed so the "without" arm has no side channel, the agent goes from <b>0% to 100%</b>. The recall eval separately gates retrieval quality (recall@k / MRR) so scoring changes can't regress silently.</p>
+          </div>
+          <div>
+            <p class="cap">make eval-tasks · make eval</p>
+<pre>A/B tasks · memory ON vs OFF (sandboxed)
+answer with memory     <span class="ar">→</span> 100%
+answer without memory  <span class="ar">→</span>   0%
+lift                   <span class="ar">→</span> +100%   <span class="c">10 tasks</span>
+
+recall quality         <span class="ar">→</span> recall@k / MRR gate
+
+<span class="c">reproducible: make eval-tasks · make eval</span></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- WIRE PROTOCOL -->
     <section class="rec" id="wire">
       <div class="off mono">0x0640</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0008</b>&nbsp;·&nbsp;type=semantic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0009</b>&nbsp;·&nbsp;type=semantic</p>
         <h2 class="title">One JSON line in. One JSON line back.</h2>
         <p class="lede">The wire protocol is newline-delimited JSON over TCP. No SDK, no driver — any language that can open a socket can speak it.</p>
         <p class="cap">store a memory, then recall it</p>
@@ -517,7 +544,7 @@ read (get)     <span class="ar">→</span> p50 0.8 ms over the wire
     <section class="rec" id="claude">
       <div class="off mono">0x07A0</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0009</b>&nbsp;·&nbsp;type=semantic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0010</b>&nbsp;·&nbsp;type=semantic</p>
         <div class="twoup">
           <div>
             <h2 class="title">Long-term memory for Claude&nbsp;Code.</h2>
@@ -554,7 +581,7 @@ read (get)     <span class="ar">→</span> p50 0.8 ms over the wire
     <section class="rec" id="start">
       <div class="off mono">0x0940</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0010</b>&nbsp;·&nbsp;type=episodic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0011</b>&nbsp;·&nbsp;type=episodic</p>
         <h2 class="title">Run it, talk to it.</h2>
         <p class="lede">Pull the image or build from source — either way you're holding a connection in seconds.</p>
         <div class="start-log">
@@ -596,7 +623,7 @@ docker exec aegisdb aegisdb client search --tags user</code>
     <section class="rec" id="team">
       <div class="off mono">0x0B20</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0011</b>&nbsp;·&nbsp;type=meta</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0012</b>&nbsp;·&nbsp;type=meta</p>
         <h2 class="title">Set up shared memory for a team.</h2>
         <p class="lede">One server, one tenant token per project, and Claude&nbsp;Code wired in with <span class="mono">uvx</span> — no clone anywhere. Uses the published image and the <a href="https://pypi.org/project/aegisdb-mcp/"><span class="mono">aegisdb-mcp</span></a> PyPI package.</p>
         <div class="start-log">
