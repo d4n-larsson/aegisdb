@@ -27,25 +27,6 @@ static long long file_size(const char *path) {
     return (long long)st.st_size;
 }
 
-/* Byte-for-byte copy; unlinks a partial destination on failure. */
-static int copy_file(const char *src, const char *dst) {
-    FILE *in = fopen(src, "rb");
-    if (!in) return -1;
-    FILE *out = fopen(dst, "wb");
-    if (!out) { fclose(in); return -1; }
-    char buf[AEGIS_IO_BUF_SIZE];
-    size_t n;
-    int ok = 1;
-    while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
-        if (fwrite(buf, 1, n, out) != n) { ok = 0; break; }
-    if (ferror(in)) ok = 0;
-    if (fflush(out) != 0) ok = 0;
-    if (fclose(out) != 0) ok = 0;
-    fclose(in);
-    if (!ok) unlink(dst);
-    return ok ? 0 : -1;
-}
-
 /* Read an entire (small) file into a NUL-terminated heap buffer, or NULL. */
 static char *read_text(const char *path) {
     long long sz = file_size(path);
@@ -153,12 +134,12 @@ int restore_run(const Config *cfg) {
         LOG_ERROR("restore: cannot create data dir %s", cfg->data_dir);
         goto done;
     }
-    if (copy_file(src_log, dst_log) != 0) {
+    if (fs_copy_file(src_log, dst_log) != 0) {
         LOG_ERROR("restore: failed to copy log into %s", cfg->data_dir);
         goto done;
     }
     /* metadata.db carries the next_id floor; copy it when present. */
-    if (file_exists(src_meta) && copy_file(src_meta, dst_meta) != 0) {
+    if (file_exists(src_meta) && fs_copy_file(src_meta, dst_meta) != 0) {
         LOG_ERROR("restore: failed to copy metadata into %s", cfg->data_dir);
         unlink(dst_log);
         goto done;
