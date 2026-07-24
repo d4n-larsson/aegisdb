@@ -18,11 +18,22 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 
 RECALL_CMD = "uvx --from aegisdb-mcp aegisdb-recall-hook"
 CAPTURE_CMD = "uvx --from aegisdb-mcp aegisdb-capture-hook"
-_HOOK_EVENTS = (("UserPromptSubmit", RECALL_CMD), ("SessionEnd", CAPTURE_CMD))
+
+
+def _capture_command(capture_env: dict | None) -> str:
+    """The SessionEnd capture command, with any config env vars prefixed onto it.
+    The hooks don't inherit the MCP server's env, and Claude Code hook entries
+    have no separate env field, so config that must reach the capture hook (e.g.
+    AEGIS_EXTRACT_MODE) is set inline on the command — which the shell applies."""
+    if not capture_env:
+        return CAPTURE_CMD
+    prefix = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in capture_env.items())
+    return f"{prefix} {CAPTURE_CMD}"
 
 
 def build_mcp_config(*, host: str, port: int, namespace: str = "",
@@ -58,23 +69,34 @@ def merge_mcp(existing: dict, entry: dict, *, force: bool) -> tuple[dict, str]:
     return out, "updated" if current is not None else "added"
 
 
-def merge_hooks(settings: dict) -> tuple[dict, int]:
+def merge_hooks(settings: dict, capture_env: dict | None = None) -> tuple[dict, int]:
     """Merge the recall/capture hooks into a settings.json dict without touching
-    unrelated hooks. Returns (new_dict, added_count); an already-present command
-    is not duplicated."""
+    unrelated hooks. Returns (new_dict, changed_count). The capture hook may carry
+    inline config env (see `capture_env`); an existing AegisDB hook is matched by
+    its base command and updated in place if the env changed — so re-running with,
+    say, extraction toggled updates it rather than adding a duplicate."""
     out = json.loads(json.dumps(settings)) if settings else {}
     hooks = out.setdefault("hooks", {})
-    added = 0
-    for event, command in _HOOK_EVENTS:
+    changed = 0
+    plan = [("UserPromptSubmit", RECALL_CMD, RECALL_CMD),
+            ("SessionEnd", CAPTURE_CMD, _capture_command(capture_env))]
+    for event, base, command in plan:
         groups = hooks.setdefault(event, [])
-        present = any(
-            h.get("command") == command
-            for g in groups for h in g.get("hooks", [])
-        )
-        if not present:
+        target = None
+        for g in groups:
+            for h in g.get("hooks", []):
+                if base in (h.get("command") or ""):
+                    target = h
+                    break
+            if target:
+                break
+        if target is None:
             groups.append({"hooks": [{"type": "command", "command": command}]})
-            added += 1
-    return out, added
+            changed += 1
+        elif target.get("command") != command:
+            target["command"] = command  # env prefix changed (e.g. extraction on/off)
+            changed += 1
+    return out, changed
 
 
 def _load_json(path: str) -> dict:
@@ -132,6 +154,14 @@ def main(argv: list[str] | None = None) -> int:
                     default=None, help="embedding provider (default none)")
     ap.add_argument("--embedding-dim", type=int, default=None,
                     help="embedding dimension; must match the server's --embedding-dim")
+    ap.add_argument("--extract-mode",
+                    choices=["none", "claude-code", "anthropic", "openai"],
+                    default=None,
+                    help="capture quality: 'none' (default) keeps heuristic markers; "
+                         "the others distil sessions into durable facts with an LLM "
+                         "(dedup + contradiction supersession) via the capture hook")
+    ap.add_argument("--extract-model", default=None,
+                    help="optional model id override for the extraction backend")
     ap.add_argument("--yes", "-y", action="store_true",
                     help="non-interactive: take defaults for anything not given")
     ap.add_argument("--force", action="store_true",
@@ -162,6 +192,20 @@ def main(argv: list[str] | None = None) -> int:
         _prompt("Namespace (blank = derive from a namespaced token)", "") if interactive else "")
     auth_token = args.auth_token if args.auth_token is not None else (
         _prompt("Auth token (blank = server has no auth)", "") if interactive else "")
+    extract_mode = resolve(
+        args.extract_mode,
+        "Capture: heuristic markers (none) or LLM extraction "
+        "(claude-code/anthropic/openai)", "none")
+    extract_model = args.extract_model if args.extract_model is not None else ""
+
+    # Config that must reach the SessionEnd capture hook (which doesn't inherit
+    # the MCP server's env) is prefixed onto its command; API keys are NOT written
+    # here — like voyage, they come from the environment.
+    capture_env = {}
+    if extract_mode and extract_mode != "none":
+        capture_env["AEGIS_EXTRACT_MODE"] = extract_mode
+        if extract_model:
+            capture_env["AEGIS_EXTRACT_MODEL"] = extract_model
 
     proj = os.path.abspath(args.dir)
     mcp_path = os.path.join(proj, ".mcp.json")
@@ -171,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
                              auth_token=auth_token, embedding_mode=embedding_mode,
                              embedding_dim=embedding_dim)
     mcp_doc, mcp_status = merge_mcp(_load_json(mcp_path), entry, force=args.force)
-    settings_doc, hooks_added = merge_hooks(_load_json(settings_path))
+    settings_doc, hooks_added = merge_hooks(_load_json(settings_path), capture_env)
 
     if args.dry:
         print("# .mcp.json\n" + json.dumps(mcp_doc, indent=2))
@@ -188,11 +232,18 @@ def main(argv: list[str] | None = None) -> int:
     _write_json(settings_path, settings_doc)
 
     print(f"✓ .mcp.json         ({mcp_status}) — memory server → {host}:{port}")
-    print(f"✓ .claude/settings.json — {hooks_added} hook(s) added"
+    print(f"✓ .claude/settings.json — {hooks_added} hook(s) added/updated"
           f"{' (already present)' if hooks_added == 0 else ''}")
     if embedding_mode == "voyage":
         print("• voyage embeddings: ensure VOYAGE_API_KEY is set in your environment "
               "(not written to .mcp.json).")
+    if capture_env:
+        print(f"• capture extraction: {extract_mode} — sessions are distilled into "
+              "durable facts (dedup + contradiction supersession).")
+        if extract_mode in ("anthropic", "openai"):
+            key = "ANTHROPIC_API_KEY" if extract_mode == "anthropic" else "OPENAI_API_KEY"
+            print(f"  ensure {key} is set in the environment the hook runs in "
+                  "(not written to settings.json).")
     if not args.no_verify:
         print(f"• server ping: {_verify(host, port)}")
     print("\nDone. Restart Claude Code in this project to pick up the memory "

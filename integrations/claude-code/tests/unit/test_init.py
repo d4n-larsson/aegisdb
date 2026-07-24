@@ -86,6 +86,36 @@ class TestMergeHooks(unittest.TestCase):
         self.assertIn("my-own-hook", ups)   # kept
         self.assertIn(RECALL_CMD, ups)      # added
 
+    def test_capture_env_prefixes_command(self):
+        out, added = merge_hooks({}, {"AEGIS_EXTRACT_MODE": "claude-code"})
+        self.assertEqual(added, 2)
+        cap = [h["command"] for g in out["hooks"]["SessionEnd"] for h in g["hooks"]][0]
+        self.assertTrue(cap.startswith("AEGIS_EXTRACT_MODE=claude-code "))
+        self.assertTrue(cap.endswith(CAPTURE_CMD))
+        # recall is untouched by capture env
+        rec = [h["command"] for g in out["hooks"]["UserPromptSubmit"] for h in g["hooks"]][0]
+        self.assertEqual(rec, RECALL_CMD)
+
+    def test_toggle_extraction_updates_in_place_no_duplicate(self):
+        # start with plain capture, then re-run with extraction on
+        once, _ = merge_hooks({})
+        twice, changed = merge_hooks(once, {"AEGIS_EXTRACT_MODE": "anthropic"})
+        self.assertEqual(changed, 1)  # capture updated, recall unchanged
+        se = [h["command"] for g in twice["hooks"]["SessionEnd"] for h in g["hooks"]]
+        self.assertEqual(len(se), 1)  # not duplicated
+        self.assertTrue(se[0].startswith("AEGIS_EXTRACT_MODE=anthropic "))
+        # and idempotent at the new setting
+        again, changed2 = merge_hooks(twice, {"AEGIS_EXTRACT_MODE": "anthropic"})
+        self.assertEqual(changed2, 0)
+        self.assertEqual(twice, again)
+
+    def test_extraction_off_reverts_to_plain(self):
+        on, _ = merge_hooks({}, {"AEGIS_EXTRACT_MODE": "claude-code"})
+        off, changed = merge_hooks(on)  # capture_env=None -> plain command
+        self.assertEqual(changed, 1)
+        se = [h["command"] for g in off["hooks"]["SessionEnd"] for h in g["hooks"]]
+        self.assertEqual(se, [CAPTURE_CMD])
+
 
 class TestMainWritesFiles(unittest.TestCase):
     def test_writes_and_is_idempotent(self):
@@ -112,6 +142,20 @@ class TestMainWritesFiles(unittest.TestCase):
             self.assertEqual(rc, 1)  # refuses to clobber without --force
             rc = main(["--dir", d, "--host", "h", "--yes", "--no-verify", "--force"])
             self.assertEqual(rc, 0)
+
+    def test_extract_mode_writes_prefixed_capture_hook(self):
+        with tempfile.TemporaryDirectory() as d:
+            rc = main(["--dir", d, "--host", "h", "--yes", "--no-verify",
+                       "--extract-mode", "claude-code"])
+            self.assertEqual(rc, 0)
+            settings = json.load(open(os.path.join(d, ".claude", "settings.json")))
+            cap = [h["command"] for g in settings["hooks"]["SessionEnd"]
+                   for h in g["hooks"]][0]
+            self.assertIn("AEGIS_EXTRACT_MODE=claude-code", cap)
+            self.assertTrue(cap.endswith("aegisdb-capture-hook"))
+            # extraction is a hook concern, not the MCP server's env
+            mcp = json.load(open(os.path.join(d, ".mcp.json")))
+            self.assertNotIn("AEGIS_EXTRACT_MODE", mcp["mcpServers"]["memory"]["env"])
 
     def test_print_writes_nothing(self):
         with tempfile.TemporaryDirectory() as d:

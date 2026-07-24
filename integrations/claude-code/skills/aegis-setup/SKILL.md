@@ -1,6 +1,6 @@
 ---
 name: aegis-setup
-description: Set up AegisDB as persistent memory for this Claude Code project. Asks a few short questions (local vs shared server, embeddings, auth), then scaffolds .mcp.json and the recall/capture hooks via `aegisdb-init`.
+description: Set up AegisDB as persistent memory for this Claude Code project. Asks a few short questions (local vs shared server, embeddings, capture quality, auth), then scaffolds .mcp.json and the recall/capture hooks via `aegisdb-init`.
 disable-model-invocation: true
 argument-hint: "[host] [port]"
 ---
@@ -28,7 +28,15 @@ If they passed arguments, treat `$0` as the host and `$1` as the port.
    - `voyage` — best recall; dimension `1024`; needs `VOYAGE_API_KEY` in the
      environment.
    - `local` — offline; dimension `384`; downloads a model on first use.
-3. **Namespace** — only if they are *not* using a namespaced auth token. Default:
+3. **Capture quality** (how finished sessions become memories):
+   - `none` (default) — heuristic: keep salient sentences from the transcript.
+   - `claude-code` — distil the session into durable facts with an LLM (dedup +
+     supersede contradictions on write), reusing the local `claude` CLI auth —
+     **no API key needed**. Best quality; recommended if they have the CLI.
+   - `anthropic` / `openai` — same, via API; needs `ANTHROPIC_API_KEY` /
+     `OPENAI_API_KEY` in the environment the hook runs in (never written to the
+     project). Only offer these if they can't use the `claude` CLI.
+4. **Namespace** — only if they are *not* using a namespaced auth token. Default:
    derive from the project directory.
 
 ## 2. (Only if they need a local server) offer to start one
@@ -52,7 +60,7 @@ First show what will be written (this changes nothing):
 ```bash
 uvx --from aegisdb-mcp aegisdb-init --print \
   --host <HOST> --port <PORT> --embedding-mode <MODE> --embedding-dim <DIM> \
-  [--namespace <NS>] [--auth-token <TOKEN>]
+  [--extract-mode <EXTRACT>] [--namespace <NS>] [--auth-token <TOKEN>]
 ```
 
 If it looks right, run it for real (drop `--print`, add `--yes`; add `--force`
@@ -61,14 +69,19 @@ only if it reports an existing, different `memory` server you want to replace):
 ```bash
 uvx --from aegisdb-mcp aegisdb-init --yes \
   --host <HOST> --port <PORT> --embedding-mode <MODE> --embedding-dim <DIM> \
-  [--namespace <NS>] [--auth-token <TOKEN>]
+  [--extract-mode <EXTRACT>] [--namespace <NS>] [--auth-token <TOKEN>]
 ```
 
-Omit `--namespace`/`--auth-token` when they're blank. The command prints a
-connectivity check at the end.
+Omit `--extract-mode`/`--namespace`/`--auth-token` when they're blank/`none`. The
+command prints a connectivity check at the end.
 
 ## 4. Wrap up
 
 Report what was written and tell the user to **restart Claude Code in this
 project** so it picks up the `memory` MCP server and the recall/capture hooks. If
 the connectivity check failed, help them get the server running, then re-run.
+
+Optionally point them at the **memory inspector** — a local browser UI to
+browse/search what's been captured, see why each hit ranked, and edit or delete
+memories: `docker compose --profile inspector up` (then <http://127.0.0.1:8600/>),
+or `make inspector` from a clone.
