@@ -4,7 +4,6 @@
 #endif
 #include "aegisdb/client.h"
 
-#include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +11,7 @@
 #include <unistd.h>
 
 #include "aegisdb/hexutil.h"
+#include "aegisdb/netio.h"
 #include "aegisdb/sha256.h"
 #include "cJSON.h"
 
@@ -45,36 +45,9 @@ static cJSON *csv_to_array(const char *csv) {
 
 /* ----- networking ------------------------------------------------------- */
 
-/* Connect to host:port (TCP). Returns a socket fd or -1. */
-static int dial(const char *host, const char *port) {
-    struct addrinfo hints, *res = NULL, *rp;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host, port, &hints, &res) != 0) return -1;
-    int fd = -1;
-    for (rp = res; rp; rp = rp->ai_next) {
-        fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (fd < 0) continue;
-        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) break;
-        close(fd);
-        fd = -1;
-    }
-    freeaddrinfo(res);
-    return fd;
-}
-
-static int send_all(int fd, const char *buf, size_t len) {
-    size_t put = 0;
-    while (put < len) {
-        ssize_t w = send(fd, buf + put, len - put, 0);
-        if (w <= 0) return -1;
-        put += (size_t)w;
-    }
-    return 0;
-}
-
-/* Read one newline-terminated response line. Caller frees. */
+/* Read one newline-terminated response line. Caller frees. A response can be
+ * large (up to a 64 MiB bound), so this grows a heap buffer and reads in chunks
+ * — distinct from netio's fixed-size, byte-at-a-time net_read_line. */
 static char *recv_line(int fd) {
     size_t cap = 4096, len = 0;
     const size_t max_cap = 64u * 1024 * 1024; /* bound a server that never sends \n */
@@ -247,14 +220,14 @@ int client_main(int argc, char **argv) {
     framed[n + 1] = '\0';
     free(line);
 
-    int fd = dial(host, port);
+    int fd = net_dial(host, port);
     if (fd < 0) {
         fprintf(stderr, "client: cannot connect to %s:%s\n", host, port);
         free(framed);
         return 1;
     }
     int rc = 1;
-    if (send_all(fd, framed, n + 1) == 0) {
+    if (net_write_all(fd, framed, n + 1) == 0) {
         char *resp = recv_line(fd);
         if (resp) {
             cJSON *o = cJSON_Parse(resp);
