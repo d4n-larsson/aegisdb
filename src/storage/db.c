@@ -431,6 +431,66 @@ static void free_token_array(AuthToken *toks, size_t n) {
     free(toks);
 }
 
+/* Initialize the four db locks, unwinding any already created if one fails.
+ * Returns 0 on success, -1 on failure (nothing left initialized). */
+static int init_db_locks(AegisDB *db) {
+    if (pthread_mutex_init(&db->id_lock, NULL) != 0) return -1;
+    if (pthread_rwlock_init(&db->index_lock, NULL) != 0) {
+        pthread_mutex_destroy(&db->id_lock);
+        return -1;
+    }
+    if (pthread_rwlock_init(&db->log_lock, NULL) != 0) {
+        pthread_rwlock_destroy(&db->index_lock);
+        pthread_mutex_destroy(&db->id_lock);
+        return -1;
+    }
+    if (pthread_rwlock_init(&db->auth_lock, NULL) != 0) {
+        pthread_rwlock_destroy(&db->log_lock);
+        pthread_rwlock_destroy(&db->index_lock);
+        pthread_mutex_destroy(&db->id_lock);
+        return -1;
+    }
+    return 0;
+}
+
+static void destroy_db_locks(AegisDB *db) {
+    pthread_mutex_destroy(&db->id_lock);
+    pthread_rwlock_destroy(&db->index_lock);
+    pthread_rwlock_destroy(&db->log_lock);
+    pthread_rwlock_destroy(&db->auth_lock);
+}
+
+/* Give db a private deep copy of the startup token set: runtime token-admin
+ * mutates db->config.auth_tokens, while the startup Config keeps (and frees) its
+ * own. Returns 0 on success, -1 on OOM (db->config.auth_tokens is left aliasing
+ * cfg's, which the caller still owns). */
+static int dup_token_array(AegisDB *db, const Config *cfg) {
+    if (cfg->auth_token_count == 0) {
+        db->config.auth_tokens = NULL;
+        return 0;
+    }
+    AuthToken *copy = calloc(cfg->auth_token_count, sizeof(AuthToken));
+    if (!copy) return -1;
+    size_t i = 0;
+    for (; i < cfg->auth_token_count; i++) {
+        copy[i] = cfg->auth_tokens[i]; /* hash[], hashed, scope; dup ptrs below */
+        copy[i].token = NULL;
+        copy[i].namespace = NULL;
+        if (cfg->auth_tokens[i].token &&
+            !(copy[i].token = strdup(cfg->auth_tokens[i].token)))
+            break;
+        if (cfg->auth_tokens[i].namespace &&
+            !(copy[i].namespace = strdup(cfg->auth_tokens[i].namespace)))
+            break;
+    }
+    if (i != cfg->auth_token_count) { /* strdup OOM mid-copy */
+        free_token_array(copy, i + 1);
+        return -1;
+    }
+    db->config.auth_tokens = copy;
+    return 0;
+}
+
 int db_open(AegisDB *db, const Config *cfg) {
     memset(db, 0, sizeof(*db));
     db->config = *cfg;
@@ -452,47 +512,8 @@ int db_open(AegisDB *db, const Config *cfg) {
     snprintf(db->path_sem, sizeof(db->path_sem), "%s/memory.sem",
              cfg->data_dir);
 
-    if (pthread_mutex_init(&db->id_lock, NULL) != 0) return -1;
-    if (pthread_rwlock_init(&db->index_lock, NULL) != 0) {
-        pthread_mutex_destroy(&db->id_lock);
-        return -1;
-    }
-    if (pthread_rwlock_init(&db->log_lock, NULL) != 0) {
-        pthread_rwlock_destroy(&db->index_lock);
-        pthread_mutex_destroy(&db->id_lock);
-        return -1;
-    }
-    if (pthread_rwlock_init(&db->auth_lock, NULL) != 0) {
-        pthread_rwlock_destroy(&db->log_lock);
-        pthread_rwlock_destroy(&db->index_lock);
-        pthread_mutex_destroy(&db->id_lock);
-        return -1;
-    }
-    /* Own a private deep copy of the token set: runtime token-admin mutates
-     * db->config.auth_tokens, while the startup Config keeps (and frees) its own. */
-    if (cfg->auth_token_count > 0) {
-        AuthToken *copy = calloc(cfg->auth_token_count, sizeof(AuthToken));
-        if (!copy) goto fail_locks;
-        size_t i = 0;
-        for (; i < cfg->auth_token_count; i++) {
-            copy[i] = cfg->auth_tokens[i]; /* hash[], hashed, scope; dup ptrs below */
-            copy[i].token = NULL;
-            copy[i].namespace = NULL;
-            if (cfg->auth_tokens[i].token &&
-                !(copy[i].token = strdup(cfg->auth_tokens[i].token)))
-                break;
-            if (cfg->auth_tokens[i].namespace &&
-                !(copy[i].namespace = strdup(cfg->auth_tokens[i].namespace)))
-                break;
-        }
-        if (i != cfg->auth_token_count) { /* strdup OOM mid-copy */
-            free_token_array(copy, i + 1);
-            goto fail_locks;
-        }
-        db->config.auth_tokens = copy;
-    } else {
-        db->config.auth_tokens = NULL;
-    }
+    if (init_db_locks(db) != 0) return -1;
+    if (dup_token_array(db, cfg) != 0) goto fail_locks;
 
     const uint8_t *log_key = cfg->encryption_enabled ? cfg->encryption_key : NULL;
     LogOpenStatus log_st;
@@ -550,10 +571,7 @@ fail_indexes:
     tenant_table_free(db->tenants);
     log_close(&db->log);
 fail_locks:
-    pthread_mutex_destroy(&db->id_lock);
-    pthread_rwlock_destroy(&db->index_lock);
-    pthread_rwlock_destroy(&db->log_lock);
-    pthread_rwlock_destroy(&db->auth_lock);
+    destroy_db_locks(db);
     return -1;
 }
 

@@ -38,12 +38,63 @@ static int locs_push(NewLoc **locs, size_t *n, size_t *cap, NewLoc v) {
     return 0;
 }
 
+/* Phase 1 (brief read lock): snapshot the live entries and the byte offset up to
+ * which they were captured. Returns a malloc'd array of `*out_n` locations
+ * (caller frees) and sets `*out_end` to the captured log size, or NULL on OOM. */
+static NewLoc *compaction_snapshot(AegisDB *db, size_t *out_n, uint64_t *out_end) {
+    pthread_rwlock_rdlock(&db->index_lock);
+    HashIndex *h = db->hash;
+    NewLoc *snap = malloc((h->count ? h->count : 1) * sizeof(NewLoc));
+    if (!snap) {
+        pthread_rwlock_unlock(&db->index_lock);
+        return NULL;
+    }
+    size_t snap_n = 0;
+    for (size_t i = 0; i < h->cap; i++) {
+        const HashEntry *e = &h->buckets[i];
+        if (!e->used || e->deleted) continue;
+        snap[snap_n++] =
+            (NewLoc){e->id, e->offset, e->length, e->type, 0, e->expires_at};
+    }
+    *out_end = (uint64_t)db->log.size;
+    pthread_rwlock_unlock(&db->index_lock);
+    *out_n = snap_n;
+    return snap;
+}
+
+/* Phase 2 (no lock): copy the snapshot's live frames into the scratch log. The
+ * source region is immutable (append-only), so this runs concurrently with
+ * readers/writers. The scratch log takes the same key, so log_read decrypts each
+ * source frame and log_append re-seals it with a FRESH nonce. Appends one
+ * location per copied frame to *locs. Returns 0, or -1 on an append/OOM failure
+ * (an unreadable source frame is skipped, matching the original behaviour). */
+static int compaction_copy_live(AegisDB *db, LogFile *newlog, const NewLoc *snap,
+                                size_t snap_n, NewLoc **locs, size_t *nloc,
+                                size_t *locs_cap) {
+    for (size_t i = 0; i < snap_n; i++) {
+        uint8_t *buf = NULL;
+        size_t len = 0;
+        if (log_read(&db->log, snap[i].offset, &buf, &len) != 0) continue;
+        uint64_t off = 0;
+        if (log_append(newlog, buf, len, &off) != 0) {
+            free(buf);
+            return -1;
+        }
+        free(buf);
+        if (locs_push(locs, nloc, locs_cap,
+                      (NewLoc){snap[i].id, off, (uint32_t)len, snap[i].type, 0,
+                               snap[i].expires_at}))
+            return -1;
+    }
+    return 0;
+}
+
 /* Compact the log by rewriting only live records into a fresh log, then
- * swapping it in. The expensive copy runs WITHOUT the index lock: the source
- * region [0, snap_end) is immutable because the log is append-only, so readers
- * and writers proceed concurrently. Only the final drain-of-the-tail, log swap,
- * and hash rebuild hold the write lock, and the tail is bounded by the writes
- * that happened to race compaction rather than the whole live set. */
+ * swapping it in. The expensive copy (phase 2) runs WITHOUT the index lock: the
+ * source region [0, snap_end) is immutable because the log is append-only, so
+ * readers and writers proceed concurrently. Only the final drain-of-the-tail,
+ * log swap, and hash rebuild hold the write lock, and the tail is bounded by the
+ * writes that happened to race compaction rather than the whole live set. */
 int compaction_run_once(AegisDB *db) {
     LOG_DEBUG("compaction: starting log rewrite");
     char newpath[AEGIS_PATH_MAX];
@@ -53,28 +104,11 @@ int compaction_run_once(AegisDB *db) {
     }
     unlink(newpath); /* discard any stale partial file */
 
-    /* Phase 1 (brief read lock): snapshot the live entries and the byte offset
-     * up to which they were captured. */
-    pthread_rwlock_rdlock(&db->index_lock);
-    HashIndex *h = db->hash;
-    NewLoc *snap = malloc((h->count ? h->count : 1) * sizeof(NewLoc));
-    if (!snap) {
-        pthread_rwlock_unlock(&db->index_lock);
-        return -1;
-    }
     size_t snap_n = 0;
-    for (size_t i = 0; i < h->cap; i++) {
-        const HashEntry *e = &h->buckets[i];
-        if (!e->used || e->deleted) continue;
-        snap[snap_n++] =
-            (NewLoc){e->id, e->offset, e->length, e->type, 0, e->expires_at};
-    }
-    uint64_t snap_end = (uint64_t)db->log.size;
-    pthread_rwlock_unlock(&db->index_lock);
+    uint64_t snap_end = 0;
+    NewLoc *snap = compaction_snapshot(db, &snap_n, &snap_end);
+    if (!snap) return -1;
 
-    /* Phase 2 (no lock): copy the snapshot's live frames into the scratch log.
-     * The scratch log takes the same key, so log_read decrypts each source frame
-     * and log_append re-seals it with a FRESH nonce into the new log. */
     const uint8_t *ckey =
         db->config.encryption_enabled ? db->config.encryption_key : NULL;
     LogFile newlog;
@@ -86,23 +120,8 @@ int compaction_run_once(AegisDB *db) {
     }
     NewLoc *locs = NULL;
     size_t nloc = 0, locs_cap = 0;
-    int failed = 0;
-    for (size_t i = 0; i < snap_n && !failed; i++) {
-        uint8_t *buf = NULL;
-        size_t len = 0;
-        if (log_read(&db->log, snap[i].offset, &buf, &len) != 0) continue;
-        uint64_t off = 0;
-        if (log_append(&newlog, buf, len, &off) != 0) {
-            free(buf);
-            failed = 1;
-            break;
-        }
-        free(buf);
-        if (locs_push(&locs, &nloc, &locs_cap,
-                      (NewLoc){snap[i].id, off, (uint32_t)len, snap[i].type, 0,
-                               snap[i].expires_at}))
-            failed = 1;
-    }
+    int failed = compaction_copy_live(db, &newlog, snap, snap_n, &locs, &nloc,
+                                      &locs_cap) != 0;
     free(snap);
     if (failed) {
         free(locs);
