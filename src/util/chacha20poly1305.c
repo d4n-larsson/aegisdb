@@ -11,6 +11,7 @@
  * aead_seal/aead_open in aead.h), but so the unit test can check each against
  * its published known-answer vector, not only the end-to-end AEAD vector. */
 #include "aegisdb/aead.h"
+#include "aegisdb/chacha20poly1305.h"
 
 #include <string.h>
 

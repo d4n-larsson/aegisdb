@@ -21,6 +21,10 @@ typedef enum {
     AEGIS_ERR_MEMORY_LIMIT,      /* server index-memory cap reached -> MEMORY_LIMIT */
     AEGIS_ERR_INTERNAL           /* unexpected failure          -> INTERNAL */
 } aegis_status_t;
+/* Note: the snake_case_t spelling is deliberate — this is the result type of the
+ * public C result-code API (aegis_status_code/_message), styled like the C
+ * standard library's own *_t types, rather than the PascalCase used for AegisDB's
+ * internal structs. See docs/conventions.md. */
 
 /* Wire-protocol code string for a status (e.g. "NOT_FOUND"). */
 const char *aegis_status_code(aegis_status_t s);
