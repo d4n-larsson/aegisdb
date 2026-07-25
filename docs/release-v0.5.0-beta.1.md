@@ -1,4 +1,4 @@
-# AegisDB v0.5.0-beta.1 — first public beta 🛡️
+# AegisDB v0.5.0-beta.1 — public beta 🛡️
 
 > **Self-hosted memory for your AI agents.** One small C binary — multi-tenant,
 > encrypted, with backups, read replicas, and a one-command Prometheus + Grafana
@@ -10,10 +10,11 @@ search, and volatile working memory — behind a dead-simple JSON-over-TCP
 protocol, with a first-class Claude Code integration. It's a single
 dependency-free binary you run yourself.
 
-**This is a beta.** The core is solid and well-tested, but it hasn't yet run in
-anger across many real deployments — so we're shipping it to early adopters to
-earn that mileage. See [What "beta" means here](#what-beta-means-here) before you
-bet your production data on it.
+**AegisDB is now in public beta.** After a run of `0.x` dev releases the core is
+solid and well-tested, but it hasn't yet run in anger across many real
+deployments — so this is the point where we're inviting early adopters to put it
+to work and help us earn that mileage. See [What "beta" means here](#what-beta-means-here)
+before you bet your production data on it.
 
 ## Try it in 30 seconds
 
