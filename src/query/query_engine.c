@@ -868,18 +868,29 @@ static int cmp_u64_asc(const void *a, const void *b) {
 
 /* Snapshot every live record id (optionally only those > after_id) under the
  * index lock. Returns a malloc'd, unsorted array; caller frees. */
-static uint64_t *snapshot_live_ids(AegisDB *db, uint64_t after_id, size_t *out_n) {
+/* Collect the ids of the live hash entries (used, not deleted) for which
+ * keep(entry, ctx) is true, under the index read lock. Returns a malloc'd array
+ * of *out_n ids (caller frees; NULL when none matched). On a mid-scan allocation
+ * failure it returns what it gathered so far and, if out_oom is non-NULL, sets
+ * *out_oom = 1 — callers that must not act on a partial set check it and bail;
+ * best-effort callers pass NULL. */
+static uint64_t *collect_ids(AegisDB *db, int (*keep)(const HashEntry *, void *),
+                             void *ctx, size_t *out_n, int *out_oom) {
+    if (out_oom) *out_oom = 0;
     pthread_rwlock_rdlock(&db->index_lock);
     const HashIndex *h = db->hash;
     uint64_t *ids = NULL;
     size_t n = 0, cap = 0;
     for (size_t i = 0; i < h->cap; i++) {
         const HashEntry *e = &h->buckets[i];
-        if (!e->used || e->deleted || e->id <= after_id) continue;
+        if (!e->used || e->deleted || !keep(e, ctx)) continue;
         if (n == cap) {
             size_t nc = cap ? cap * 2 : 64;
             uint64_t *g = realloc(ids, nc * sizeof(uint64_t));
-            if (!g) break; /* best-effort: work with what we gathered */
+            if (!g) {
+                if (out_oom) *out_oom = 1;
+                break;
+            }
             ids = g;
             cap = nc;
         }
@@ -888,6 +899,26 @@ static uint64_t *snapshot_live_ids(AegisDB *db, uint64_t after_id, size_t *out_n
     pthread_rwlock_unlock(&db->index_lock);
     *out_n = n;
     return ids;
+}
+
+/* collect_ids predicates: ctx points at the comparison value (or is unused). */
+static int keep_after_id(const HashEntry *e, void *ctx) {
+    return e->id > *(const uint64_t *)ctx;
+}
+static int keep_expired(const HashEntry *e, void *ctx) {
+    uint64_t now = *(const uint64_t *)ctx;
+    return e->expires_at != 0 && now >= e->expires_at;
+}
+static int keep_semantic(const HashEntry *e, void *ctx) {
+    (void)ctx;
+    return e->type == MEM_SEMANTIC;
+}
+static int keep_type(const HashEntry *e, void *ctx) {
+    return e->type == *(const MemoryType *)ctx;
+}
+
+static uint64_t *snapshot_live_ids(AegisDB *db, uint64_t after_id, size_t *out_n) {
+    return collect_ids(db, keep_after_id, &after_id, out_n, NULL);
 }
 
 /* Export (ROADMAP 3.2): the subject's records, id-ordered, paginated by
@@ -1085,25 +1116,9 @@ size_t qe_sweep_expired(AegisDB *db, uint64_t now) {
     /* Collect expired live ids from an in-memory hash scan (no record reads —
      * expires_at lives in the HashEntry), then tombstone each so compaction can
      * reclaim the log. Snapshot-then-delete: qe_delete takes the write lock and
-     * re-validates, so a racing change just skips that id. */
-    pthread_rwlock_rdlock(&db->index_lock);
-    const HashIndex *h = db->hash;
-    uint64_t *ids = NULL;
-    size_t n = 0, cap = 0;
-    for (size_t i = 0; i < h->cap; i++) {
-        const HashEntry *e = &h->buckets[i];
-        if (!e->used || e->deleted || e->expires_at == 0 || now < e->expires_at)
-            continue;
-        if (n == cap) {
-            size_t nc = cap ? cap * 2 : 16;
-            uint64_t *g = realloc(ids, nc * sizeof(uint64_t));
-            if (!g) break; /* best-effort: sweep what we gathered */
-            ids = g;
-            cap = nc;
-        }
-        ids[n++] = e->id;
-    }
-    pthread_rwlock_unlock(&db->index_lock);
+     * re-validates, so a racing change just skips that id. Best-effort on OOM. */
+    size_t n = 0;
+    uint64_t *ids = collect_ids(db, keep_expired, &now, &n, NULL);
 
     size_t swept = 0;
     for (size_t i = 0; i < n; i++)
@@ -1196,23 +1211,10 @@ aegis_status_t qe_consolidate(AegisDB *db, const char *ns, float min_similarity,
     *out_merged = 0;
 
     /* snapshot the live semantic ids (hash scan by type; no record reads) */
-    pthread_rwlock_rdlock(&db->index_lock);
-    const HashIndex *h = db->hash;
-    uint64_t *ids = NULL;
-    size_t n = 0, cap = 0;
-    for (size_t i = 0; i < h->cap; i++) {
-        const HashEntry *e = &h->buckets[i];
-        if (!e->used || e->deleted || e->type != MEM_SEMANTIC) continue;
-        if (n == cap) {
-            size_t nc = cap ? cap * 2 : 64;
-            uint64_t *g = realloc(ids, nc * sizeof(uint64_t));
-            if (!g) { free(ids); pthread_rwlock_unlock(&db->index_lock); return AEGIS_ERR_INTERNAL; }
-            ids = g;
-            cap = nc;
-        }
-        ids[n++] = e->id;
-    }
-    pthread_rwlock_unlock(&db->index_lock);
+    size_t n = 0;
+    int oom = 0;
+    uint64_t *ids = collect_ids(db, keep_semantic, NULL, &n, &oom);
+    if (oom) { free(ids); return AEGIS_ERR_INTERNAL; }
 
     for (size_t i = 0; i < n; i++) {
         /* Load the record for its embedding. A prior merge may have tombstoned
@@ -1271,27 +1273,10 @@ aegis_status_t qe_forget(AegisDB *db, const char *ns, MemoryType type,
     if (half_life_ms < MIN_HALF_LIFE_MS) half_life_ms = MIN_HALF_LIFE_MS;
 
     /* snapshot the live ids of the target type (hash scan; no record reads) */
-    pthread_rwlock_rdlock(&db->index_lock);
-    const HashIndex *h = db->hash;
-    uint64_t *ids = NULL;
-    size_t n = 0, cap = 0;
-    for (size_t i = 0; i < h->cap; i++) {
-        const HashEntry *e = &h->buckets[i];
-        if (!e->used || e->deleted || e->type != type) continue;
-        if (n == cap) {
-            size_t nc = cap ? cap * 2 : 64;
-            uint64_t *g = realloc(ids, nc * sizeof(uint64_t));
-            if (!g) {
-                free(ids);
-                pthread_rwlock_unlock(&db->index_lock);
-                return AEGIS_ERR_INTERNAL;
-            }
-            ids = g;
-            cap = nc;
-        }
-        ids[n++] = e->id;
-    }
-    pthread_rwlock_unlock(&db->index_lock);
+    size_t n = 0;
+    int oom = 0;
+    uint64_t *ids = collect_ids(db, keep_type, &type, &n, &oom);
+    if (oom) { free(ids); return AEGIS_ERR_INTERNAL; }
 
     uint64_t now = db_now_ms();
     for (size_t i = 0; i < n; i++) {
