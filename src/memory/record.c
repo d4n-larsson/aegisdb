@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "aegisdb/endian.h"
+
 /* v1: single embedding (dim + dim floats). v2 (#85): vec_count + dim +
  * vec_count*dim floats. decode reads both; encode always writes v2. */
 #define RECORD_CODEC_VERSION 2
@@ -154,17 +156,18 @@ static void put_bytes(Buf *b, const void *s, size_t n) {
 }
 static void put_u8(Buf *b, uint8_t v) { put_bytes(b, &v, 1); }
 static void put_u16(Buf *b, uint16_t v) {
-    uint8_t t[2] = {(uint8_t)v, (uint8_t)(v >> 8)};
+    uint8_t t[2];
+    aegis_put_u16le(t, v);
     put_bytes(b, t, 2);
 }
 static void put_u32(Buf *b, uint32_t v) {
     uint8_t t[4];
-    for (int i = 0; i < 4; i++) t[i] = (uint8_t)(v >> (8 * i));
+    aegis_put_u32le(t, v);
     put_bytes(b, t, 4);
 }
 static void put_u64(Buf *b, uint64_t v) {
     uint8_t t[8];
-    for (int i = 0; i < 8; i++) t[i] = (uint8_t)(v >> (8 * i));
+    aegis_put_u64le(t, v);
     put_bytes(b, t, 8);
 }
 static void put_f32(Buf *b, float f) {
@@ -250,20 +253,17 @@ static uint8_t get_u8(Cur *c) { uint8_t v = 0; cur_take(c, &v, 1); return v; }
 static uint16_t get_u16(Cur *c) {
     uint8_t t[2] = {0};
     cur_take(c, t, 2);
-    return (uint16_t)(t[0] | (t[1] << 8));
+    return aegis_get_u16le(t);
 }
 static uint32_t get_u32(Cur *c) {
     uint8_t t[4] = {0};
     cur_take(c, t, 4);
-    return (uint32_t)t[0] | ((uint32_t)t[1] << 8) | ((uint32_t)t[2] << 16) |
-           ((uint32_t)t[3] << 24);
+    return aegis_get_u32le(t);
 }
 static uint64_t get_u64(Cur *c) {
     uint8_t t[8] = {0};
     cur_take(c, t, 8);
-    uint64_t v = 0;
-    for (int i = 0; i < 8; i++) v |= (uint64_t)t[i] << (8 * i);
-    return v;
+    return aegis_get_u64le(t);
 }
 static float get_f32(Cur *c) {
     uint32_t u = get_u32(c);
