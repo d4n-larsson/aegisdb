@@ -250,6 +250,26 @@ def test_stats(binary, port):
               "by_op.search counts the search")
         check(m2["errors"] >= errs_before + 1, "errors counter catches bogus op")
 
+        # These ops used to be missing from the metric map and silently bucketed
+        # into by_op.other (#187). Each must now have its own labelled counter,
+        # and exercising it must advance that counter, not "other".
+        labelled = ("history", "export", "consolidate", "forget", "purge")
+        check(all(k in m2["by_op"] for k in labelled),
+              "by_op has a labelled counter for history/export/consolidate/forget/purge")
+        other_before = m2["by_op"]["other"]
+        rec = srv.req({"operation": "insert", "type": "semantic",
+                       "data": "metrics probe"})["record"]["id"]
+        srv.req({"operation": "history", "id": rec})
+        srv.req({"operation": "export"})
+        srv.req({"operation": "consolidate"})
+        srv.req({"operation": "forget", "older_than_ms": 1})
+        srv.req({"operation": "purge", "namespace": "no-such-ns"})
+        m3 = srv.req({"operation": "stats"}).get("metrics", {})
+        for k in labelled:
+            check(m3["by_op"][k] >= 1, f"by_op.{k} counts its op (not 'other')")
+        check(m3["by_op"]["other"] == other_before,
+              "labelled ops no longer inflate by_op.other")
+
 
 def test_delete(binary, port):
     print("[phase 4: delete]")
