@@ -140,7 +140,7 @@ toolchain needed:
 
 ```bash
 docker run -p 9470:9470 -v aegis-data:/data ghcr.io/d4n-larsson/aegisdb:latest
-# or pin a release: ghcr.io/d4n-larsson/aegisdb:0.1.0
+# or pin a specific release, e.g. ghcr.io/d4n-larsson/aegisdb:0.4.11 (see Releases)
 ```
 
 To build it yourself instead, a multi-stage `Dockerfile` (Debian-slim) compiles
