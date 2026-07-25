@@ -343,6 +343,37 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
         return -1;                                                     \
     }                                                                  \
     const char *val = argv[++i]
+/* The three numeric-option shapes, which otherwise repeat parse+range+error+
+ * assign verbatim. `label` is the human option name used in the error. */
+#define INT_OPT(field, lo, hi, label)                                  \
+    do {                                                               \
+        NEXT(label);                                                   \
+        if (parse_int(val, &(field)) || (field) < (lo) ||              \
+            (field) > (hi)) {                                          \
+            fprintf(stderr, "%s: invalid %s '%s'\n", prog, label, val);\
+            return -1;                                                 \
+        }                                                              \
+    } while (0)
+/* parse_int into a wider unsigned `field` (via `cast`), requiring v >= lo. */
+#define UINT_OPT(field, lo, cast, label)                               \
+    do {                                                               \
+        NEXT(label);                                                   \
+        int _v;                                                        \
+        if (parse_int(val, &_v) || _v < (lo)) {                        \
+            fprintf(stderr, "%s: invalid %s '%s'\n", prog, label, val);\
+            return -1;                                                 \
+        }                                                              \
+        (field) = (cast)_v;                                            \
+    } while (0)
+/* parse_size into a size_t `field`. */
+#define SIZE_OPT(field, label)                                         \
+    do {                                                               \
+        NEXT(label);                                                   \
+        if (parse_size(val, &(field))) {                               \
+            fprintf(stderr, "%s: invalid %s '%s'\n", prog, label, val);\
+            return -1;                                                 \
+        }                                                              \
+    } while (0)
 
         if (strcmp(a, "--help") == 0 || strcmp(a, "-h") == 0) {
             usage(prog);
@@ -362,53 +393,20 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
             strncpy(cfg->data_dir, val, sizeof(cfg->data_dir) - 1);
             cfg->data_dir[sizeof(cfg->data_dir) - 1] = '\0';
         } else if (strcmp(a, "--port") == 0) {
-            NEXT("--port");
-            if (parse_int(val, &cfg->listen_port) || cfg->listen_port <= 0 ||
-                cfg->listen_port > 65535) {
-                fprintf(stderr, "%s: invalid port '%s'\n", prog, val);
-                return -1;
-            }
+            INT_OPT(cfg->listen_port, 1, 65535, "port");
         } else if (strcmp(a, "--phase") == 0) {
-            NEXT("--phase");
-            if (parse_int(val, &cfg->enabled_phase) || cfg->enabled_phase < 1 ||
-                cfg->enabled_phase > 4) {
-                fprintf(stderr, "%s: invalid phase '%s' (1-4)\n", prog, val);
-                return -1;
-            }
+            INT_OPT(cfg->enabled_phase, 1, 4, "phase");
         } else if (strcmp(a, "--io-threads") == 0 || strcmp(a, "--workers") == 0) {
-            NEXT(a); /* --workers kept as a back-compat alias for --io-threads */
-            if (parse_int(val, &cfg->io_threads) || cfg->io_threads < 1) {
-                fprintf(stderr, "%s: invalid %s '%s'\n", prog, a, val);
-                return -1;
-            }
+            /* --workers kept as a back-compat alias for --io-threads */
+            INT_OPT(cfg->io_threads, 1, INT_MAX, a);
         } else if (strcmp(a, "--idle-timeout-sec") == 0) {
-            NEXT("--idle-timeout-sec");
-            int v;
-            if (parse_int(val, &v) || v < 0) {
-                fprintf(stderr, "%s: invalid idle-timeout-sec '%s'\n", prog, val);
-                return -1;
-            }
-            cfg->idle_timeout_sec = (unsigned)v;
+            UINT_OPT(cfg->idle_timeout_sec, 0, unsigned, "idle-timeout-sec");
         } else if (strcmp(a, "--max-connections") == 0) {
-            NEXT("--max-connections");
-            if (parse_int(val, &cfg->max_connections) || cfg->max_connections < 0) {
-                fprintf(stderr, "%s: invalid max-connections '%s'\n", prog, val);
-                return -1;
-            }
+            INT_OPT(cfg->max_connections, 0, INT_MAX, "max-connections");
         } else if (strcmp(a, "--query-scan-cap") == 0) {
-            NEXT("--query-scan-cap");
-            int v;
-            if (parse_int(val, &v) || v < 0) {
-                fprintf(stderr, "%s: invalid query-scan-cap '%s'\n", prog, val);
-                return -1;
-            }
-            cfg->query_scan_cap = (size_t)v;
+            UINT_OPT(cfg->query_scan_cap, 0, size_t, "query-scan-cap");
         } else if (strcmp(a, "--max-index-bytes") == 0) {
-            NEXT("--max-index-bytes");
-            if (parse_size(val, &cfg->max_index_bytes)) {
-                fprintf(stderr, "%s: invalid max-index-bytes '%s'\n", prog, val);
-                return -1;
-            }
+            SIZE_OPT(cfg->max_index_bytes, "max-index-bytes");
         } else if (strcmp(a, "--encryption-key-file") == 0) {
             NEXT("--encryption-key-file");
             if (load_key_file(val, cfg->encryption_key) != 0) {
@@ -419,42 +417,17 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
             }
             cfg->encryption_enabled = 1;
         } else if (strcmp(a, "--max-payload") == 0) {
-            NEXT("--max-payload");
-            if (parse_size(val, &cfg->max_payload_bytes)) {
-                fprintf(stderr, "%s: invalid max-payload '%s'\n", prog, val);
-                return -1;
-            }
+            SIZE_OPT(cfg->max_payload_bytes, "max-payload");
         } else if (strcmp(a, "--embedding-dim") == 0) {
-            NEXT("--embedding-dim");
-            if (parse_size(val, &cfg->embedding_dimensions)) {
-                fprintf(stderr, "%s: invalid embedding-dim '%s'\n", prog, val);
-                return -1;
-            }
+            SIZE_OPT(cfg->embedding_dimensions, "embedding-dim");
         } else if (strcmp(a, "--ann-ef-search") == 0) {
-            NEXT("--ann-ef-search");
-            if (parse_size(val, &cfg->ann_ef_search)) {
-                fprintf(stderr, "%s: invalid ann-ef-search '%s'\n", prog, val);
-                return -1;
-            }
+            SIZE_OPT(cfg->ann_ef_search, "ann-ef-search");
         } else if (strcmp(a, "--ann-threshold") == 0) {
-            NEXT("--ann-threshold");
-            if (parse_size(val, &cfg->ann_threshold)) {
-                fprintf(stderr, "%s: invalid ann-threshold '%s'\n", prog, val);
-                return -1;
-            }
+            SIZE_OPT(cfg->ann_threshold, "ann-threshold");
         } else if (strcmp(a, "--ann-shard-target") == 0) {
-            NEXT("--ann-shard-target");
-            if (parse_size(val, &cfg->ann_shard_target)) {
-                fprintf(stderr, "%s: invalid ann-shard-target '%s'\n", prog, val);
-                return -1;
-            }
+            SIZE_OPT(cfg->ann_shard_target, "ann-shard-target");
         } else if (strcmp(a, "--replication-port") == 0) {
-            NEXT("--replication-port");
-            if (parse_int(val, &cfg->replication_port) ||
-                cfg->replication_port < 0 || cfg->replication_port > 65535) {
-                fprintf(stderr, "%s: invalid replication-port '%s'\n", prog, val);
-                return -1;
-            }
+            INT_OPT(cfg->replication_port, 0, 65535, "replication-port");
         } else if (strcmp(a, "--replication-token") == 0) {
             NEXT("--replication-token");
             snprintf(cfg->replication_token, sizeof(cfg->replication_token),
@@ -483,17 +456,9 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
         } else if (strcmp(a, "--ann-quantize") == 0) {
             cfg->ann_quantize = 1; /* boolean flag: int8 HNSW vectors */
         } else if (strcmp(a, "--tenant-max-records") == 0) {
-            NEXT("--tenant-max-records");
-            if (parse_size(val, &cfg->tenant_max_records)) {
-                fprintf(stderr, "%s: invalid tenant-max-records '%s'\n", prog, val);
-                return -1;
-            }
+            SIZE_OPT(cfg->tenant_max_records, "tenant-max-records");
         } else if (strcmp(a, "--tenant-max-bytes") == 0) {
-            NEXT("--tenant-max-bytes");
-            if (parse_size(val, &cfg->tenant_max_bytes)) {
-                fprintf(stderr, "%s: invalid tenant-max-bytes '%s'\n", prog, val);
-                return -1;
-            }
+            SIZE_OPT(cfg->tenant_max_bytes, "tenant-max-bytes");
         } else if (strcmp(a, "--tenant-rate-qps") == 0) {
             NEXT("--tenant-rate-qps");
             char *end = NULL;
@@ -504,11 +469,7 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
             }
             cfg->tenant_rate_qps = q;
         } else if (strcmp(a, "--fsync-batch") == 0) {
-            NEXT("--fsync-batch");
-            if (parse_size(val, &cfg->fsync_batch_size)) {
-                fprintf(stderr, "%s: invalid fsync-batch '%s'\n", prog, val);
-                return -1;
-            }
+            SIZE_OPT(cfg->fsync_batch_size, "fsync-batch");
         } else if (strcmp(a, "--durability") == 0) {
             NEXT("--durability");
             if (aegis_durability_from_string(val, &cfg->durability) != 0) {
@@ -527,29 +488,11 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
             }
             cfg->fsync_interval_ms = (uint64_t)ms;
         } else if (strcmp(a, "--checkpoint-sec") == 0) {
-            NEXT("--checkpoint-sec");
-            int cs;
-            if (parse_int(val, &cs) || cs < 0) {
-                fprintf(stderr, "%s: invalid checkpoint-sec '%s'\n", prog, val);
-                return -1;
-            }
-            cfg->checkpoint_sec = (unsigned)cs;
+            UINT_OPT(cfg->checkpoint_sec, 0, unsigned, "checkpoint-sec");
         } else if (strcmp(a, "--compact-sec") == 0) {
-            NEXT("--compact-sec");
-            int cs;
-            if (parse_int(val, &cs) || cs < 0) {
-                fprintf(stderr, "%s: invalid compact-sec '%s'\n", prog, val);
-                return -1;
-            }
-            cfg->compact_sec = (unsigned)cs;
+            UINT_OPT(cfg->compact_sec, 0, unsigned, "compact-sec");
         } else if (strcmp(a, "--working-capacity") == 0) {
-            NEXT("--working-capacity");
-            int wc;
-            if (parse_int(val, &wc) || wc < 1) {
-                fprintf(stderr, "%s: invalid working-capacity '%s'\n", prog, val);
-                return -1;
-            }
-            cfg->working_capacity = (uint32_t)wc;
+            UINT_OPT(cfg->working_capacity, 1, uint32_t, "working-capacity");
         } else if (strcmp(a, "--auth-token") == 0) {
             NEXT("--auth-token");
             if (append_token(cfg, val, NULL, AEGIS_SCOPE_ADMIN) != 0) {
@@ -581,6 +524,9 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
             return -1;
         }
 #undef NEXT
+#undef INT_OPT
+#undef UINT_OPT
+#undef SIZE_OPT
     }
     return 0;
 }

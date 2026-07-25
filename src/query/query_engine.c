@@ -486,6 +486,69 @@ static void idx_sift_down(size_t *h, size_t n, size_t i, const Cand *c,
     }
 }
 
+/* Sift the leaf at index `i` up toward the root of the (max-by-cmp) heap — the
+ * insert-side mirror of idx_sift_down. */
+static void idx_sift_up(size_t *h, size_t i, const Cand *c,
+                        int (*cmp)(const void *, const void *)) {
+    while (i > 0) {
+        size_t pa = (i - 1) / 2;
+        if (cmp(&c[h[i]], &c[h[pa]]) <= 0) break;
+        size_t t = h[i];
+        h[i] = h[pa];
+        h[pa] = t;
+        i = pa;
+    }
+}
+
+/* Select and sort the best `sel_n` (<= m) candidates by `cmp`, best-first.
+ * Consumes `cands`: returns a freshly-owned array of length sel_n (whose records
+ * it owns) and frees the records of the m-sel_n that did not make the cut, or
+ * returns NULL on OOM (all m records + cands freed). When sel_n == m the array
+ * is `cands` sorted in place. */
+static Cand *select_top(Cand *cands, size_t m, size_t sel_n,
+                        int (*cmp)(const void *, const void *)) {
+    if (sel_n >= m) {
+        /* ranking everything: a single full sort is simplest */
+        qsort(cands, m, sizeof(Cand), cmp);
+        return cands;
+    }
+    /* Select the sel_n best in O(m log sel_n) via a bounded index heap, then sort
+     * those and free the records that did not make the cut. */
+    size_t *heap = malloc(sel_n * sizeof(*heap));
+    char *sel = calloc(m, 1);
+    Cand *top = malloc(sel_n * sizeof(Cand));
+    if (!heap || !sel || !top) {
+        for (size_t i = 0; i < m; i++) record_free(&cands[i].rec);
+        free(cands);
+        free(heap);
+        free(sel);
+        free(top);
+        return NULL;
+    }
+    size_t hn = 0;
+    for (size_t i = 0; i < m; i++) {
+        if (hn < sel_n) {
+            heap[hn] = i;
+            idx_sift_up(heap, hn, cands, cmp);
+            hn++;
+        } else if (cmp(&cands[i], &cands[heap[0]]) < 0) {
+            heap[0] = i; /* better than the worst kept: evict the root */
+            idx_sift_down(heap, hn, 0, cands, cmp);
+        }
+    }
+    for (size_t t = 0; t < sel_n; t++) {
+        sel[heap[t]] = 1;
+        top[t] = cands[heap[t]];
+    }
+    qsort(top, sel_n, sizeof(Cand), cmp);
+    for (size_t i = 0; i < m; i++)
+        if (!sel[i]) record_free(&cands[i].rec);
+    free(heap);
+    free(sel);
+    free(cands);
+    return top;
+}
+
 /* Resolve a candidate id set and load the surviving records. For semantic
  * queries the candidates are the top `fetch` by vector similarity; otherwise
  * the complete matching set from the time/tag index. Offsets are snapshotted
@@ -688,57 +751,10 @@ aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
     int (*cmp)(const void *, const void *) =
         semantic ? cmp_score_desc : cmp_created_asc;
     size_t sel_n = (want < m) ? want : m;
-    Cand *ranked; /* length sel_n, sorted; owns .rec for [0, sel_n) */
-
-    if (sel_n >= m) {
-        /* ranking everything: a single full sort is simplest */
-        qsort(cands, m, sizeof(Cand), cmp);
-        ranked = cands; /* sel_n == m */
-    } else {
-        /* Select the sel_n best in O(m log sel_n) via a bounded index heap, then
-         * sort those and free the records that did not make the cut. */
-        size_t *heap = malloc(sel_n * sizeof(*heap));
-        char *sel = calloc(m, 1);
-        Cand *top = malloc(sel_n * sizeof(Cand));
-        if (!heap || !sel || !top) {
-            for (size_t i = 0; i < m; i++) record_free(&cands[i].rec);
-            free(cands);
-            free(heap);
-            free(sel);
-            free(top);
-            return AEGIS_ERR_INTERNAL;
-        }
-        size_t hn = 0;
-        for (size_t i = 0; i < m; i++) {
-            if (hn < sel_n) {
-                /* push: sift the new leaf up toward the (worst-ranked) root */
-                size_t j = hn++;
-                heap[j] = i;
-                while (j > 0) {
-                    size_t pa = (j - 1) / 2;
-                    if (cmp(&cands[heap[j]], &cands[heap[pa]]) <= 0) break;
-                    size_t t = heap[j];
-                    heap[j] = heap[pa];
-                    heap[pa] = t;
-                    j = pa;
-                }
-            } else if (cmp(&cands[i], &cands[heap[0]]) < 0) {
-                heap[0] = i; /* better than the worst kept: evict the root */
-                idx_sift_down(heap, hn, 0, cands, cmp);
-            }
-        }
-        for (size_t t = 0; t < sel_n; t++) {
-            sel[heap[t]] = 1;
-            top[t] = cands[heap[t]];
-        }
-        qsort(top, sel_n, sizeof(Cand), cmp);
-        for (size_t i = 0; i < m; i++)
-            if (!sel[i]) record_free(&cands[i].rec);
-        free(heap);
-        free(sel);
-        free(cands);
-        ranked = top;
-    }
+    /* Rank the best `sel_n` into `ranked` (best-first); it owns .rec for
+     * [0, sel_n). NULL is OOM only when sel_n > 0 (sel_n == 0 == no candidates). */
+    Cand *ranked = select_top(cands, m, sel_n, cmp);
+    if (sel_n > 0 && !ranked) return AEGIS_ERR_INTERNAL;
 
     /* page: keep [offset, sel_n), free the skipped head */
     size_t start = offset < sel_n ? offset : sel_n;
@@ -1667,24 +1683,9 @@ static cJSON *handle_ping(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
 
 /* Operational snapshot: durability posture, durability lag, record/index
  * counts. Read-only; intended for monitoring and capacity planning. */
-static cJSON *handle_stats(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
-    (void)req;
-    (void)ctx;
-    cJSON *o = json_ok();
-    cJSON_AddStringToObject(o, "version", AEGIS_VERSION_STRING);
-    cJSON_AddNumberToObject(o, "phase", db->config.enabled_phase);
-    cJSON_AddNumberToObject(o, "uptime_ms",
-                            (double)(db_now_ms() - db->started_ms));
-
-    cJSON_AddStringToObject(o, "durability",
-                            aegis_durability_name(db->config.durability));
-    if (db->config.durability == AEGIS_DURABILITY_BATCH)
-        cJSON_AddNumberToObject(o, "fsync_batch",
-                                (double)db->config.fsync_batch_size);
-    else if (db->config.durability == AEGIS_DURABILITY_INTERVAL)
-        cJSON_AddNumberToObject(o, "fsync_interval_ms",
-                                (double)db->config.fsync_interval_ms);
-
+/* Record counts, log size, and per-index counts + resident bytes, captured under
+ * the index read lock. */
+static void stats_add_storage(cJSON *o, AegisDB *db) {
     pthread_rwlock_rdlock(&db->index_lock);
     size_t live = 0, tombstones = 0;
     const HashIndex *h = db->hash;
@@ -1729,67 +1730,68 @@ static cJSON *handle_stats(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
                                 (double)db->config.max_index_bytes);
     }
     pthread_rwlock_unlock(&db->index_lock);
+}
 
-    pthread_mutex_lock(&db->id_lock);
-    cJSON_AddNumberToObject(o, "next_id", (double)db->next_id);
-    pthread_mutex_unlock(&db->id_lock);
-
-    /* Monotonic operational counters, for scraping (rates = successive diffs). */
+/* Monotonic operational counters, for scraping (rates = successive diffs). */
+static void stats_add_metrics(cJSON *o, AegisDB *db) {
     static const char *const op_names[MOP__N] = {
         "ping", "insert", "get", "update", "delete", "search",
         "count", "promote", "relate", "traverse", "stats",
         "history", "export", "purge", "consolidate", "forget", "other"};
     Metrics *mt = &db->metrics;
     cJSON *m = cJSON_AddObjectToObject(o, "metrics");
-    if (m) {
-        cJSON_AddNumberToObject(m, "requests",
-            (double)atomic_load_explicit(&mt->requests, memory_order_relaxed));
-        cJSON_AddNumberToObject(m, "errors",
-            (double)atomic_load_explicit(&mt->errors, memory_order_relaxed));
-        cJSON_AddNumberToObject(m, "unauthorized",
-            (double)atomic_load_explicit(&mt->unauthorized, memory_order_relaxed));
-        cJSON_AddNumberToObject(m, "dispatch_micros",
-            (double)atomic_load_explicit(&mt->dispatch_micros, memory_order_relaxed));
-        cJSON_AddNumberToObject(m, "memories_merged",
-            (double)atomic_load_explicit(&mt->memories_merged, memory_order_relaxed));
-        cJSON_AddNumberToObject(m, "memories_forgotten",
-            (double)atomic_load_explicit(&mt->memories_forgotten, memory_order_relaxed));
-        cJSON_AddNumberToObject(m, "memories_purged",
-            (double)atomic_load_explicit(&mt->memories_purged, memory_order_relaxed));
-        cJSON *bo = cJSON_AddObjectToObject(m, "by_op");
-        if (bo)
-            for (int i = 0; i < MOP__N; i++)
-                cJSON_AddNumberToObject(bo, op_names[i],
-                    (double)atomic_load_explicit(&mt->by_op[i], memory_order_relaxed));
-    }
+    if (!m) return;
+    cJSON_AddNumberToObject(m, "requests",
+        (double)atomic_load_explicit(&mt->requests, memory_order_relaxed));
+    cJSON_AddNumberToObject(m, "errors",
+        (double)atomic_load_explicit(&mt->errors, memory_order_relaxed));
+    cJSON_AddNumberToObject(m, "unauthorized",
+        (double)atomic_load_explicit(&mt->unauthorized, memory_order_relaxed));
+    cJSON_AddNumberToObject(m, "dispatch_micros",
+        (double)atomic_load_explicit(&mt->dispatch_micros, memory_order_relaxed));
+    cJSON_AddNumberToObject(m, "memories_merged",
+        (double)atomic_load_explicit(&mt->memories_merged, memory_order_relaxed));
+    cJSON_AddNumberToObject(m, "memories_forgotten",
+        (double)atomic_load_explicit(&mt->memories_forgotten, memory_order_relaxed));
+    cJSON_AddNumberToObject(m, "memories_purged",
+        (double)atomic_load_explicit(&mt->memories_purged, memory_order_relaxed));
+    cJSON *bo = cJSON_AddObjectToObject(m, "by_op");
+    if (bo)
+        for (int i = 0; i < MOP__N; i++)
+            cJSON_AddNumberToObject(bo, op_names[i],
+                (double)atomic_load_explicit(&mt->by_op[i], memory_order_relaxed));
+}
 
-    /* Per-tenant usage against the configured caps (admin-only op, so this is
-     * server-wide). Only emitted when a limit is configured, keeping the common
-     * single-tenant / no-quota response unchanged. */
-    if (db->config.tenant_max_records || db->config.tenant_max_bytes ||
-        db->config.tenant_rate_qps > 0) {
-        cJSON *lim = cJSON_AddObjectToObject(o, "tenant_limits");
-        if (lim) {
-            cJSON_AddNumberToObject(lim, "max_records",
-                                    (double)db->config.tenant_max_records);
-            cJSON_AddNumberToObject(lim, "max_bytes",
-                                    (double)db->config.tenant_max_bytes);
-            cJSON_AddNumberToObject(lim, "rate_qps", db->config.tenant_rate_qps);
-        }
-        size_t tn = 0;
-        TenantUsage *usage = tenant_usage_snapshot(db->tenants, &tn);
-        cJSON *arr = cJSON_AddArrayToObject(o, "tenants");
-        for (size_t i = 0; arr && i < tn; i++) {
-            cJSON *e = cJSON_CreateObject();
-            cJSON_AddStringToObject(e, "namespace", usage[i].ns);
-            cJSON_AddNumberToObject(e, "records", (double)usage[i].records);
-            cJSON_AddNumberToObject(e, "bytes", (double)usage[i].bytes);
-            cJSON_AddItemToArray(arr, e);
-        }
-        tenant_usage_free(usage, tn);
+/* Per-tenant usage against the configured caps (admin-only op, so this is
+ * server-wide). Only emitted when a limit is configured, keeping the common
+ * single-tenant / no-quota response unchanged. */
+static void stats_add_tenants(cJSON *o, AegisDB *db) {
+    if (!(db->config.tenant_max_records || db->config.tenant_max_bytes ||
+          db->config.tenant_rate_qps > 0))
+        return;
+    cJSON *lim = cJSON_AddObjectToObject(o, "tenant_limits");
+    if (lim) {
+        cJSON_AddNumberToObject(lim, "max_records",
+                                (double)db->config.tenant_max_records);
+        cJSON_AddNumberToObject(lim, "max_bytes",
+                                (double)db->config.tenant_max_bytes);
+        cJSON_AddNumberToObject(lim, "rate_qps", db->config.tenant_rate_qps);
     }
+    size_t tn = 0;
+    TenantUsage *usage = tenant_usage_snapshot(db->tenants, &tn);
+    cJSON *arr = cJSON_AddArrayToObject(o, "tenants");
+    for (size_t i = 0; arr && i < tn; i++) {
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "namespace", usage[i].ns);
+        cJSON_AddNumberToObject(e, "records", (double)usage[i].records);
+        cJSON_AddNumberToObject(e, "bytes", (double)usage[i].bytes);
+        cJSON_AddItemToArray(arr, e);
+    }
+    tenant_usage_free(usage, tn);
+}
 
-    /* Replication posture (only when this node participates). */
+/* Replication posture (only when this node participates). */
+static void stats_add_replication(cJSON *o, AegisDB *db) {
     if (db->repl_follower) {
         uint64_t applied = 0, primary_size = 0;
         int connected = 0;
@@ -1818,6 +1820,34 @@ static cJSON *handle_stats(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
                                              memory_order_relaxed));
         }
     }
+}
+
+static cJSON *handle_stats(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    (void)req;
+    (void)ctx;
+    cJSON *o = json_ok();
+    cJSON_AddStringToObject(o, "version", AEGIS_VERSION_STRING);
+    cJSON_AddNumberToObject(o, "phase", db->config.enabled_phase);
+    cJSON_AddNumberToObject(o, "uptime_ms",
+                            (double)(db_now_ms() - db->started_ms));
+    cJSON_AddStringToObject(o, "durability",
+                            aegis_durability_name(db->config.durability));
+    if (db->config.durability == AEGIS_DURABILITY_BATCH)
+        cJSON_AddNumberToObject(o, "fsync_batch",
+                                (double)db->config.fsync_batch_size);
+    else if (db->config.durability == AEGIS_DURABILITY_INTERVAL)
+        cJSON_AddNumberToObject(o, "fsync_interval_ms",
+                                (double)db->config.fsync_interval_ms);
+
+    stats_add_storage(o, db);
+
+    pthread_mutex_lock(&db->id_lock);
+    cJSON_AddNumberToObject(o, "next_id", (double)db->next_id);
+    pthread_mutex_unlock(&db->id_lock);
+
+    stats_add_metrics(o, db);
+    stats_add_tenants(o, db);
+    stats_add_replication(o, db);
     return o;
 }
 
