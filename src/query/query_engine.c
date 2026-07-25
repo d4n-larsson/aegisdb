@@ -1642,7 +1642,23 @@ static int build_input_record(AegisDB *db, const cJSON *req, MemoryRecord *in,
     return 0;
 }
 
-static cJSON *handle_ping(AegisDB *db) {
+/* Resolved caller identity for a request. The namespace is copied into ns_buf
+ * (not aliased into the token table) so it stays valid for the whole request
+ * even if a concurrent token_revoke frees the matched token. */
+typedef struct {
+    char ns_buf[512];
+    const char *ns; /* -> ns_buf, or NULL = unrestricted (admin / auth off) */
+    int can_write;  /* 0 for read-only tokens */
+} AuthCtx;
+
+/* Every dispatch handler takes the same shape so one table can drive dispatch,
+ * auth, and metrics. `ctx` is the resolved identity (NULL only for ping, which
+ * dispatches before authentication). Handlers that don't need `req`/`ctx`
+ * ignore them. */
+
+static cJSON *handle_ping(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    (void)req;
+    (void)ctx;
     cJSON *o = json_ok();
     cJSON_AddStringToObject(o, "version", AEGIS_VERSION_STRING);
     cJSON_AddNumberToObject(o, "phase", db->config.enabled_phase);
@@ -1651,7 +1667,9 @@ static cJSON *handle_ping(AegisDB *db) {
 
 /* Operational snapshot: durability posture, durability lag, record/index
  * counts. Read-only; intended for monitoring and capacity planning. */
-static cJSON *handle_stats(AegisDB *db) {
+static cJSON *handle_stats(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    (void)req;
+    (void)ctx;
     cJSON *o = json_ok();
     cJSON_AddStringToObject(o, "version", AEGIS_VERSION_STRING);
     cJSON_AddNumberToObject(o, "phase", db->config.enabled_phase);
@@ -1719,7 +1737,8 @@ static cJSON *handle_stats(AegisDB *db) {
     /* Monotonic operational counters, for scraping (rates = successive diffs). */
     static const char *const op_names[MOP__N] = {
         "ping", "insert", "get", "update", "delete", "search",
-        "count", "promote", "relate", "traverse", "stats", "other"};
+        "count", "promote", "relate", "traverse", "stats",
+        "history", "export", "purge", "consolidate", "forget", "other"};
     Metrics *mt = &db->metrics;
     cJSON *m = cJSON_AddObjectToObject(o, "metrics");
     if (m) {
@@ -1805,7 +1824,8 @@ static cJSON *handle_stats(AegisDB *db) {
 /* Admin: write a consistent online snapshot (backup) of the log under
  * <data_dir>/snapshots/<name>/. `name` defaults to snap-<epoch_ms>. Returns the
  * snapshot location and what it covers. */
-static cJSON *handle_snapshot(AegisDB *db, const cJSON *req) {
+static cJSON *handle_snapshot(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    (void)ctx;
     const char *name = jr_str(req, "name", NULL);
     char autobuf[40];
     if (!name) {
@@ -1889,7 +1909,8 @@ static cJSON *handle_insert_batch(AegisDB *db, const cJSON *arr, const char *ns,
     return o;
 }
 
-static cJSON *handle_insert(AegisDB *db, const cJSON *req, const char *ns) {
+static cJSON *handle_insert(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    const char *ns = ctx->ns;
     int emb = want_embeddings(req);
     cJSON *arr = cJSON_GetObjectItemCaseSensitive(req, "records");
     if (cJSON_IsArray(arr)) return handle_insert_batch(db, arr, ns, emb);
@@ -1912,7 +1933,8 @@ static cJSON *handle_insert(AegisDB *db, const cJSON *req, const char *ns) {
     return r;
 }
 
-static cJSON *handle_get(AegisDB *db, const cJSON *req, const char *ns) {
+static cJSON *handle_get(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    const char *ns = ctx->ns;
     uint64_t id;
     if (jr_u64(req, "id", &id) != 0) return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     const char *agent = ns ? ns : jr_str(req, "agent_id", NULL);
@@ -1929,7 +1951,8 @@ static cJSON *handle_get(AegisDB *db, const cJSON *req, const char *ns) {
     return r;
 }
 
-static cJSON *handle_history(AegisDB *db, const cJSON *req, const char *ns) {
+static cJSON *handle_history(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    const char *ns = ctx->ns;
     uint64_t id;
     if (jr_u64(req, "id", &id) != 0) return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     const char *agent = ns ? ns : jr_str(req, "agent_id", NULL);
@@ -1957,7 +1980,8 @@ static cJSON *handle_history(AegisDB *db, const cJSON *req, const char *ns) {
     return o;
 }
 
-static cJSON *handle_update(AegisDB *db, const cJSON *req, const char *ns) {
+static cJSON *handle_update(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    const char *ns = ctx->ns;
     uint64_t id;
     if (jr_u64(req, "id", &id) != 0) return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     UpdatePatch patch;
@@ -1995,7 +2019,8 @@ static cJSON *handle_update(AegisDB *db, const cJSON *req, const char *ns) {
     return r;
 }
 
-static cJSON *handle_delete(AegisDB *db, const cJSON *req, const char *ns) {
+static cJSON *handle_delete(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    const char *ns = ctx->ns;
     uint64_t id;
     if (jr_u64(req, "id", &id) == 0) {
         aegis_status_t st = qe_delete(db, id, ns);
@@ -2019,7 +2044,8 @@ static cJSON *handle_delete(AegisDB *db, const cJSON *req, const char *ns) {
     return o;
 }
 
-static cJSON *handle_export(AegisDB *db, const cJSON *req, const char *ns) {
+static cJSON *handle_export(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    const char *ns = ctx->ns;
     /* Subject = the token's namespace, or an admin-specified agent_id. Refuse a
      * subjectless export (that would be "dump the whole DB"). */
     const char *target = ns ? ns : jr_str(req, "agent_id", NULL);
@@ -2053,7 +2079,8 @@ static cJSON *handle_export(AegisDB *db, const cJSON *req, const char *ns) {
     return o;
 }
 
-static cJSON *handle_purge(AegisDB *db, const cJSON *req, const char *ns) {
+static cJSON *handle_purge(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    const char *ns = ctx->ns;
     const char *target = ns ? ns : jr_str(req, "agent_id", NULL);
     if (!target || !*target)
         return json_error_status(AEGIS_ERR_INVALID_REQUEST); /* no global purge */
@@ -2105,7 +2132,8 @@ static int parse_filters(const cJSON *req, const char *ns, SearchParams *p,
     return 0;
 }
 
-static cJSON *handle_count(AegisDB *db, const cJSON *req, const char *ns) {
+static cJSON *handle_count(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    const char *ns = ctx->ns;
     SearchParams p;
     const char **tags = NULL;
     if (parse_filters(req, ns, &p, &tags) != 0)
@@ -2125,7 +2153,8 @@ static cJSON *handle_count(AegisDB *db, const cJSON *req, const char *ns) {
 
 #define CONSOLIDATE_DEFAULT_MIN 0.95 /* conservative near-duplicate threshold */
 
-static cJSON *handle_consolidate(AegisDB *db, const cJSON *req, const char *ns) {
+static cJSON *handle_consolidate(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    const char *ns = ctx->ns;
     double ms;
     float min_sim = (jr_f64(req, "min_similarity", &ms) == 0)
                         ? (float)ms
@@ -2142,7 +2171,8 @@ static cJSON *handle_consolidate(AegisDB *db, const cJSON *req, const char *ns) 
 #define FORGET_DEFAULT_HALF_LIFE_MS 604800000ull /* 7 days */
 #define FORGET_DEFAULT_MIN_RETENTION 0.05f
 
-static cJSON *handle_forget(AegisDB *db, const cJSON *req, const char *ns) {
+static cJSON *handle_forget(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    const char *ns = ctx->ns;
     uint64_t v;
     double d;
     uint64_t half_life = (jr_u64(req, "half_life_ms", &v) == 0 && v > 0)
@@ -2169,7 +2199,8 @@ static cJSON *handle_forget(AegisDB *db, const cJSON *req, const char *ns) {
     return o;
 }
 
-static cJSON *handle_search(AegisDB *db, const cJSON *req, const char *ns) {
+static cJSON *handle_search(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    const char *ns = ctx->ns;
     SearchParams p;
     memset(&p, 0, sizeof(p));
     uint64_t v;
@@ -2245,7 +2276,8 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req, const char *ns) {
     return o;
 }
 
-static cJSON *handle_promote(AegisDB *db, const cJSON *req, const char *ns) {
+static cJSON *handle_promote(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    const char *ns = ctx->ns;
     const char *session = jr_str(req, "session_id", NULL);
     uint64_t wid;
     if (jr_u64(req, "working_id", &wid) != 0)
@@ -2262,7 +2294,8 @@ static cJSON *handle_promote(AegisDB *db, const cJSON *req, const char *ns) {
     return r;
 }
 
-static cJSON *handle_relate(AegisDB *db, const cJSON *req, const char *ns) {
+static cJSON *handle_relate(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    const char *ns = ctx->ns;
     uint64_t from, to;
     if (jr_u64(req, "from_id", &from) != 0 || jr_u64(req, "to_id", &to) != 0)
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
@@ -2278,7 +2311,8 @@ static cJSON *handle_relate(AegisDB *db, const cJSON *req, const char *ns) {
     return o;
 }
 
-static cJSON *handle_traverse(AegisDB *db, const cJSON *req, const char *ns) {
+static cJSON *handle_traverse(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    const char *ns = ctx->ns;
     uint64_t id;
     if (jr_u64(req, "id", &id) != 0)
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
@@ -2347,7 +2381,9 @@ static int gen_random_token(char out[65]) {
 }
 
 /* token_list: fingerprint + namespace + scope of every token (no secrets). */
-static cJSON *handle_token_list(AegisDB *db) {
+static cJSON *handle_token_list(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    (void)req;
+    (void)ctx;
     cJSON *o = json_ok();
     cJSON *arr = cJSON_AddArrayToObject(o, "tokens");
     pthread_rwlock_rdlock(&db->auth_lock);
@@ -2368,7 +2404,8 @@ static cJSON *handle_token_list(AegisDB *db) {
 
 /* token_add: add a token (generating a secret if none supplied) and persist to
  * the token file. Returns its fingerprint (and the plaintext, once, if minted). */
-static cJSON *handle_token_add(AegisDB *db, const cJSON *req) {
+static cJSON *handle_token_add(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    (void)ctx;
     /* The secret to add is "new_token" (the request's "token" is the caller's
      * own auth credential); omit it to have the server mint one. */
     const char *tok = jr_str(req, "new_token", NULL);
@@ -2413,7 +2450,8 @@ static cJSON *handle_token_add(AegisDB *db, const cJSON *req) {
 }
 
 /* token_revoke: remove the token with the given fingerprint id and persist. */
-static cJSON *handle_token_revoke(AegisDB *db, const cJSON *req) {
+static cJSON *handle_token_revoke(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
+    (void)ctx;
     const char *id = jr_str(req, "id", NULL);
     if (!id) return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     pthread_rwlock_wrlock(&db->auth_lock);
@@ -2430,14 +2468,6 @@ static cJSON *handle_token_revoke(AegisDB *db, const cJSON *req) {
     return o;
 }
 
-/* Resolved caller identity for a request. The namespace is copied into ns_buf
- * (not aliased into the token table) so it stays valid for the whole request
- * even if a concurrent token_revoke frees the matched token. */
-typedef struct {
-    char ns_buf[512];
-    const char *ns; /* -> ns_buf, or NULL = unrestricted (admin / auth off) */
-    int can_write;  /* 0 for read-only tokens */
-} AuthCtx;
 
 /* Authenticate a request and resolve the caller's namespace + scope. Auth is
  * disabled (unrestricted) when no tokens are configured. Every token is checked
@@ -2490,11 +2520,54 @@ static aegis_status_t resolve_identity(AegisDB *db, const cJSON *req,
     return st;
 }
 
-static int is_write_op(const char *op) {
-    return strcmp(op, "insert") == 0 || strcmp(op, "update") == 0 ||
-           strcmp(op, "delete") == 0 || strcmp(op, "promote") == 0 ||
-           strcmp(op, "relate") == 0 || strcmp(op, "consolidate") == 0 ||
-           strcmp(op, "forget") == 0 || strcmp(op, "purge") == 0;
+typedef cJSON *(*OpHandler)(AegisDB *db, const cJSON *req, const AuthCtx *ctx);
+
+/* Per-operation flags. */
+enum {
+    OP_WRITE = 1u,     /* mutates: needs a write token AND refused on a read-only replica */
+    OP_GLOBAL = 2u,    /* admin/global token only — a namespaced caller is forbidden */
+    OP_WRITE_TOK = 4u, /* needs a write token, but is NOT a replica write (snapshot) */
+    OP_NOAUTH = 8u,    /* dispatched before identity resolution (ping) */
+};
+
+typedef struct {
+    const char *name;
+    OpHandler fn;
+    unsigned flags;
+    MetricOp metric;
+} OpDef;
+
+/* The single source of truth for the operation set: dispatch, the auth/write
+ * policy, and the per-op metric are all driven from this one table (previously
+ * duplicated across dispatch_inner, is_write_op, metric_op, and op_names). */
+static const OpDef OPS[] = {
+    {"ping", handle_ping, OP_NOAUTH, MOP_PING},
+    {"stats", handle_stats, OP_GLOBAL, MOP_STATS},
+    {"token_list", handle_token_list, OP_GLOBAL, MOP_OTHER},
+    {"token_add", handle_token_add, OP_GLOBAL, MOP_OTHER},
+    {"token_revoke", handle_token_revoke, OP_GLOBAL, MOP_OTHER},
+    {"snapshot", handle_snapshot, OP_GLOBAL | OP_WRITE_TOK, MOP_OTHER},
+    {"insert", handle_insert, OP_WRITE, MOP_INSERT},
+    {"get", handle_get, 0, MOP_GET},
+    {"history", handle_history, 0, MOP_HISTORY},
+    {"update", handle_update, OP_WRITE, MOP_UPDATE},
+    {"delete", handle_delete, OP_WRITE, MOP_DELETE},
+    {"export", handle_export, 0, MOP_EXPORT},
+    {"purge", handle_purge, OP_WRITE, MOP_PURGE},
+    {"search", handle_search, 0, MOP_SEARCH},
+    {"count", handle_count, 0, MOP_COUNT},
+    {"consolidate", handle_consolidate, OP_WRITE, MOP_CONSOLIDATE},
+    {"forget", handle_forget, OP_WRITE, MOP_FORGET},
+    {"promote", handle_promote, OP_WRITE, MOP_PROMOTE},
+    {"relate", handle_relate, OP_WRITE, MOP_RELATE},
+    {"traverse", handle_traverse, 0, MOP_TRAVERSE},
+};
+
+static const OpDef *find_op(const char *op) {
+    if (!op) return NULL;
+    for (size_t i = 0; i < sizeof(OPS) / sizeof(OPS[0]); i++)
+        if (strcmp(op, OPS[i].name) == 0) return &OPS[i];
+    return NULL;
 }
 
 static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
@@ -2503,9 +2576,14 @@ static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
         LOG_DEBUG("dispatch: request with no \"operation\" field");
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     }
+    const OpDef *d = find_op(op);
+    if (!d) {
+        LOG_WARN("dispatch: unknown operation \"%s\"", op);
+        return json_error("INVALID_REQUEST", "unknown operation");
+    }
 
     /* "ping" is exempt so liveness and startup probes work unauthenticated. */
-    if (strcmp(op, "ping") == 0) return handle_ping(db);
+    if (d->flags & OP_NOAUTH) return d->fn(db, req, NULL);
 
     AuthCtx ctx;
     aegis_status_t ast = resolve_identity(db, req, &ctx);
@@ -2513,13 +2591,13 @@ static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
         LOG_WARN("dispatch: unauthorized \"%s\" request rejected", op);
         return json_error_status(ast);
     }
-    if (is_write_op(op) && !ctx.can_write) {
+    if ((d->flags & OP_WRITE) && !ctx.can_write) {
         LOG_WARN("dispatch: read-only token attempted \"%s\"", op);
         return json_error_status(AEGIS_ERR_FORBIDDEN);
     }
     /* A read-only replica serves reads from its followed copy but never accepts
      * writes — direct those at the primary. */
-    if (db->config.read_only && is_write_op(op)) {
+    if (db->config.read_only && (d->flags & OP_WRITE)) {
         LOG_DEBUG("dispatch: write \"%s\" refused on read-only replica", op);
         return json_error_status(AEGIS_ERR_READ_ONLY);
     }
@@ -2534,64 +2612,20 @@ static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
         return json_error_status(AEGIS_ERR_RATE_LIMITED);
     }
 
+    /* Admin-only ops (stats, token_*, snapshot) forbid a namespaced caller;
+     * snapshot additionally requires a write token. */
+    if ((d->flags & OP_GLOBAL) && ctx.ns)
+        return json_error_status(AEGIS_ERR_FORBIDDEN);
+    if ((d->flags & OP_WRITE_TOK) && !ctx.can_write)
+        return json_error_status(AEGIS_ERR_FORBIDDEN);
+
     LOG_DEBUG("dispatch: operation \"%s\" (ns=%s)", op, ctx.ns ? ctx.ns : "*");
-
-    if (strcmp(op, "stats") == 0) {
-        /* stats exposes server-wide counts; restrict to admin/global tokens. */
-        if (ctx.ns) return json_error_status(AEGIS_ERR_FORBIDDEN);
-        return handle_stats(db);
-    }
-    /* Token administration is admin-only (a global/unrestricted token). */
-    if (strcmp(op, "token_list") == 0) {
-        if (ctx.ns) return json_error_status(AEGIS_ERR_FORBIDDEN);
-        return handle_token_list(db);
-    }
-    if (strcmp(op, "token_add") == 0) {
-        if (ctx.ns) return json_error_status(AEGIS_ERR_FORBIDDEN);
-        return handle_token_add(db, req);
-    }
-    if (strcmp(op, "token_revoke") == 0) {
-        if (ctx.ns) return json_error_status(AEGIS_ERR_FORBIDDEN);
-        return handle_token_revoke(db, req);
-    }
-    if (strcmp(op, "snapshot") == 0) {
-        /* backups expose the whole log; require an admin (unrestricted) token. */
-        if (ctx.ns || !ctx.can_write) return json_error_status(AEGIS_ERR_FORBIDDEN);
-        return handle_snapshot(db, req);
-    }
-    if (strcmp(op, "insert") == 0) return handle_insert(db, req, ctx.ns);
-    if (strcmp(op, "get") == 0) return handle_get(db, req, ctx.ns);
-    if (strcmp(op, "history") == 0) return handle_history(db, req, ctx.ns);
-    if (strcmp(op, "update") == 0) return handle_update(db, req, ctx.ns);
-    if (strcmp(op, "delete") == 0) return handle_delete(db, req, ctx.ns);
-    if (strcmp(op, "export") == 0) return handle_export(db, req, ctx.ns);
-    if (strcmp(op, "purge") == 0) return handle_purge(db, req, ctx.ns);
-    if (strcmp(op, "search") == 0) return handle_search(db, req, ctx.ns);
-    if (strcmp(op, "count") == 0) return handle_count(db, req, ctx.ns);
-    if (strcmp(op, "consolidate") == 0) return handle_consolidate(db, req, ctx.ns);
-    if (strcmp(op, "forget") == 0) return handle_forget(db, req, ctx.ns);
-    if (strcmp(op, "promote") == 0) return handle_promote(db, req, ctx.ns);
-    if (strcmp(op, "relate") == 0) return handle_relate(db, req, ctx.ns);
-    if (strcmp(op, "traverse") == 0) return handle_traverse(db, req, ctx.ns);
-
-    LOG_WARN("dispatch: unknown operation \"%s\"", op);
-    return json_error("INVALID_REQUEST", "unknown operation");
+    return d->fn(db, req, &ctx);
 }
 
 static MetricOp metric_op(const char *op) {
-    if (!op) return MOP_OTHER;
-    if (!strcmp(op, "ping")) return MOP_PING;
-    if (!strcmp(op, "insert")) return MOP_INSERT;
-    if (!strcmp(op, "get")) return MOP_GET;
-    if (!strcmp(op, "update")) return MOP_UPDATE;
-    if (!strcmp(op, "delete")) return MOP_DELETE;
-    if (!strcmp(op, "search")) return MOP_SEARCH;
-    if (!strcmp(op, "count")) return MOP_COUNT;
-    if (!strcmp(op, "promote")) return MOP_PROMOTE;
-    if (!strcmp(op, "relate")) return MOP_RELATE;
-    if (!strcmp(op, "traverse")) return MOP_TRAVERSE;
-    if (!strcmp(op, "stats")) return MOP_STATS;
-    return MOP_OTHER;
+    const OpDef *d = find_op(op);
+    return d ? d->metric : MOP_OTHER;
 }
 
 static uint64_t monotonic_micros(void) {

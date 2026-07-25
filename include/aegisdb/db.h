@@ -19,7 +19,8 @@
 typedef enum {
     MOP_PING = 0, MOP_INSERT, MOP_GET, MOP_UPDATE, MOP_DELETE, MOP_SEARCH,
     MOP_COUNT, MOP_PROMOTE, MOP_RELATE, MOP_TRAVERSE, MOP_STATS,
-    MOP_OTHER, /* unknown / missing operation */
+    MOP_HISTORY, MOP_EXPORT, MOP_PURGE, MOP_CONSOLIDATE, MOP_FORGET,
+    MOP_OTHER, /* unknown / missing operation, incl. admin (token_*, snapshot) */
     MOP__N
 } MetricOp;
 
