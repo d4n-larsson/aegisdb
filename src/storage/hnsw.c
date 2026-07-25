@@ -20,6 +20,7 @@
 
 #include "aegisdb/ckpt_crypt.h"
 #include "aegisdb/crc32.h"
+#include "aegisdb/endian.h"
 #include "aegisdb/hash_mix.h"
 #include "aegisdb/types.h"
 #include "aegisdb/vecmath.h"
@@ -813,8 +814,11 @@ size_t hnsw_total_nodes(const Hnsw *h) { return h ? h->n : 0; }
 
 /* --------------------------------------------------------- persistence ----
  * A node index is stable across save/load (nodes are written in array order,
- * tombstones included), so the neighbour links stay valid. Scalars are written
- * in native byte order — checkpoints are local files, like the hash index's. */
+ * tombstones included), so the neighbour links stay valid. Scalar fields use the
+ * shared little-endian codec (endian.h); on the little-endian hosts AegisDB
+ * targets this is byte-identical to the previous raw layout, so existing
+ * checkpoints load unchanged. Raw blobs (quantized/float vectors) are copied
+ * verbatim. */
 
 typedef struct { uint8_t *p; size_t n, cap; int err; } Buf;
 
@@ -831,8 +835,16 @@ static void buf_put(Buf *b, const void *src, size_t len) {
     memcpy(b->p + b->n, src, len);
     b->n += len;
 }
-static void buf_u32(Buf *b, uint32_t v) { buf_put(b, &v, sizeof v); }
-static void buf_u64(Buf *b, uint64_t v) { buf_put(b, &v, sizeof v); }
+static void buf_u32(Buf *b, uint32_t v) {
+    uint8_t t[4];
+    aegis_put_u32le(t, v);
+    buf_put(b, t, sizeof t);
+}
+static void buf_u64(Buf *b, uint64_t v) {
+    uint8_t t[8];
+    aegis_put_u64le(t, v);
+    buf_put(b, t, sizeof t);
+}
 
 typedef struct { const uint8_t *p; size_t n, off; int err; } Rd;
 
@@ -841,8 +853,16 @@ static void rd_get(Rd *r, void *dst, size_t len) {
     memcpy(dst, r->p + r->off, len);
     r->off += len;
 }
-static uint32_t rd_u32(Rd *r) { uint32_t v = 0; rd_get(r, &v, sizeof v); return v; }
-static uint64_t rd_u64(Rd *r) { uint64_t v = 0; rd_get(r, &v, sizeof v); return v; }
+static uint32_t rd_u32(Rd *r) {
+    uint8_t t[4] = {0};
+    rd_get(r, t, sizeof t);
+    return aegis_get_u32le(t);
+}
+static uint64_t rd_u64(Rd *r) {
+    uint8_t t[8] = {0};
+    rd_get(r, t, sizeof t);
+    return aegis_get_u64le(t);
+}
 
 int hnsw_save(const Hnsw *h, const char *path, uint64_t covered_log_size,
               const uint8_t *key) {

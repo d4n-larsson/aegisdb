@@ -21,6 +21,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "aegisdb/endian.h"
 #include "aegisdb/log.h"
 #include "aegisdb/logging.h"
 #include "aegisdb/sha256.h"
@@ -35,21 +36,6 @@
 #define MAX_PAYLOAD (64u * 1024 * 1024) /* sanity bound on a streamed frame */
 
 /* ------------------------------------------------------------- LE + io ----- */
-static void put_u32(uint8_t *p, uint32_t v) {
-    p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24;
-}
-static void put_u64(uint8_t *p, uint64_t v) {
-    for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i));
-}
-static uint32_t get_u32(const uint8_t *p) {
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 |
-           (uint32_t)p[3] << 24;
-}
-static uint64_t get_u64(const uint8_t *p) {
-    uint64_t v = 0;
-    for (int i = 0; i < 8; i++) v |= (uint64_t)p[i] << (8 * i);
-    return v;
-}
 
 /* Constant-time fixed-length byte compare (no early exit) — for secrets. */
 static int ct_eq_bytes(const uint8_t *a, const uint8_t *b, size_t n) {
@@ -184,10 +170,10 @@ static uint64_t log_size_locked(AegisDB *db) {
 static int send_msg(int fd, uint8_t type, uint64_t offset, const uint8_t *pay,
                     uint32_t len) {
     uint8_t h[MSG_HDR];
-    put_u32(h, REPL_MAGIC);
+    aegis_put_u32le(h, REPL_MAGIC);
     h[4] = type;
-    put_u64(h + 5, offset);
-    put_u32(h + 13, len);
+    aegis_put_u64le(h + 5, offset);
+    aegis_put_u32le(h + 13, len);
     if (write_all(fd, h, MSG_HDR) != 0) return -1;
     if (len && write_all(fd, pay, len) != 0) return -1;
     return 0;
@@ -542,13 +528,13 @@ static void follow_session(ReplicationFollower *f) {
     uint8_t hdr[MSG_HDR];
     while (!atomic_load_explicit(&f->stop, memory_order_relaxed)) {
         if (read_full(fd, hdr, MSG_HDR) != 0) break; /* timeout / drop */
-        if (get_u32(hdr) != REPL_MAGIC) {
+        if (aegis_get_u32le(hdr) != REPL_MAGIC) {
             LOG_ERROR("replication: bad stream magic; dropping connection");
             break;
         }
         uint8_t type = hdr[4];
-        uint64_t offset = get_u64(hdr + 5);
-        uint32_t len = get_u32(hdr + 13);
+        uint64_t offset = aegis_get_u64le(hdr + 5);
+        uint32_t len = aegis_get_u32le(hdr + 13);
 
         if (type == MSG_HEARTBEAT) {
             atomic_store(&f->primary_size, offset);

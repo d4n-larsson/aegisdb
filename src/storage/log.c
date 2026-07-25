@@ -14,6 +14,7 @@
 
 #include "aegisdb/aead.h"
 #include "aegisdb/crc32.h"
+#include "aegisdb/endian.h"
 #include "aegisdb/logging.h"
 #include "aegisdb/randutil.h"
 
@@ -55,29 +56,21 @@ static int write_full(int fd, off_t off, const void *buf, size_t n) {
     return 0;
 }
 
-static void put_u32le(uint8_t *b, uint32_t v) {
-    for (int i = 0; i < 4; i++) b[i] = (uint8_t)(v >> (8 * i));
-}
-static uint32_t get_u32le(const uint8_t *b) {
-    return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) |
-           ((uint32_t)b[3] << 24);
-}
-
 /* Fill a 16-byte v2 frame header for `payload`/`len` into `hdr`. */
 static void build_header(uint8_t *hdr, size_t len, uint32_t payload_crc) {
-    put_u32le(hdr, LOG_FRAME_MAGIC);
-    put_u32le(hdr + 4, (uint32_t)len);
-    put_u32le(hdr + 8, payload_crc);
-    put_u32le(hdr + 12, crc32_compute(hdr, 12));
+    aegis_put_u32le(hdr, LOG_FRAME_MAGIC);
+    aegis_put_u32le(hdr + 4, (uint32_t)len);
+    aegis_put_u32le(hdr + 8, payload_crc);
+    aegis_put_u32le(hdr + 12, crc32_compute(hdr, 12));
 }
 
 /* Validate a 16-byte header in `hdr`. Returns 0 and writes the length and
  * payload CRC out when the magic and header CRC are intact; -1 otherwise. */
 static int parse_header(const uint8_t *hdr, uint32_t *len, uint32_t *pcrc) {
-    if (get_u32le(hdr) != LOG_FRAME_MAGIC) return -1;
-    if (get_u32le(hdr + 12) != crc32_compute(hdr, 12)) return -1;
-    *len = get_u32le(hdr + 4);
-    *pcrc = get_u32le(hdr + 8);
+    if (aegis_get_u32le(hdr) != LOG_FRAME_MAGIC) return -1;
+    if (aegis_get_u32le(hdr + 12) != crc32_compute(hdr, 12)) return -1;
+    *len = aegis_get_u32le(hdr + 4);
+    *pcrc = aegis_get_u32le(hdr + 8);
     return 0;
 }
 
@@ -85,18 +78,18 @@ static int parse_header(const uint8_t *hdr, uint32_t *len, uint32_t *pcrc) {
  * first 32 bytes (magic+len+nonce) are both HEADER_CRC-covered and used as the
  * AEAD associated data. */
 static void build_header_v3(uint8_t *hdr, size_t len, const uint8_t nonce[24]) {
-    put_u32le(hdr, LOG_FRAME_MAGIC_ENC);
-    put_u32le(hdr + 4, (uint32_t)len);
+    aegis_put_u32le(hdr, LOG_FRAME_MAGIC_ENC);
+    aegis_put_u32le(hdr + 4, (uint32_t)len);
     memcpy(hdr + V3_NONCE_OFF, nonce, 24);
-    put_u32le(hdr + 32, crc32_compute(hdr, 32));
+    aegis_put_u32le(hdr + 32, crc32_compute(hdr, 32));
 }
 
 /* Validate a 36-byte v3 header (magic + HEADER_CRC); write the payload length.
  * The nonce is at hdr+V3_NONCE_OFF. Returns 0/-1. */
 static int parse_header_v3(const uint8_t *hdr, uint32_t *len) {
-    if (get_u32le(hdr) != LOG_FRAME_MAGIC_ENC) return -1;
-    if (get_u32le(hdr + 32) != crc32_compute(hdr, 32)) return -1;
-    *len = get_u32le(hdr + 4);
+    if (aegis_get_u32le(hdr) != LOG_FRAME_MAGIC_ENC) return -1;
+    if (aegis_get_u32le(hdr + 32) != crc32_compute(hdr, 32)) return -1;
+    *len = aegis_get_u32le(hdr + 4);
     return 0;
 }
 
@@ -125,8 +118,8 @@ static int migrate_legacy_log(const char *path) {
     while (in + V1_FRAME_HEADER <= size) {
         uint8_t h[V1_FRAME_HEADER];
         if (read_full(oldfd, in, h, V1_FRAME_HEADER) != 0) break;
-        uint32_t crc = get_u32le(h);
-        uint32_t len = get_u32le(h + 4);
+        uint32_t crc = aegis_get_u32le(h);
+        uint32_t len = aegis_get_u32le(h + 4);
         if (in + V1_FRAME_HEADER + (off_t)len > size) break; /* torn tail */
         uint8_t *buf = malloc(len ? len : 1);
         if (!buf) {
@@ -224,7 +217,7 @@ int log_open(LogFile *lf, const char *path, size_t fsync_batch,
     if (end >= 4) {
         uint8_t m[4];
         if (read_full(lf->fd, 0, m, 4) != 0) goto fail;
-        uint32_t magic = get_u32le(m);
+        uint32_t magic = aegis_get_u32le(m);
         int on_disk_encrypted = (magic == LOG_FRAME_MAGIC_ENC);
         int on_disk_plain_v2 = (magic == LOG_FRAME_MAGIC);
 
@@ -451,7 +444,7 @@ static off_t find_next_frame(const LogFile *lf, off_t from, off_t end) {
         if (read_full(lf->fd, base, win, want) != 0) break;
         size_t limit = want >= (size_t)hdr_len ? want - (size_t)hdr_len : 0;
         for (size_t i = 0; i <= limit; i++) {
-            if (get_u32le(win + i) != want_magic) continue;
+            if (aegis_get_u32le(win + i) != want_magic) continue;
             off_t off = base + (off_t)i;
             uint8_t hdr[V3_FRAME_HEADER];
             uint32_t len, pcrc;

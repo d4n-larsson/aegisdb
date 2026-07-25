@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "aegisdb/aead.h"
+#include "aegisdb/endian.h"
 #include "aegisdb/fsutil.h"
 #include "aegisdb/randutil.h"
 #include "aegisdb/types.h"
@@ -19,14 +20,6 @@
 #define CKPT_MAGIC 0x43454B41u /* "AKEC" LE: AegisDB checKpoint EnCryption */
 #define CKPT_VERSION 1u
 #define CKPT_HDR 32 /* magic(4) + version(4) + nonce(24); also the AEAD AAD */
-
-static void put_u32le(uint8_t *b, uint32_t v) {
-    for (int i = 0; i < 4; i++) b[i] = (uint8_t)(v >> (8 * i));
-}
-static uint32_t get_u32le(const uint8_t *b) {
-    return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) |
-           ((uint32_t)b[3] << 24);
-}
 
 /* Read the whole file at `path` into a fresh buffer. Returns 0/-1. */
 static int read_whole(const char *path, uint8_t **out, size_t *out_len) {
@@ -66,8 +59,8 @@ int ckpt_write(const char *path, const uint8_t *key, const uint8_t *plain,
     size_t total = CKPT_HDR + plain_len + AEAD_TAG_LEN;
     uint8_t *env = malloc(total);
     if (!env) return -1;
-    put_u32le(env, CKPT_MAGIC);
-    put_u32le(env + 4, CKPT_VERSION);
+    aegis_put_u32le(env, CKPT_MAGIC);
+    aegis_put_u32le(env + 4, CKPT_VERSION);
     if (aegis_fill_random(env + 8, AEAD_NONCE_LEN) != 0) {
         free(env);
         return -1;
@@ -91,8 +84,8 @@ int ckpt_read(const char *path, const uint8_t *key, uint8_t **out,
         return 0;
     }
 
-    if (flen < CKPT_HDR + AEAD_TAG_LEN || get_u32le(file) != CKPT_MAGIC ||
-        get_u32le(file + 4) != CKPT_VERSION) {
+    if (flen < CKPT_HDR + AEAD_TAG_LEN || aegis_get_u32le(file) != CKPT_MAGIC ||
+        aegis_get_u32le(file + 4) != CKPT_VERSION) {
         free(file);
         return -1;
     }
