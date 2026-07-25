@@ -8,15 +8,8 @@
 #include <string.h>
 
 #include "aegisdb/aead.h"
+#include "aegisdb/chacha20poly1305.h" /* primitive prototypes for the KATs */
 #include "unity.h"
-
-/* Primitives given external linkage in chacha20poly1305.c for these KATs. */
-void aegis_chacha20_block(const uint8_t key[32], uint32_t counter,
-                          const uint8_t nonce[12], uint8_t out[64]);
-void aegis_hchacha20(const uint8_t key[32], const uint8_t nonce16[16],
-                     uint8_t out[32]);
-void aegis_poly1305(uint8_t mac[16], const uint8_t *m, size_t len,
-                    const uint8_t key[32]);
 
 void setUp(void) {}
 void tearDown(void) {}

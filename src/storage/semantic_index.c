@@ -88,7 +88,7 @@ typedef struct {
     uint64_t id;
     size_t idx; /* position of this id in SemanticIndex.e */
     int used;
-} MapSlot;
+} DenseSlot;
 
 /* record id -> number of vectors it currently has (so remove/replace know how
  * many synthetic slots to drop). Open addressing with backward-shift deletion. */
@@ -127,7 +127,7 @@ struct SemanticIndex {
     SemEntry *e;
     size_t n;
     size_t cap;
-    MapSlot *map; /* id -> dense slot; power-of-two capacity, NULL until first add */
+    DenseSlot *map; /* id -> dense slot; power-of-two capacity, NULL until first add */
     size_t mcap;
     RCount *rc;   /* record -> vec_count; power-of-two capacity */
     size_t rccap, rcn;
@@ -154,7 +154,7 @@ static void deltas_free(SemDelta *d, size_t n); /* defined with the build API */
 
 /* Probe to the slot holding `id`, or the empty slot where it would go. Requires
  * mcap > 0 and at least one empty slot (the load factor guarantees both). */
-static size_t map_probe(const MapSlot *map, size_t mcap, uint64_t id) {
+static size_t map_probe(const DenseSlot *map, size_t mcap, uint64_t id) {
     size_t mask = mcap - 1;
     size_t i = (size_t)mix64(id) & mask;
     while (map[i].used && map[i].id != id) i = (i + 1) & mask;
@@ -164,7 +164,7 @@ static size_t map_probe(const MapSlot *map, size_t mcap, uint64_t id) {
 /* Rebuild the map at `newcap` from the dense array (the dense indices are the
  * source of truth, so this also resolves any prior probe-chain layout). */
 static int map_grow(SemanticIndex *s, size_t newcap) {
-    MapSlot *nm = calloc(newcap, sizeof(MapSlot));
+    DenseSlot *nm = calloc(newcap, sizeof(DenseSlot));
     if (!nm) return -1;
     size_t mask = newcap - 1;
     for (size_t i = 0; i < s->n; i++) {
@@ -183,7 +183,7 @@ static int map_grow(SemanticIndex *s, size_t newcap) {
 /* Backward-shift deletion: remove the entry at slot `i`, sliding later members
  * of its probe chain back so no tombstones are left and probes stay correct. */
 static void map_delete_at(SemanticIndex *s, size_t i) {
-    MapSlot *m = s->map;
+    DenseSlot *m = s->map;
     size_t mask = s->mcap - 1;
     size_t j = i;
     for (;;) {
@@ -929,7 +929,7 @@ int semantic_index_load(SemanticIndex *s, const char *path,
 size_t semantic_index_bytes(const SemanticIndex *s) {
     if (!s) return 0;
     size_t total = sizeof(*s) + s->cap * sizeof(SemEntry) +
-                   s->mcap * sizeof(MapSlot) + s->rccap * sizeof(RCount);
+                   s->mcap * sizeof(DenseSlot) + s->rccap * sizeof(RCount);
     for (size_t i = 0; i < s->cap; i++)
         if (s->e[i].used) total += s->dim * sizeof(float); /* per-entry vector */
     for (size_t i = 0; i < s->nshards; i++)
