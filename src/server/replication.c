@@ -24,6 +24,7 @@
 #include "aegisdb/endian.h"
 #include "aegisdb/log.h"
 #include "aegisdb/logging.h"
+#include "aegisdb/netio.h"
 #include "aegisdb/sha256.h"
 #include "cJSON.h"
 
@@ -35,7 +36,7 @@
 #define POLL_MS 50
 #define MAX_PAYLOAD (64u * 1024 * 1024) /* sanity bound on a streamed frame */
 
-/* ------------------------------------------------------------- LE + io ----- */
+/* ----------------------------------------------------------------- util ---- */
 
 /* Constant-time fixed-length byte compare (no early exit) — for secrets. */
 static int ct_eq_bytes(const uint8_t *a, const uint8_t *b, size_t n) {
@@ -44,70 +45,8 @@ static int ct_eq_bytes(const uint8_t *a, const uint8_t *b, size_t n) {
     return diff == 0;
 }
 
-static int write_all(int fd, const void *buf, size_t len) {
-    const uint8_t *p = buf;
-    while (len) {
-        ssize_t n = write(fd, p, len);
-        if (n < 0) { if (errno == EINTR) continue; return -1; }
-        if (n == 0) return -1;
-        p += n; len -= (size_t)n;
-    }
-    return 0;
-}
-static int read_full(int fd, void *buf, size_t len) {
-    uint8_t *p = buf;
-    while (len) {
-        ssize_t n = read(fd, p, len);
-        if (n < 0) { if (errno == EINTR) continue; return -1; }
-        if (n == 0) return -1; /* EOF */
-        p += n; len -= (size_t)n;
-    }
-    return 0;
-}
-/* Read a single '\n'-terminated line (handshake). Returns length or -1. */
-static int read_line(int fd, char *buf, size_t cap) {
-    size_t i = 0;
-    while (i + 1 < cap) {
-        char c;
-        ssize_t n = read(fd, &c, 1);
-        if (n < 0) { if (errno == EINTR) continue; return -1; }
-        if (n == 0) return -1;
-        if (c == '\n') break;
-        buf[i++] = c;
-    }
-    buf[i] = '\0';
-    return (int)i;
-}
-static uint64_t mono_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
-}
-/* read_line with an absolute wall-clock deadline. A per-recv SO_RCVTIMEO alone
- * doesn't bound the handshake: a slow-loris that drips one byte just under the
- * timeout keeps resetting it. The deadline caps the whole read regardless. */
-static int read_line_deadline(int fd, char *buf, size_t cap,
-                              uint64_t deadline_ms) {
-    size_t i = 0;
-    while (i + 1 < cap) {
-        if (mono_ms() >= deadline_ms) return -1;
-        char c;
-        ssize_t n = read(fd, &c, 1);
-        if (n < 0) { if (errno == EINTR) continue; return -1; }
-        if (n == 0) return -1;
-        if (c == '\n') break;
-        buf[i++] = c;
-    }
-    buf[i] = '\0';
-    return (int)i;
-}
-static void set_timeouts(int fd, int secs) {
-    struct timeval tv = {.tv_sec = secs, .tv_usec = 0};
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
-    int one = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-}
+/* Socket I/O (net_dial/net_write_all/net_read_full/net_read_line/…) is shared
+ * with the client and health probe — see aegisdb/netio.h. */
 
 /* ============================================================ SOURCE ======= */
 
@@ -174,8 +113,8 @@ static int send_msg(int fd, uint8_t type, uint64_t offset, const uint8_t *pay,
     h[4] = type;
     aegis_put_u64le(h + 5, offset);
     aegis_put_u32le(h + 13, len);
-    if (write_all(fd, h, MSG_HDR) != 0) return -1;
-    if (len && write_all(fd, pay, len) != 0) return -1;
+    if (net_write_all(fd, h, MSG_HDR) != 0) return -1;
+    if (len && net_write_all(fd, pay, len) != 0) return -1;
     return 0;
 }
 
@@ -196,11 +135,11 @@ static void *streamer(void *arg) {
     int authed = 0;
     /* Bound the handshake hard: a short per-recv timeout AND an absolute deadline
      * so an un-authenticated peer cannot hold a slot open. */
-    set_timeouts(fd, HANDSHAKE_TIMEOUT_SEC);
+    net_set_timeouts(fd, HANDSHAKE_TIMEOUT_SEC);
 
     char line[512];
-    if (read_line_deadline(fd, line, sizeof line,
-                           mono_ms() + HANDSHAKE_TIMEOUT_SEC * 1000ULL) < 0)
+    if (net_read_line(fd, line, sizeof line,
+                           net_mono_ms() + HANDSHAKE_TIMEOUT_SEC * 1000ULL) < 0)
         goto done;
     cJSON *req = cJSON_Parse(line);
     if (!req) goto done;
@@ -220,7 +159,7 @@ static void *streamer(void *arg) {
     uint8_t th[SHA256_DIGEST_LEN];
     sha256(tok, strlen(tok), th);
     if (!ct_eq_bytes(th, s->token_hash, SHA256_DIGEST_LEN)) {
-        (void)write_all(fd, "{\"ok\":false}\n", 13);
+        (void)net_write_str(fd, "{\"ok\":false}\n");
         cJSON_Delete(req);
         LOG_WARN("replication: subscriber rejected (bad token)");
         goto done;
@@ -235,8 +174,7 @@ static void *streamer(void *arg) {
     if (db->config.encryption_enabled)
         config_key_fingerprint(db->config.encryption_key, own_fp);
     if (strcmp(req_fp, own_fp) != 0) {
-        (void)write_all(fd, "{\"ok\":false,\"error\":\"encryption key mismatch\"}\n",
-                        47);
+        (void)net_write_str(fd, "{\"ok\":false,\"error\":\"encryption key mismatch\"}\n");
         cJSON_Delete(req);
         LOG_WARN("replication: subscriber rejected (encryption key/mode mismatch)");
         goto done;
@@ -248,7 +186,7 @@ static void *streamer(void *arg) {
      * momentarily uncounted (keeps stop() correct). */
     if (atomic_fetch_add(&s->replicas, 1) >= MAX_REPLICAS) {
         atomic_fetch_sub(&s->replicas, 1);
-        (void)write_all(fd, "{\"ok\":false,\"error\":\"at capacity\"}\n", 35);
+        (void)net_write_str(fd, "{\"ok\":false,\"error\":\"at capacity\"}\n");
         LOG_WARN("replication: replica rejected (at capacity)");
         goto done; /* still pending-counted; `done` releases it */
     }
@@ -256,7 +194,7 @@ static void *streamer(void *arg) {
     atomic_fetch_sub(&s->pending, 1);
     /* Streaming can legitimately block on a slow replica's backpressure, so use
      * the longer post-auth timeout rather than the tight handshake one. */
-    set_timeouts(fd, STREAM_TIMEOUT_SEC);
+    net_set_timeouts(fd, STREAM_TIMEOUT_SEC);
 
     uint64_t cur_gen = atomic_load_explicit(&db->log_generation, memory_order_relaxed);
     uint64_t logsz = log_size_locked(db);
@@ -267,7 +205,7 @@ static void *streamer(void *arg) {
     int rl = snprintf(resp, sizeof resp,
                       "{\"ok\":true,\"generation\":%llu,\"reset\":%s}\n",
                       (unsigned long long)cur_gen, reset ? "true" : "false");
-    if (write_all(fd, resp, (size_t)rl) != 0) goto done;
+    if (net_write_all(fd, resp, (size_t)rl) != 0) goto done;
 
     LOG_INFO("replication: replica subscribed from offset %llu (reset=%d)",
              (unsigned long long)cursor, reset);
@@ -441,25 +379,6 @@ struct ReplicationFollower {
     uint64_t gen; /* last generation synced from the primary (follower-thread only) */
 };
 
-static int connect_primary(const char *host, int port) {
-    char portstr[16];
-    snprintf(portstr, sizeof portstr, "%d", port);
-    struct addrinfo hints = {0}, *res = NULL;
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host, portstr, &hints, &res) != 0) return -1;
-    int fd = -1;
-    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) continue;
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
-        close(fd);
-        fd = -1;
-    }
-    freeaddrinfo(res);
-    return fd;
-}
-
 /* Wipe the replica back to empty (primary compacted / desync). */
 static void follower_reset(ReplicationFollower *f) {
     AegisDB *db = f->db;
@@ -475,12 +394,14 @@ static void follower_reset(ReplicationFollower *f) {
 /* One connected session: handshake, then apply the stream until it drops. */
 static void follow_session(ReplicationFollower *f) {
     AegisDB *db = f->db;
-    int fd = connect_primary(f->host, f->port);
+    char portstr[16];
+    snprintf(portstr, sizeof portstr, "%d", f->port);
+    int fd = net_dial(f->host, portstr);
     if (fd < 0) return;
     /* Short read timeout so a dead primary doesn't stall shutdown for long (the
      * follower thread is joined on stop). Healthy streams send heartbeats every
      * poll cycle, so reads return well within this. */
-    set_timeouts(fd, 5);
+    net_set_timeouts(fd, 5);
 
     uint64_t from_off = log_size_locked(db);
     /* Advertise our encryption key fingerprint ("" when unencrypted) so the
@@ -495,10 +416,10 @@ static void follow_session(ReplicationFollower *f) {
                       "\"key_fingerprint\":\"%s\"}\n",
                       (unsigned long long)from_off, (unsigned long long)f->gen,
                       f->token, own_fp);
-    if (write_all(fd, hs, (size_t)hl) != 0) { close(fd); return; }
+    if (net_write_all(fd, hs, (size_t)hl) != 0) { close(fd); return; }
 
     char resp[256];
-    if (read_line(fd, resp, sizeof resp) < 0) { close(fd); return; }
+    if (net_read_line(fd, resp, sizeof resp, 0) < 0) { close(fd); return; }
     cJSON *r = cJSON_Parse(resp);
     if (!r) { close(fd); return; }
     int ok = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "ok"));
@@ -527,7 +448,7 @@ static void follow_session(ReplicationFollower *f) {
 
     uint8_t hdr[MSG_HDR];
     while (!atomic_load_explicit(&f->stop, memory_order_relaxed)) {
-        if (read_full(fd, hdr, MSG_HDR) != 0) break; /* timeout / drop */
+        if (net_read_full(fd, hdr, MSG_HDR) != 0) break; /* timeout / drop */
         if (aegis_get_u32le(hdr) != REPL_MAGIC) {
             LOG_ERROR("replication: bad stream magic; dropping connection");
             break;
@@ -551,7 +472,7 @@ static void follow_session(ReplicationFollower *f) {
         }
         uint8_t *payload = malloc(len);
         if (!payload) break;
-        if (read_full(fd, payload, len) != 0) { free(payload); break; }
+        if (net_read_full(fd, payload, len) != 0) { free(payload); break; }
 
         pthread_rwlock_wrlock(&db->index_lock);
         uint64_t expected = (uint64_t)db->log.size;
