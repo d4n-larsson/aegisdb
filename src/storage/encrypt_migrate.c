@@ -72,7 +72,12 @@ int encrypt_migrate_run(const Config *cfg) {
         unlink(path_new);
         return -1;
     }
-    log_fsync(&dst);
+    if (log_fsync(&dst) != 0) {
+        LOG_ERROR("encrypt-migrate: cannot flush scratch log %s", path_new);
+        log_close(&dst);
+        unlink(path_new);
+        return -1;
+    }
     log_close(&dst);
 
     /* Atomically swap the encrypted log in for the plaintext one. */

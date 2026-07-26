@@ -242,7 +242,8 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
                                rec->embedding_dim);
     }
     pthread_rwlock_unlock(&db->index_lock);
-    if (st == AEGIS_OK) log_fsync_if_batched(&db->log); /* fsync off the lock */
+    if (st == AEGIS_OK && log_fsync_if_batched(&db->log) != 0)
+        st = AEGIS_ERR_INTERNAL; /* not durable: do not acknowledge the write */
 
     if (st != AEGIS_OK) {
         record_free(rec);
@@ -347,7 +348,8 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
             tag_index_add(db->tags, cur.tags[i], cur.id);
     }
     pthread_rwlock_unlock(&db->index_lock);
-    if (st == AEGIS_OK) log_fsync_if_batched(&db->log); /* fsync off the lock */
+    if (st == AEGIS_OK && log_fsync_if_batched(&db->log) != 0)
+        st = AEGIS_ERR_INTERNAL; /* not durable: do not acknowledge the write */
 
     for (size_t i = 0; i < old_tag_count; i++) free(old_tags[i]);
     free(old_tags);
@@ -388,7 +390,8 @@ aegis_status_t qe_delete(AegisDB *db, uint64_t id, const char *ns) {
     cur.updated = db_now_ms();
     st = append_and_hash(db, &cur); /* tombstone version; hash marks deleted */
     pthread_rwlock_unlock(&db->index_lock);
-    if (st == AEGIS_OK) log_fsync_if_batched(&db->log); /* fsync off the lock */
+    if (st == AEGIS_OK && log_fsync_if_batched(&db->log) != 0)
+        st = AEGIS_ERR_INTERNAL; /* not durable: do not acknowledge the write */
 
     record_free(&cur);
     return st;
@@ -488,7 +491,8 @@ aegis_status_t qe_relate(AegisDB *db, uint64_t from_id, uint64_t to_id,
     from.updated = db_now_ms();
     st = append_and_hash(db, &from); /* relationship metadata, content intact */
     pthread_rwlock_unlock(&db->index_lock);
-    if (st == AEGIS_OK) log_fsync_if_batched(&db->log); /* fsync off the lock */
+    if (st == AEGIS_OK && log_fsync_if_batched(&db->log) != 0)
+        st = AEGIS_ERR_INTERNAL; /* not durable: do not acknowledge the write */
     record_free(&from);
     return st;
 }
