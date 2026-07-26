@@ -1,4 +1,4 @@
-# AegisDB v0.5.0-beta.1 — public beta 🛡️
+# AegisDB v0.5.0 — public beta 🛡️
 
 > **Self-hosted memory for your AI agents.** One small C binary — multi-tenant,
 > encrypted, with backups, read replicas, and a one-command Prometheus + Grafana
