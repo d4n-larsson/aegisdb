@@ -230,6 +230,8 @@ static int load_token_file(Config *cfg, const char *path) {
 }
 
 static int parse_size(const char *s, size_t *out) {
+    while (*s == ' ' || *s == '\t') s++; /* strtoull skips these; reject a sign next */
+    if (*s == '-') return -1; /* strtoull silently wraps "-1" to SIZE_MAX, no ERANGE */
     char *end = NULL;
     errno = 0;
     unsigned long long v = strtoull(s, &end, 10);
