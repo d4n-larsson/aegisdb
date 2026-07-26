@@ -4,6 +4,7 @@
 #endif
 #include "aegisdb/client.h"
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -183,6 +184,10 @@ usage:
 }
 
 int client_main(int argc, char **argv) {
+    /* A server reset mid-write would otherwise raise SIGPIPE and kill the CLI by
+     * signal; ignore it so net_write_all returns -1 and we report a clean error. */
+    signal(SIGPIPE, SIG_IGN);
+
     const char *host = getenv("AEGIS_HOST");
     const char *port = getenv("AEGIS_PORT");
     const char *token = getenv("AEGIS_TOKEN");
