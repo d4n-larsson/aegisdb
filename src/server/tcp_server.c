@@ -380,7 +380,9 @@ static int make_listener(int port) {
     addr.sin_port = htons((uint16_t)port);
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
         listen(fd, 128) != 0) {
+        int err = errno; /* the caller logs strerror(errno); close() can clobber it */
         close(fd);
+        errno = err;
         return -1;
     }
     return fd;

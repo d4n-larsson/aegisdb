@@ -5,6 +5,7 @@
 #include "aegisdb/restore.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -125,17 +126,27 @@ int restore_run(const Config *cfg) {
     char dst_log[AEGIS_PATH_MAX], dst_meta[AEGIS_PATH_MAX];
     snprintf(dst_log, sizeof(dst_log), "%s/memory.log", cfg->data_dir);
     snprintf(dst_meta, sizeof(dst_meta), "%s/metadata.db", cfg->data_dir);
-    if (file_exists(dst_log)) {
-        LOG_ERROR("restore: %s already contains a database; restore into an empty "
-                  "--data-dir", cfg->data_dir);
-        goto done;
-    }
     if (fs_mkdir_p(cfg->data_dir) != 0) {
         LOG_ERROR("restore: cannot create data dir %s", cfg->data_dir);
         goto done;
     }
+    /* Atomically claim memory.log with O_EXCL: this both refuses to overwrite an
+     * existing database and closes the check-then-copy race a bare stat() leaves
+     * open (a db created between the check and the copy would be clobbered).
+     * fs_copy_file then overwrites the empty file we just created. */
+    int claim = open(dst_log, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+    if (claim < 0) {
+        if (errno == EEXIST)
+            LOG_ERROR("restore: %s already contains a database; restore into an "
+                      "empty --data-dir", cfg->data_dir);
+        else
+            LOG_ERROR("restore: cannot create %s: %s", dst_log, strerror(errno));
+        goto done;
+    }
+    close(claim);
     if (fs_copy_file(src_log, dst_log) != 0) {
         LOG_ERROR("restore: failed to copy log into %s", cfg->data_dir);
+        unlink(dst_log);
         goto done;
     }
     /* metadata.db carries the next_id floor; copy it when present. */

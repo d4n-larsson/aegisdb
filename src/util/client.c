@@ -4,6 +4,7 @@
 #endif
 #include "aegisdb/client.h"
 
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,6 +73,7 @@ static char *recv_line(int fd) {
         }
         ssize_t r = recv(fd, buf + len, cap - len - 1, 0);
         if (r < 0) {
+            if (errno == EINTR) continue; /* a caught signal, not a read failure */
             free(buf);
             return NULL;
         }
