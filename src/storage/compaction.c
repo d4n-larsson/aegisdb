@@ -8,6 +8,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "aegisdb/fsutil.h"
 #include "aegisdb/logging.h"
 #include "aegisdb/query_engine.h"
 #include "aegisdb/record.h"
@@ -193,14 +194,26 @@ int compaction_run_once(AegisDB *db) {
     if (rename(newpath, db->path_log) != 0) {
         LOG_ERROR("compaction: rename %s -> %s failed; reopening original log",
                   newpath, db->path_log);
-        /* try to reopen the original log so the server keeps working */
-        log_open(&db->log, db->path_log,
-                 config_effective_fsync_batch(&db->config), ckey, NULL);
+        /* Reopen the original log so the server keeps working. If even that
+         * fails the log fd is now -1 and every subsequent append/read fails
+         * with EBADF — the database is unusable, so surface it loudly rather
+         * than pretend it is a routine compaction miss. */
+        if (log_open(&db->log, db->path_log,
+                     config_effective_fsync_batch(&db->config), ckey, NULL) != 0)
+            LOG_ERROR("compaction: could not reopen original log %s after a "
+                      "failed swap; the database is now unusable and the server "
+                      "must be restarted", db->path_log);
         pthread_rwlock_unlock(&db->log_lock);
         free(locs);
         pthread_rwlock_unlock(&db->index_lock);
         return -1;
     }
+    /* The rename is atomic but not durably ordered without fsyncing the
+     * directory; without this a crash just after the swap can revert to the
+     * pre-compaction log (harmless — same live data — but the swap is lost). */
+    if (fs_fsync_parent(db->path_log) != 0)
+        LOG_WARN("compaction: fsync of the log directory failed; the swap of "
+                 "%s may not survive a crash", db->path_log);
     if (log_open(&db->log, db->path_log,
                  config_effective_fsync_batch(&db->config), ckey, NULL) != 0) {
         LOG_ERROR("compaction: cannot reopen compacted log %s", db->path_log);
