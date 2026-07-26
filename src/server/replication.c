@@ -5,6 +5,9 @@
  * replica's follower is a single thread. Blocking sockets throughout — replica
  * connections are long-lived and few, so a thread each is simpler than folding
  * a long-lived subscription into the non-blocking request/response server. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* accept4 + SOCK_CLOEXEC (the Makefile also defines it) */
+#endif
 #include "aegisdb/replication.h"
 
 #include <arpa/inet.h>
