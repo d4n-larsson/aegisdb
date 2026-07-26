@@ -262,6 +262,23 @@ done:
     return NULL;
 }
 
+/* accept() hit a resource-exhaustion error: the pending connection is not
+ * drained, so an immediate retry would spin at 100% CPU until an fd frees. Nap
+ * briefly to cap the retry rate and warn at most once a second. */
+static void accept_backoff(int err) {
+    static _Atomic uint64_t last_warn_ms;
+    uint64_t now = net_mono_ms();
+    uint64_t prev = atomic_load_explicit(&last_warn_ms, memory_order_relaxed);
+    if (now - prev >= 1000 &&
+        atomic_compare_exchange_strong_explicit(&last_warn_ms, &prev, now,
+                                                memory_order_relaxed,
+                                                memory_order_relaxed))
+        LOG_WARN("replication: cannot accept replica connections (%s); "
+                 "throttling until a file descriptor frees", strerror(err));
+    nanosleep(&(struct timespec){.tv_sec = 0, .tv_nsec = 20 * 1000 * 1000L},
+              NULL);
+}
+
 static void *acceptor(void *arg) {
     ReplicationSource *s = arg;
     while (!atomic_load_explicit(&s->stop, memory_order_relaxed)) {
@@ -270,6 +287,9 @@ static void *acceptor(void *arg) {
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
                 continue; /* SO_RCVTIMEO wakeup to re-check stop */
             if (atomic_load_explicit(&s->stop, memory_order_relaxed)) break;
+            if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS ||
+                errno == ENOMEM)
+                accept_backoff(errno); /* fd exhaustion: nap so we don't spin */
             continue;
         }
         if (atomic_load_explicit(&s->stop, memory_order_relaxed)) { close(fd); break; }

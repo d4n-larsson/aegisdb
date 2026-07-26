@@ -47,6 +47,26 @@ static uint64_t mono_ms(void) {
     return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
 }
 
+/* accept() failed with a resource-exhaustion error (EMFILE/ENFILE/ENOBUFS/
+ * ENOMEM). The pending connection is not drained, so the listener stays
+ * level-readable and an immediate re-poll would spin at 100% CPU until an fd
+ * frees. Nap briefly to cap the retry rate while still letting the loop thread
+ * service its existing connections between naps, and warn at most once a second
+ * (shared across loop threads) so the log does not flood. */
+static void accept_backoff(int err) {
+    static _Atomic uint64_t last_warn_ms;
+    uint64_t now = mono_ms();
+    uint64_t prev = atomic_load_explicit(&last_warn_ms, memory_order_relaxed);
+    if (now - prev >= 1000 &&
+        atomic_compare_exchange_strong_explicit(&last_warn_ms, &prev, now,
+                                                memory_order_relaxed,
+                                                memory_order_relaxed))
+        LOG_WARN("accept: cannot accept new connections (%s); throttling until "
+                 "a file descriptor frees", strerror(err));
+    nanosleep(&(struct timespec){.tv_sec = 0, .tv_nsec = 20 * 1000 * 1000L},
+              NULL);
+}
+
 void tcp_server_request_stop(void) {
     atomic_store_explicit(&g_stop, 1, memory_order_relaxed);
 }
@@ -190,7 +210,10 @@ static void loop_accept(int lfd, Conn ***conns, size_t *n, size_t *cap,
         int cfd = accept4(lfd, (struct sockaddr *)&paddr, &plen, SOCK_NONBLOCK);
         if (cfd < 0) {
             if (errno == EINTR) continue;
-            break; /* EAGAIN/EWOULDBLOCK: drained, or a transient accept error */
+            if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS ||
+                errno == ENOMEM)
+                accept_backoff(errno); /* fd exhaustion: nap so we don't spin */
+            break; /* EAGAIN/EWOULDBLOCK: drained; others: retry next poll */
         }
         /* Refuse past the hard cap: an accepted-then-immediately-closed socket
          * is a cheap, bounded response to a flood. */
