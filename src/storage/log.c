@@ -15,6 +15,7 @@
 #include "aegisdb/aead.h"
 #include "aegisdb/crc32.h"
 #include "aegisdb/endian.h"
+#include "aegisdb/fsutil.h"
 #include "aegisdb/logging.h"
 #include "aegisdb/randutil.h"
 
@@ -178,6 +179,12 @@ static int migrate_legacy_log(const char *path) {
         unlink(newpath);
         return -1;
     }
+    /* Make the rename durable: without a directory fsync a crash here could
+     * revert to the legacy file, which the next open re-migrates — harmless but
+     * wasteful, and it leaves the .migrate scratch behind. */
+    if (fs_fsync_parent(path) != 0)
+        LOG_WARN("log: fsync of the log directory failed after migrating %s; "
+                 "the migration may be repeated after a crash", path);
     LOG_INFO("log: migrated %ld legacy frame(s) to v2 format", migrated);
     return 0;
 }
