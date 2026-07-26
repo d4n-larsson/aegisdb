@@ -123,8 +123,9 @@ int main(int argc, char **argv) {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = on_signal;
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
+    if (sigaction(SIGINT, &sa, NULL) != 0 || sigaction(SIGTERM, &sa, NULL) != 0)
+        LOG_WARN("could not install signal handlers; SIGINT/SIGTERM may not "
+                 "shut the server down cleanly");
 
     /* Maintenance: sweep expired working memory every 30s, checkpoint the index
      * on its cadence, (in INTERVAL durability) flush the log on its cadence, and

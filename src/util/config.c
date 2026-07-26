@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -465,7 +466,10 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
             NEXT("--tenant-rate-qps");
             char *end = NULL;
             double q = strtod(val, &end);
-            if (end == val || *end != '\0' || q < 0) {
+            /* Reject NaN/inf too: NaN slips past `q < 0`, and tenant_rate_allow
+             * would then make every request's token math NaN — silently denying
+             * every request for every tenant forever. */
+            if (end == val || *end != '\0' || q < 0 || !isfinite(q)) {
                 fprintf(stderr, "%s: invalid tenant-rate-qps '%s'\n", prog, val);
                 return -1;
             }

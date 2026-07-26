@@ -395,7 +395,11 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
     }
     /* Make the snapshot's directory entries durable so a crash right after this
      * call can't leave a snapshot reported as written but partially absent. */
-    fs_fsync_dir(dir);
+    if (fs_fsync_dir(dir) != 0) {
+        LOG_ERROR("snapshot: fsync of %s failed; not reporting it as durable",
+                  dir);
+        return DB_SNAPSHOT_ERR;
+    }
 
     if (out) {
         snprintf(out->dir, sizeof(out->dir), "%s", dir);

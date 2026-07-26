@@ -87,7 +87,14 @@ long recovery_run(AegisDB *db) {
         LOG_WARN("truncating torn tail: %llu -> %llu bytes",
                  (unsigned long long)db->log.size,
                  (unsigned long long)res.truncate_to);
-        log_truncate(&db->log, res.truncate_to);
+        if (log_truncate(&db->log, res.truncate_to) != 0) {
+            LOG_ERROR("recovery: failed to drop torn tail; aborting so appends "
+                      "do not land past the damaged region");
+            return -1;
+        }
+        /* Persist the trim so a crash before writeback doesn't re-detect the
+         * torn tail on the next start (idempotent, but avoids re-scanning it). */
+        log_fsync(&db->log);
     }
 
     db->next_id = sc.max_id + 1;
