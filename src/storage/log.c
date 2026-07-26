@@ -27,6 +27,19 @@
 #define V3_AAD_LEN 32 /* magic+len+nonce: authenticated as AEAD associated data */
 #define V3_FRAME_OVERHEAD (V3_FRAME_HEADER + AEAD_TAG_LEN)
 
+/* fsync, retrying only on EINTR. A dropped fsync means an acknowledged write
+ * may never have reached stable storage, so the return must be surfaced, not
+ * swallowed. EINTR is retried; EIO and friends are not (on Linux a consumed
+ * writeback error is not reliably re-reported, so looping cannot recover it —
+ * the caller must treat it as a durability failure). errno is left set. */
+static int fsync_retry(int fd) {
+    while (fsync(fd) != 0) {
+        if (errno == EINTR) continue;
+        return -1;
+    }
+    return 0;
+}
+
 static int read_full(int fd, off_t off, void *buf, size_t n) {
     uint8_t *p = buf;
     size_t got = 0;
@@ -274,21 +287,37 @@ fail_quiet:
     return -1;
 }
 
-void log_close(LogFile *lf) {
+int log_close(LogFile *lf) {
+    int rv = 0;
     if (lf->fd >= 0) {
-        fsync(lf->fd);
-        close(lf->fd);
+        if (fsync_retry(lf->fd) != 0) {
+            LOG_ERROR("log: final fsync of %s failed: %s (data may be lost)",
+                      lf->path, strerror(errno));
+            rv = -1;
+        }
+        /* close() can surface a deferred write-back error on the last fd. */
+        if (close(lf->fd) != 0) {
+            LOG_ERROR("log: close of %s failed: %s (data may be lost)",
+                      lf->path, strerror(errno));
+            rv = -1;
+        }
         lf->fd = -1;
     }
     pthread_mutex_destroy(&lf->wlock);
+    return rv;
 }
 
-void log_fsync(LogFile *lf) {
-    if (lf->fd < 0) return;
+int log_fsync(LogFile *lf) {
+    if (lf->fd < 0) return 0;
     pthread_mutex_lock(&lf->wlock);
-    fsync(lf->fd);
-    lf->since_fsync = 0;
+    int rv = fsync_retry(lf->fd);
+    int err = errno;
+    if (rv == 0) lf->since_fsync = 0; /* leave the counter set so a retry flushes */
     pthread_mutex_unlock(&lf->wlock);
+    if (rv != 0)
+        LOG_ERROR("log: fsync of %s failed: %s (write not durable)", lf->path,
+                  strerror(err));
+    return rv;
 }
 
 int log_flush_pending(const LogFile *lf) {
@@ -356,14 +385,20 @@ int log_append(LogFile *lf, const uint8_t *payload, size_t len,
  * every frame appended since the last flush, and `since_fsync` is shared under
  * the log mutex, so a writer that finds the counter already reset was made
  * durable by a concurrent writer's fsync. */
-void log_fsync_if_batched(LogFile *lf) {
-    if (lf->fd < 0) return;
+int log_fsync_if_batched(LogFile *lf) {
+    if (lf->fd < 0) return 0;
     pthread_mutex_lock(&lf->wlock);
+    int rv = 0, err = 0;
     if (lf->fsync_batch == 0 || lf->since_fsync >= lf->fsync_batch) {
-        fsync(lf->fd);
-        lf->since_fsync = 0;
+        rv = fsync_retry(lf->fd);
+        err = errno;
+        if (rv == 0) lf->since_fsync = 0; /* on failure, retry on the next append */
     }
     pthread_mutex_unlock(&lf->wlock);
+    if (rv != 0)
+        LOG_ERROR("log: fsync of %s failed: %s (write not durable)", lf->path,
+                  strerror(err));
+    return rv;
 }
 
 /* Read + decrypt a v3 frame at `offset`. Returns 0/-1 (auth failure -> -1). */

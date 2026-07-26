@@ -172,7 +172,16 @@ int compaction_run_once(AegisDB *db) {
         return -1;
     }
 
-    log_fsync(&newlog);
+    if (log_fsync(&newlog) != 0) {
+        /* The compacted log is not durable; do not swap it in over the live
+         * log — abort and leave the original in place. */
+        LOG_ERROR("compaction: fsync of new log failed; keeping the original");
+        free(locs);
+        log_close(&newlog);
+        unlink(newpath);
+        pthread_rwlock_unlock(&db->index_lock);
+        return -1;
+    }
     log_close(&newlog);
 
     /* Swapping the log invalidates every existing offset, so exclude lock-free

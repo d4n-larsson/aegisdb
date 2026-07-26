@@ -67,7 +67,10 @@ typedef enum {
  * failure; on failure *status (may be NULL) carries the reason. */
 int log_open(LogFile *lf, const char *path, size_t fsync_batch,
              const uint8_t *key, LogOpenStatus *status);
-void log_close(LogFile *lf);
+/* Final fsync + close of the log fd. Returns 0, or -1 if the fsync or close
+ * reported an I/O error (the log tail may not be durable — a clean shutdown
+ * must treat this as data loss, not success). Always releases the fd. */
+int log_close(LogFile *lf);
 
 /* Append a payload frame. On success sets *out_offset to the frame start and
  * returns 0. Triggers batched fsync per fsync_batch. */
@@ -83,13 +86,16 @@ int log_read(LogFile *lf, uint64_t offset, uint8_t **out, size_t *out_len);
  * log by offset use this to step to the next frame regardless of mode. */
 size_t log_frame_overhead(const LogFile *lf);
 
-/* Force durability: fsync and reset the unflushed-append counter. */
-void log_fsync(LogFile *lf);
+/* Force durability: fsync and reset the unflushed-append counter. Returns 0, or
+ * -1 if the fsync failed (the pending appends are NOT durable — the counter is
+ * left set so a later flush retries). */
+int log_fsync(LogFile *lf);
 
 /* fsync only if the configured batch threshold has been reached (sync/batch
  * durability). Call after releasing the index lock so the fsync is not held
- * under it; a no-op in interval mode. */
-void log_fsync_if_batched(LogFile *lf);
+ * under it; a no-op in interval mode. Returns 0, or -1 if a needed fsync failed
+ * (the just-appended write is NOT durable — callers must not acknowledge it). */
+int log_fsync_if_batched(LogFile *lf);
 
 /* True if appends have happened since the last fsync (a flush would do work).
  * Lock-free hint for the maintenance thread's interval flush. */
