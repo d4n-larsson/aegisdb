@@ -28,7 +28,7 @@ int fs_mkdir_p(const char *path) {
 }
 
 int fs_fsync_dir(const char *dir) {
-    int fd = open(dir, O_RDONLY | O_DIRECTORY);
+    int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (fd < 0) return -1;
     int rc = fsync(fd);
     if (close(fd) != 0) rc = -1;
@@ -56,7 +56,7 @@ int fs_write_atomic(const char *path, const void *data, size_t len, mode_t mode)
      * leaves a umask-dependent window). Clear any stale .tmp first so O_EXCL then
      * refuses to follow a pre-planted symlink. */
     unlink(tmp);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, mode);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, mode);
     if (fd < 0) return -1;
     const char *p = data;
     size_t off = 0;
@@ -82,9 +82,9 @@ int fs_write_atomic(const char *path, const void *data, size_t len, mode_t mode)
 }
 
 int fs_copy_file(const char *src, const char *dst) {
-    FILE *in = fopen(src, "rb");
+    FILE *in = fopen(src, "rbe");
     if (!in) return -1;
-    FILE *out = fopen(dst, "wb");
+    FILE *out = fopen(dst, "wbe");
     if (!out) {
         fclose(in);
         return -1;

@@ -207,7 +207,8 @@ static void loop_accept(int lfd, Conn ***conns, size_t *n, size_t *cap,
     for (;;) {
         struct sockaddr_in paddr;
         socklen_t plen = sizeof(paddr);
-        int cfd = accept4(lfd, (struct sockaddr *)&paddr, &plen, SOCK_NONBLOCK);
+        int cfd = accept4(lfd, (struct sockaddr *)&paddr, &plen,
+                          SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (cfd < 0) {
             if (errno == EINTR) continue;
             if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS ||
@@ -362,7 +363,7 @@ static void *loop_main(void *arg) {
 
 /* Create a non-blocking SO_REUSEPORT listener bound to `port`. -1 on failure. */
 static int make_listener(int port) {
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0) return -1;
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));

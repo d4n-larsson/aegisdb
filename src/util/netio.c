@@ -21,7 +21,8 @@ int net_dial(const char *host, const char *port) {
     if (getaddrinfo(host, port, &hints, &res) != 0) return -1;
     int fd = -1;
     for (rp = res; rp; rp = rp->ai_next) {
-        fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        fd = socket(rp->ai_family, rp->ai_socktype | SOCK_CLOEXEC,
+                    rp->ai_protocol);
         if (fd < 0) continue;
         if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) break;
         close(fd);

@@ -276,7 +276,7 @@ static int snapshot_name_ok(const char *name) {
 /* Copy the first `n` bytes of the open log fd to `dst_path`. pread leaves the fd
  * offset untouched, so concurrent appends (which pwrite past `n`) are safe. */
 static int copy_log_prefix(int src_fd, const char *dst_path, uint64_t n) {
-    FILE *dst = fopen(dst_path, "wb");
+    FILE *dst = fopen(dst_path, "wbe");
     if (!dst) return -1;
     char buf[AEGIS_IO_BUF_SIZE];
     uint64_t done = 0;
@@ -384,7 +384,7 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
         LOG_ERROR("snapshot: directory path too long");
         return DB_SNAPSHOT_ERR;
     }
-    FILE *mf = fopen(manifest, "wb");
+    FILE *mf = fopen(manifest, "wbe");
     int mok = (mf && fwrite(man, 1, (size_t)mn, mf) == (size_t)mn);
     if (mok && (fflush(mf) != 0 || fsync(fileno(mf)) != 0)) mok = 0;
     if (mf && fclose(mf) != 0) mok = 0;
@@ -412,7 +412,7 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
 /* Read the persisted next_id from metadata.db, or 0 if absent/unreadable. It is
  * a high-water mark used as a floor at recovery so next_id can't regress. */
 static uint64_t load_metadata_next_id(const char *path) {
-    FILE *f = fopen(path, "rb");
+    FILE *f = fopen(path, "rbe");
     if (!f) return 0;
     uint8_t buf[AMETA_SIZE];
     uint64_t nid = 0;
