@@ -118,7 +118,7 @@ static int hex_decode(const char *s, uint8_t *out, size_t n) {
  * line (trailing whitespace/newline ignored). Returns 0 on success, -1 on an
  * unreadable file or a malformed key. Never logs the key. */
 static int load_key_file(const char *path, uint8_t out[AEAD_KEY_LEN]) {
-    FILE *f = fopen(path, "r");
+    FILE *f = fopen(path, "re");
     if (!f) return -1;
     char line[256];
     char *got = fgets(line, sizeof line, f);
@@ -211,7 +211,7 @@ static int parse_token_line(Config *cfg, char *s) {
 /* Load tokens from `path`, one per line, skipping blank lines and #-comments
  * and trimming surrounding whitespace. Returns 0 on success. */
 static int load_token_file(Config *cfg, const char *path) {
-    FILE *f = fopen(path, "r");
+    FILE *f = fopen(path, "re");
     if (!f) return -1;
     char line[1024];
     int rv = 0;

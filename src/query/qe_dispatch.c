@@ -880,7 +880,7 @@ static const char *scope_str(int scope) {
 /* Mint a random 256-bit token as 64 hex chars (out must hold 65). 0/-1. */
 static int gen_random_token(char out[65]) {
     uint8_t buf[32];
-    FILE *f = fopen("/dev/urandom", "rb");
+    FILE *f = fopen("/dev/urandom", "rbe");
     if (!f) return -1;
     size_t n = fread(buf, 1, sizeof buf, f);
     fclose(f);

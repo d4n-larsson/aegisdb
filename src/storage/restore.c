@@ -31,7 +31,7 @@ static long long file_size(const char *path) {
 static char *read_text(const char *path) {
     long long sz = file_size(path);
     if (sz < 0 || sz > (1 << 20)) return NULL; /* manifests are tiny */
-    FILE *f = fopen(path, "rb");
+    FILE *f = fopen(path, "rbe");
     if (!f) return NULL;
     char *buf = malloc((size_t)sz + 1);
     if (!buf) { fclose(f); return NULL; }

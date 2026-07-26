@@ -109,7 +109,7 @@ static int parse_header_v3(const uint8_t *hdr, uint32_t *len) {
 /* Rewrite a legacy v1 log (8-byte [crc][len] frames, no magic) at `path` into
  * the v2 frame format, stopping at the first torn/corrupt v1 frame. */
 static int migrate_legacy_log(const char *path) {
-    int oldfd = open(path, O_RDONLY);
+    int oldfd = open(path, O_RDONLY | O_CLOEXEC);
     if (oldfd < 0) return -1;
     off_t size = lseek(oldfd, 0, SEEK_END);
     if (size < 0) {
@@ -119,7 +119,7 @@ static int migrate_legacy_log(const char *path) {
 
     char newpath[AEGIS_PATH_MAX];
     snprintf(newpath, sizeof(newpath), "%s.migrate", path);
-    int nfd = open(newpath, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    int nfd = open(newpath, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (nfd < 0) {
         close(oldfd);
         return -1;
@@ -217,7 +217,7 @@ int log_open(LogFile *lf, const char *path, size_t fsync_batch,
         memcpy(lf->key, key, AEAD_KEY_LEN);
     }
     if (pthread_mutex_init(&lf->wlock, NULL) != 0) return -1;
-    lf->fd = open(path, O_RDWR | O_CREAT, 0644);
+    lf->fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (lf->fd < 0) {
         pthread_mutex_destroy(&lf->wlock);
         return -1;
@@ -261,7 +261,7 @@ int log_open(LogFile *lf, const char *path, size_t fsync_batch,
                 pthread_mutex_destroy(&lf->wlock);
                 return -1;
             }
-            lf->fd = open(path, O_RDWR, 0644);
+            lf->fd = open(path, O_RDWR | O_CLOEXEC, 0644);
             if (lf->fd < 0) {
                 pthread_mutex_destroy(&lf->wlock);
                 return -1;

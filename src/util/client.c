@@ -267,7 +267,7 @@ static void gen_token_usage(void) {
 
 /* Fill `out` (>= 2n+1 bytes) with a random hex token of n bytes. Returns 0. */
 static int random_hex(char *out, size_t nbytes) {
-    FILE *f = fopen("/dev/urandom", "rb");
+    FILE *f = fopen("/dev/urandom", "rbe");
     if (!f) return -1;
     uint8_t buf[64];
     if (nbytes > sizeof(buf)) nbytes = sizeof(buf);

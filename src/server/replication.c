@@ -282,7 +282,7 @@ static void accept_backoff(int err) {
 static void *acceptor(void *arg) {
     ReplicationSource *s = arg;
     while (!atomic_load_explicit(&s->stop, memory_order_relaxed)) {
-        int fd = accept(s->listen_fd, NULL, NULL);
+        int fd = accept4(s->listen_fd, NULL, NULL, SOCK_CLOEXEC);
         if (fd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
                 continue; /* SO_RCVTIMEO wakeup to re-check stop */
@@ -329,7 +329,7 @@ ReplicationSource *replication_source_start(AegisDB *db, int port,
     sha256(token ? token : "", token ? strlen(token) : 0, s->token_hash);
     pthread_mutex_init(&s->lock, NULL);
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) { pthread_mutex_destroy(&s->lock); free(s); return NULL; }
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);

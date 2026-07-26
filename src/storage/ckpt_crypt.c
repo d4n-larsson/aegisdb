@@ -23,7 +23,7 @@
 
 /* Read the whole file at `path` into a fresh buffer. Returns 0/-1. */
 static int read_whole(const char *path, uint8_t **out, size_t *out_len) {
-    int fd = open(path, O_RDONLY);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return -1;
     off_t size = lseek(fd, 0, SEEK_END);
     if (size < 0 || lseek(fd, 0, SEEK_SET) != 0) {
