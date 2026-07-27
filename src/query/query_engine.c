@@ -85,8 +85,14 @@ static aegis_status_t append_and_hash(AegisDB *db, const MemoryRecord *rec) {
      * there are no tenants to bound. The delta vs the record's current live
      * state covers insert (+1), delete/tombstone (-1), and update (bytes only,
      * count unchanged). agent_id is immutable per id, so it is the tenant. */
-    const char *ns =
-        (db->config.auth_token_count > 0) ? rec->agent_id : NULL;
+    /* auth_token_count can change under auth_lock (runtime token add/revoke), so
+     * read it under auth_lock(read) rather than racing that writer. The caller
+     * holds index_lock(write); auth_lock nests under it (nothing takes auth_lock
+     * then index_lock), so this adds no cycle. */
+    pthread_rwlock_rdlock(&db->auth_lock);
+    int auth_on = db->config.auth_token_count > 0;
+    pthread_rwlock_unlock(&db->auth_lock);
+    const char *ns = auth_on ? rec->agent_id : NULL;
     long d_records = 0, d_bytes = 0;
     if (ns) {
         const HashEntry *prior = hash_index_get(db->hash, rec->id);

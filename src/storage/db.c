@@ -334,16 +334,19 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
     pthread_rwlock_rdlock(&db->log_lock);
     uint64_t covered = (uint64_t)db->log.size;
     int src_fd = db->log.fd;
+    /* covered + src_fd are now pinned by log_lock (which blocks compaction's log
+     * swap), and [0, covered) is an immutable, append-only prefix. index_lock is
+     * no longer needed, so release it before the potentially large copy — else
+     * every write blocks for the entire duration of the snapshot. */
+    pthread_rwlock_unlock(&db->index_lock);
     char logpath[AEGIS_PATH_MAX];
     if (snprintf(logpath, sizeof(logpath), "%s/memory.log", dir) >= (int)sizeof(logpath)) {
         pthread_rwlock_unlock(&db->log_lock);
-        pthread_rwlock_unlock(&db->index_lock);
         LOG_ERROR("snapshot: directory path too long");
         return DB_SNAPSHOT_ERR;
     }
     int crc = copy_log_prefix(src_fd, logpath, covered);
     pthread_rwlock_unlock(&db->log_lock);
-    pthread_rwlock_unlock(&db->index_lock);
 
     if (crc != 0) {
         LOG_ERROR("snapshot: log copy failed (%s)", logpath);
