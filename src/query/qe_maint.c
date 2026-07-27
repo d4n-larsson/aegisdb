@@ -198,8 +198,14 @@ aegis_status_t qe_history(AegisDB *db, uint64_t id, const char *ns,
 
     HistCtx h = {id, NULL, 0, 0, 0};
     LogScanResult res;
+    /* Snapshot the scan end under index_lock (appends bump log.size under it),
+     * while holding log_lock to pin the log against a compaction swap; release
+     * index_lock before the scan so writers aren't blocked for its duration. */
+    pthread_rwlock_rdlock(&db->index_lock);
     pthread_rwlock_rdlock(&db->log_lock);
-    int rc = log_scan(&db->log, 0, history_cb, &h, &res);
+    uint64_t end = (uint64_t)db->log.size;
+    pthread_rwlock_unlock(&db->index_lock);
+    int rc = log_scan(&db->log, 0, end, history_cb, &h, &res);
     pthread_rwlock_unlock(&db->log_lock);
     if (rc != 0 || h.err) {
         for (size_t i = 0; i < h.n; i++) record_free(&h.arr[i]);
@@ -251,8 +257,12 @@ aegis_status_t qe_get_as_of(AegisDB *db, uint64_t id, const char *ns,
 
     AsOfCtx a = {id, as_of, 0, {0}};
     LogScanResult res;
+    /* See qe_get_history: snapshot the end under index_lock, scan under log_lock. */
+    pthread_rwlock_rdlock(&db->index_lock);
     pthread_rwlock_rdlock(&db->log_lock);
-    int rc = log_scan(&db->log, 0, as_of_cb, &a, &res);
+    uint64_t end = (uint64_t)db->log.size;
+    pthread_rwlock_unlock(&db->index_lock);
+    int rc = log_scan(&db->log, 0, end, as_of_cb, &a, &res);
     pthread_rwlock_unlock(&db->log_lock);
     if (rc != 0) {
         if (a.have) record_free(&a.best);

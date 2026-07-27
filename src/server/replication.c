@@ -213,6 +213,14 @@ static void *streamer(void *arg) {
     LOG_INFO("replication: replica subscribed from offset %llu (reset=%d)",
              (unsigned long long)cursor, reset);
 
+    /* Frame overhead depends only on the log's (immutable) encryption mode. A
+     * compaction swap that could change db->log ends this session via the
+     * generation check below, so cache it once under log_lock rather than read
+     * db->log.encrypted unlocked while the swap may be memset-ing the struct. */
+    pthread_rwlock_rdlock(&db->log_lock);
+    uint64_t frame_overhead = (uint64_t)log_frame_overhead(&db->log);
+    pthread_rwlock_unlock(&db->log_lock);
+
     while (!atomic_load_explicit(&s->stop, memory_order_relaxed)) {
         /* Early out if the primary compacted (offsets changed); the authoritative
          * re-check happens under log_lock before each read below. */
@@ -246,7 +254,7 @@ static void *streamer(void *arg) {
             free(payload);
             /* Step by the actual on-disk frame size (v2 vs encrypted v3 differ),
              * so tailing stays aligned on an encrypted primary log. */
-            cursor += (uint64_t)log_frame_overhead(&db->log) + (uint64_t)plen;
+            cursor += frame_overhead + (uint64_t)plen;
             sent_any = 1;
         }
         /* Heartbeat carries the current log size so an idle replica can measure

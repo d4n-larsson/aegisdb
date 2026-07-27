@@ -64,7 +64,7 @@ static void test_scan_visits_all_frames(void) {
     }
     int n = 0;
     LogScanResult res = {0};
-    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf, 0, count_cb, &n, &res));
+    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf, 0, (uint64_t)lf.size, count_cb, &n, &res));
     TEST_ASSERT_EQUAL_INT(5, n);
     TEST_ASSERT_EQUAL_size_t(5, res.good_frames);
     TEST_ASSERT_EQUAL_size_t(0, res.corrupt_frames);
@@ -116,7 +116,7 @@ static void test_torn_tail_detected(void) {
     TEST_ASSERT_EQUAL_INT(0, log_open(&lf2, g_path, 0, NULL, NULL));
     int n = 0;
     LogScanResult res = {0};
-    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf2, 0, count_cb, &n, &res));
+    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf2, 0, (uint64_t)lf2.size, count_cb, &n, &res));
     TEST_ASSERT_EQUAL_INT(1, n); /* only the complete frame */
     TEST_ASSERT_EQUAL_UINT64(good_end, res.truncate_to);
     log_close(&lf2);
@@ -150,7 +150,7 @@ static void test_midlog_corruption_recovers_tail(void) {
     TEST_ASSERT_EQUAL_INT(0, log_open(&lf2, g_path, 0, NULL, NULL));
     int n = 0;
     LogScanResult res = {0};
-    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf2, 0, count_cb, &n, &res));
+    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf2, 0, (uint64_t)lf2.size, count_cb, &n, &res));
     TEST_ASSERT_EQUAL_INT(2, n); /* bravo + charlie survive */
     TEST_ASSERT_EQUAL_size_t(2, res.good_frames);
     TEST_ASSERT_EQUAL_size_t(1, res.corrupt_frames);
@@ -187,7 +187,7 @@ static void test_legacy_v1_migration(void) {
     TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 0, NULL, NULL)); /* triggers migration */
     int n = 0;
     LogScanResult res = {0};
-    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf, 0, count_cb, &n, &res));
+    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf, 0, (uint64_t)lf.size, count_cb, &n, &res));
     TEST_ASSERT_EQUAL_INT(2, n);
     TEST_ASSERT_EQUAL_size_t(0, res.corrupt_frames);
 

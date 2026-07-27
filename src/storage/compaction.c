@@ -75,7 +75,17 @@ static int compaction_copy_live(AegisDB *db, LogFile *newlog, const NewLoc *snap
     for (size_t i = 0; i < snap_n; i++) {
         uint8_t *buf = NULL;
         size_t len = 0;
-        if (log_read(&db->log, snap[i].offset, &buf, &len) != 0) continue;
+        /* A live snapshot entry that won't read back means on-disk corruption
+         * (the source region is immutable, so this is not a race). Abort and
+         * keep the original log rather than silently dropping a live record from
+         * the compacted one — matching the phase-3 tail-drain's abort-on-anomaly. */
+        if (log_read(&db->log, snap[i].offset, &buf, &len) != 0) {
+            LOG_ERROR("compaction: cannot read live record id %llu at offset "
+                      "%llu; aborting to avoid dropping it",
+                      (unsigned long long)snap[i].id,
+                      (unsigned long long)snap[i].offset);
+            return -1;
+        }
         uint64_t off = 0;
         if (log_append(newlog, buf, len, &off) != 0) {
             free(buf);

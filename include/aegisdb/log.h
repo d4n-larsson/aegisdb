@@ -113,17 +113,20 @@ typedef struct {
                                * has a mid-stream hole, not just a torn tail */
 } LogScanResult;
 
-/* Scan frames from byte offset `start`, invoking cb(offset,payload,len,ctx) for
- * each intact frame. `start` must be a frame boundary (0, or a checkpoint's
- * covered offset); the region before it is assumed clean. On encountering a
- * damaged frame the scanner resynchronizes to the next valid frame rather than
+/* Scan frames in the byte range [`start`, `scan_end`), invoking
+ * cb(offset,payload,len,ctx) for each intact frame. `start` must be a frame
+ * boundary (0, or a checkpoint's covered offset); the region before it is
+ * assumed clean. `scan_end` is the exclusive end offset — the caller passes a
+ * consistent snapshot of the log size (captured under a lock) rather than
+ * letting the scan read the live, concurrently-mutated lf->size. On encountering
+ * a damaged frame the scanner resynchronizes to the next valid frame rather than
  * stopping. A trailing incomplete frame (torn tail from a mid-write crash) sets
  * truncate_to to the end of the last clean frame; mid-stream corruption that is
- * followed by recoverable frames leaves truncate_to at the file size so the good
- * tail is preserved. cb returning non-zero aborts the scan early. Returns 0/-1. */
+ * followed by recoverable frames leaves truncate_to at scan_end so the good tail
+ * is preserved. cb returning non-zero aborts the scan early. Returns 0/-1. */
 typedef int (*log_scan_cb)(uint64_t offset, const uint8_t *payload, size_t len,
                            void *ctx);
-int log_scan(LogFile *lf, uint64_t start, log_scan_cb cb, void *ctx,
-             LogScanResult *out);
+int log_scan(LogFile *lf, uint64_t start, uint64_t scan_end, log_scan_cb cb,
+             void *ctx, LogScanResult *out);
 
 #endif /* AEGISDB_LOG_H */
