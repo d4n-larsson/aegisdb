@@ -313,8 +313,13 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
     }
 
     /* Flush pending appends so the durable prefix we copy is as complete as
-     * possible, then capture a consistent (offset, next_id, count) tuple. */
+     * possible, then capture a consistent (offset, next_id, count) tuple.
+     * log_lock(read) excludes a concurrent compaction swap, which would close +
+     * reopen db->log (freeing its mutex) underneath this fsync. Released before
+     * index_lock is taken below, preserving the index->log acquisition order. */
+    pthread_rwlock_rdlock(&db->log_lock);
     log_fsync(&db->log);
+    pthread_rwlock_unlock(&db->log_lock);
 
     pthread_rwlock_rdlock(&db->index_lock);
     size_t live = 0;
@@ -454,6 +459,13 @@ static int init_db_locks(AegisDB *db) {
         pthread_mutex_destroy(&db->id_lock);
         return -1;
     }
+    if (pthread_mutex_init(&db->compaction_lock, NULL) != 0) {
+        pthread_rwlock_destroy(&db->auth_lock);
+        pthread_rwlock_destroy(&db->log_lock);
+        pthread_rwlock_destroy(&db->index_lock);
+        pthread_mutex_destroy(&db->id_lock);
+        return -1;
+    }
     return 0;
 }
 
@@ -462,6 +474,7 @@ static void destroy_db_locks(AegisDB *db) {
     pthread_rwlock_destroy(&db->index_lock);
     pthread_rwlock_destroy(&db->log_lock);
     pthread_rwlock_destroy(&db->auth_lock);
+    pthread_mutex_destroy(&db->compaction_lock);
 }
 
 /* Give db a private deep copy of the startup token set: runtime token-admin
@@ -599,4 +612,5 @@ void db_close(AegisDB *db) {
     pthread_rwlock_destroy(&db->index_lock);
     pthread_rwlock_destroy(&db->log_lock);
     pthread_rwlock_destroy(&db->auth_lock);
+    pthread_mutex_destroy(&db->compaction_lock);
 }

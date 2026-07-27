@@ -172,6 +172,19 @@ int record_expired(const MemoryRecord *r, uint64_t now) {
     return r->expires_at != 0 && now >= r->expires_at;
 }
 
+/* Durability fsync for the write path. Called after releasing index_lock (so
+ * the fsync is off that lock), but under log_lock(read) so a concurrent
+ * compaction swap — which closes and reopens db->log under log_lock(write),
+ * destroying the log's mutex and memset-ing the struct — cannot run underneath
+ * it. Taking log_lock alone here respects the index->log order (index_lock is
+ * already released). Returns 0, or -1 if the write is not durable. */
+static int durably_flush(AegisDB *db) {
+    pthread_rwlock_rdlock(&db->log_lock);
+    int rv = log_fsync_if_batched(&db->log);
+    pthread_rwlock_unlock(&db->log_lock);
+    return rv;
+}
+
 /* ----- core operations -------------------------------------------------- */
 
 aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
@@ -242,7 +255,7 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
                                rec->embedding_dim);
     }
     pthread_rwlock_unlock(&db->index_lock);
-    if (st == AEGIS_OK && log_fsync_if_batched(&db->log) != 0)
+    if (st == AEGIS_OK && durably_flush(db) != 0)
         st = AEGIS_ERR_INTERNAL; /* not durable: do not acknowledge the write */
 
     if (st != AEGIS_OK) {
@@ -348,7 +361,7 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
             tag_index_add(db->tags, cur.tags[i], cur.id);
     }
     pthread_rwlock_unlock(&db->index_lock);
-    if (st == AEGIS_OK && log_fsync_if_batched(&db->log) != 0)
+    if (st == AEGIS_OK && durably_flush(db) != 0)
         st = AEGIS_ERR_INTERNAL; /* not durable: do not acknowledge the write */
 
     for (size_t i = 0; i < old_tag_count; i++) free(old_tags[i]);
@@ -390,7 +403,7 @@ aegis_status_t qe_delete(AegisDB *db, uint64_t id, const char *ns) {
     cur.updated = db_now_ms();
     st = append_and_hash(db, &cur); /* tombstone version; hash marks deleted */
     pthread_rwlock_unlock(&db->index_lock);
-    if (st == AEGIS_OK && log_fsync_if_batched(&db->log) != 0)
+    if (st == AEGIS_OK && durably_flush(db) != 0)
         st = AEGIS_ERR_INTERNAL; /* not durable: do not acknowledge the write */
 
     record_free(&cur);
@@ -491,7 +504,7 @@ aegis_status_t qe_relate(AegisDB *db, uint64_t from_id, uint64_t to_id,
     from.updated = db_now_ms();
     st = append_and_hash(db, &from); /* relationship metadata, content intact */
     pthread_rwlock_unlock(&db->index_lock);
-    if (st == AEGIS_OK && log_fsync_if_batched(&db->log) != 0)
+    if (st == AEGIS_OK && durably_flush(db) != 0)
         st = AEGIS_ERR_INTERNAL; /* not durable: do not acknowledge the write */
     record_free(&from);
     return st;
