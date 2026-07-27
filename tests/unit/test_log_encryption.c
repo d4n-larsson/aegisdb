@@ -58,7 +58,7 @@ static void test_encrypted_roundtrip_and_scan(void) {
 
     int n = 0;
     LogScanResult res;
-    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf, 0, scan_count, &n, &res));
+    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf, 0, (uint64_t)lf.size, scan_count, &n, &res));
     TEST_ASSERT_EQUAL_INT(2, n);
     TEST_ASSERT_EQUAL_size_t(2, res.good_frames);
     TEST_ASSERT_EQUAL_size_t(0, res.corrupt_frames);
@@ -176,7 +176,7 @@ static void test_tamper_detected_on_read_and_scan(void) {
 
     int n = 0;
     LogScanResult res;
-    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf2, 0, scan_count, &n, &res));
+    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf2, 0, (uint64_t)lf2.size, scan_count, &n, &res));
     TEST_ASSERT_EQUAL_INT(1, n);                     /* only frame 1 delivered */
     TEST_ASSERT_EQUAL_size_t(1, res.good_frames);
     TEST_ASSERT_EQUAL_size_t(1, res.corrupt_frames); /* frame 2 flagged corrupt */

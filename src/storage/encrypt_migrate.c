@@ -64,7 +64,7 @@ int encrypt_migrate_run(const Config *cfg) {
 
     MigrateCtx mc = {&dst, 0};
     LogScanResult res;
-    int scan_rv = log_scan(&src, 0, migrate_cb, &mc, &res);
+    int scan_rv = log_scan(&src, 0, (uint64_t)src.size, migrate_cb, &mc, &res);
     log_close(&src);
     if (scan_rv != 0 || mc.err) {
         LOG_ERROR("encrypt-migrate: failed while rewriting frames");

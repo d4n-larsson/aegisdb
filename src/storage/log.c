@@ -504,10 +504,10 @@ static off_t find_next_frame(const LogFile *lf, off_t from, off_t end) {
     return end;
 }
 
-int log_scan(LogFile *lf, uint64_t start, log_scan_cb cb, void *ctx,
-             LogScanResult *out) {
+int log_scan(LogFile *lf, uint64_t start, uint64_t scan_end, log_scan_cb cb,
+             void *ctx, LogScanResult *out) {
     off_t off = (off_t)start;
-    off_t end = lf->size;
+    off_t end = (off_t)scan_end;
     uint64_t clean_end = start; /* [0, start) is assumed clean (e.g. checkpoint) */
     size_t good = 0, corrupt = 0;
     int hole = 0, recovered_after_hole = 0;

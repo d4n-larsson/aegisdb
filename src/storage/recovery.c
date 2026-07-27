@@ -68,7 +68,10 @@ long recovery_run(AegisDB *db) {
     LOG_DEBUG("recovery: scanning log %s from %llu (%llu bytes total)",
               db->path_log, (unsigned long long)scan_from,
               (unsigned long long)db->log.size);
-    if (log_scan(&db->log, scan_from, scan_cb, &sc, &res) != 0) {
+    /* Recovery runs single-threaded before any worker starts, so reading
+     * db->log.size here is unraced. */
+    if (log_scan(&db->log, scan_from, (uint64_t)db->log.size, scan_cb, &sc,
+                 &res) != 0) {
         LOG_ERROR("recovery: log scan failed on %s", db->path_log);
         return -1;
     }

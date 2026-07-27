@@ -451,9 +451,13 @@ int tcp_server_run(AegisDB *db) {
         return -1;
     }
     if (spawned != nthreads) {
-        /* a thread failed to start: ask the rest to stop, then close the
-         * listeners the unspawned loops would have owned */
-        atomic_store_explicit(&g_stop, 1, memory_order_relaxed);
+        /* A thread failed to start. Run degraded on the ones that did rather
+         * than take the whole server down over a transient spawn failure — each
+         * loop has its own SO_REUSEPORT listener, so the kernel just balances
+         * across fewer of them. Close the listeners the unspawned loops would
+         * have owned. */
+        LOG_WARN("only %d of %d io threads started; running degraded", spawned,
+                 nthreads);
         for (int i = spawned; i < nthreads; i++) close(lfds[i]);
     }
 
