@@ -77,6 +77,11 @@ typedef struct {
      * take it for write. The DB owns its own deep copy of the token set (the
      * startup Config keeps its own), so runtime mutation is isolated. */
     pthread_rwlock_t auth_lock;
+    /* Serializes compaction_run_once: both the maintenance thread and an inline
+     * purge-driven compaction (handle_purge) can call it, and two at once would
+     * clobber the shared scratch log and double-swap db->log. A second caller
+     * skips (trylock) rather than waits. Independent of the other locks. */
+    pthread_mutex_t compaction_lock;
 
     char path_log[AEGIS_PATH_MAX];
     char path_index[AEGIS_PATH_MAX];

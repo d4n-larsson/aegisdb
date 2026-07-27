@@ -96,7 +96,7 @@ static int compaction_copy_live(AegisDB *db, LogFile *newlog, const NewLoc *snap
  * readers and writers proceed concurrently. Only the final drain-of-the-tail,
  * log swap, and hash rebuild hold the write lock, and the tail is bounded by the
  * writes that happened to race compaction rather than the whole live set. */
-int compaction_run_once(AegisDB *db) {
+static int compaction_run_once_locked(AegisDB *db) {
     LOG_DEBUG("compaction: starting log rewrite");
     char newpath[AEGIS_PATH_MAX];
     if (snprintf(newpath, sizeof(newpath), "%s.compaction", db->path_log) >= (int)sizeof(newpath)) {
@@ -262,6 +262,23 @@ int compaction_run_once(AegisDB *db) {
     return 0;
 }
 
+int compaction_run_once(AegisDB *db) {
+    /* Serialize compactions. Two callers exist — the maintenance thread and an
+     * inline purge-driven compaction on an io-thread (handle_purge) — and two
+     * running at once would clobber the shared scratch log and double-swap
+     * db->log, corrupting the hash offsets and losing live records. A second
+     * caller skips rather than waits: the in-progress compaction is already
+     * reclaiming space, and any tombstones it doesn't cover are reclaimed by the
+     * next run, so skipping never loses data. */
+    if (pthread_mutex_trylock(&db->compaction_lock) != 0) {
+        LOG_DEBUG("compaction: already in progress; skipping this request");
+        return -1;
+    }
+    int rv = compaction_run_once_locked(db);
+    pthread_mutex_unlock(&db->compaction_lock);
+    return rv;
+}
+
 struct Compactor {
     AegisDB *db;
     pthread_t thread;
@@ -301,7 +318,13 @@ static void *maint_loop(void *arg) {
             log_flush_pending(&c->db->log)) {
             uint64_t now = db_now_ms();
             if (now - last_fsync >= c->db->config.fsync_interval_ms) {
+                /* Hold log_lock(read) so a concurrent compaction swap (which
+                 * closes+reopens db->log under log_lock write, destroying the
+                 * log mutex and memset-ing the struct) cannot run during the
+                 * fsync. */
+                pthread_rwlock_rdlock(&c->db->log_lock);
                 log_fsync(&c->db->log);
+                pthread_rwlock_unlock(&c->db->log_lock);
                 last_fsync = now;
                 LOG_DEBUG("interval fsync: flushed log to disk");
             }

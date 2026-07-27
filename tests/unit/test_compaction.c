@@ -142,6 +142,41 @@ static void test_compaction_concurrent_with_writes(void) {
     }
 }
 
+/* Regression: compaction_run_once may be invoked concurrently — the maintenance
+ * thread and an inline purge-driven compaction (handle_purge) both call it.
+ * Without serialization two runs clobber the shared scratch log and double-swap
+ * db->log, corrupting the rebuilt offsets and losing live records. Run several
+ * compactors plus a writer at once; the compaction_lock must serialize them so
+ * every acknowledged record survives and the DB stays consistent. (Under TSan
+ * this also exercises the deferred-fsync vs log-swap race on the write path.) */
+static void *compactor(void *arg) {
+    AegisDB *db = arg;
+    for (int i = 0; i < 8; i++) {
+        /* A contended call legitimately skips (trylock) and returns -1; only
+         * data integrity is asserted, not that every attempt did work. */
+        compaction_run_once(db);
+        usleep(150);
+    }
+    return NULL;
+}
+
+static void test_compaction_concurrent_compactions(void) {
+    pthread_t comp[4], wr;
+    TEST_ASSERT_EQUAL_INT(0, pthread_create(&wr, NULL, writer, &g_db));
+    for (int i = 0; i < 4; i++)
+        TEST_ASSERT_EQUAL_INT(0, pthread_create(&comp[i], NULL, compactor, &g_db));
+    for (int i = 0; i < 4; i++) pthread_join(comp[i], NULL);
+    pthread_join(wr, NULL);
+    /* Uncontended final pass folds in the tail; it succeeds. */
+    TEST_ASSERT_EQUAL_INT(0, compaction_run_once(&g_db));
+
+    for (int i = 0; i < NWRITES; i++) {
+        char b[24];
+        snprintf(b, sizeof(b), "concurrent-%d", i);
+        assert_data(&g_db, g_ids[i], b);
+    }
+}
+
 /* Regression (#2): on an ENCRYPTED log the phase-3 tail-drain must step by the
  * real per-frame overhead (V3_FRAME_OVERHEAD=52), not the hardcoded plaintext
  * header (16). With the wrong stride the drain misaligns on the first tail
@@ -218,7 +253,12 @@ static void test_compaction_scheduled_trigger(void) {
     uint64_t after = before;
     for (int i = 0; i < 300 && after >= before; i++) {
         usleep(50000); /* 50ms */
+        /* Read log.size under log_lock: the maintenance thread's compaction swap
+         * writes it under log_lock(write), so an unlocked read here is a data
+         * race (test-only — product readers already hold index_lock/log_lock). */
+        pthread_rwlock_rdlock(&g_db.log_lock);
         after = (uint64_t)g_db.log.size;
+        pthread_rwlock_unlock(&g_db.log_lock);
     }
     compaction_stop(c);
     TEST_ASSERT_TRUE(after < before); /* scheduled compaction reclaimed the dead */
@@ -229,6 +269,7 @@ int main(void) {
     RUN_TEST(test_compaction_preserves_live_drops_deleted);
     RUN_TEST(test_compacted_log_recovers);
     RUN_TEST(test_compaction_concurrent_with_writes);
+    RUN_TEST(test_compaction_concurrent_compactions);
     RUN_TEST(test_compaction_encrypted_concurrent);
     RUN_TEST(test_compaction_gate_threshold);
     RUN_TEST(test_compaction_scheduled_trigger);
