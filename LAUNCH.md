@@ -18,7 +18,7 @@ Python/SaaS memory services. Lead with "own your data," not a feature list.
 - [ ] Grafana dashboard shipped (`docker compose --profile monitoring up` works on a fresh clone).
 - [ ] README landing merged (hero + quickstart + "why self-host").
 - [ ] **Dashboard screenshot** captured and committed to `docs/img/dashboard.png`, and the `<img>` slot in `README.md` uncommented.
-- [ ] `docker run … ghcr.io/d4n-larsson/aegisdb` verified from a clean machine — the quickstart must work first try.
+- [ ] `docker run … ghcr.io/d4n-larsson/aegisdb` verified from a clean machine — the quickstart must work first try. Automated: `make first-contact` walks the whole documented path (docker run → README client commands → `aegisdb-init` → MCP server over stdio → recall hook injects what was saved). CI runs it per-PR against the current commit; `make first-contact FIRST_CONTACT_ARGS='--package pypi'` (or the `published` job in `first-contact.yml`) checks what users get from ghcr + PyPI **right now** — run that one after cutting a release.
 - [ ] Repo **About** description + **Website** (Pages URL) + **Topics** set (see below).
 - [ ] Repo **Social preview** image set to the dashboard screenshot (Settings → Social preview).
 - [ ] Latest CI green on `main`.
