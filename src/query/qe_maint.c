@@ -19,7 +19,8 @@
 #include "qe_internal.h"
 
 static int cmp_u64_asc(const void *a, const void *b) {
-    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    uint64_t x = *(const uint64_t *)a;
+    uint64_t y = *(const uint64_t *)b;
     return AEGIS_CMP3(x, y);
 }
 
@@ -34,22 +35,26 @@ static int cmp_u64_asc(const void *a, const void *b) {
 static uint64_t *collect_ids(AegisDB *db,
                              int (*keep)(const HashEntry *, void *), void *ctx,
                              size_t *out_n, int *out_oom) {
-    if (out_oom)
+    if (out_oom) {
         *out_oom = 0;
+    }
     pthread_rwlock_rdlock(&db->index_lock);
     const HashIndex *h = db->hash;
     uint64_t *ids = NULL;
-    size_t n = 0, cap = 0;
+    size_t n = 0;
+    size_t cap = 0;
     for (size_t i = 0; i < h->cap; i++) {
         const HashEntry *e = &h->buckets[i];
-        if (!e->used || e->deleted || !keep(e, ctx))
+        if (!e->used || e->deleted || !keep(e, ctx)) {
             continue;
+        }
         if (n == cap) {
             size_t nc = cap ? cap * 2 : 64;
             uint64_t *g = realloc(ids, nc * sizeof(uint64_t));
             if (!g) {
-                if (out_oom)
+                if (out_oom) {
                     *out_oom = 1;
+                }
                 break;
             }
             ids = g;
@@ -90,19 +95,23 @@ aegis_status_t qe_export(AegisDB *db, const char *ns, uint64_t after_id,
                          size_t limit, MemoryRecord **out_records,
                          size_t *out_n, int *out_has_more) {
     aegis_status_t st = require_phase(db, 1);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return st;
+    }
     *out_records = NULL;
     *out_n = 0;
-    if (out_has_more)
+    if (out_has_more) {
         *out_has_more = 0;
-    if (limit == 0)
+    }
+    if (limit == 0) {
         limit = 100;
+    }
 
     size_t n = 0;
     uint64_t *ids = snapshot_live_ids(db, after_id, &n);
-    if (n)
+    if (n) {
         qsort(ids, n, sizeof(uint64_t), cmp_u64_asc);
+    }
 
     MemoryRecord *out = malloc(limit * sizeof(MemoryRecord));
     if (!out) {
@@ -117,15 +126,17 @@ aegis_status_t qe_export(AegisDB *db, const char *ns, uint64_t after_id,
             break;
         }
         MemoryRecord r;
-        if (qe_get(db, ids[i], ns, &r) != AEGIS_OK)
-            continue;   /* not this tenant's */
+        if (qe_get(db, ids[i], ns, &r) != AEGIS_OK) {
+            continue; /* not this tenant's */
+        }
         out[got++] = r; /* move ownership */
     }
     free(ids);
     *out_records = out;
     *out_n = got;
-    if (out_has_more)
+    if (out_has_more) {
         *out_has_more = more;
+    }
     return AEGIS_OK;
 }
 
@@ -136,10 +147,12 @@ aegis_status_t qe_export(AegisDB *db, const char *ns, uint64_t after_id,
 aegis_status_t qe_purge_namespace(AegisDB *db, const char *ns, int dry_run,
                                   size_t *out_count) {
     aegis_status_t st = require_phase(db, 1);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return st;
-    if (!ns || !*ns)
+    }
+    if (!ns || !*ns) {
         return AEGIS_ERR_INVALID_REQUEST; /* never purge everything */
+    }
     *out_count = 0;
 
     size_t n = 0;
@@ -158,9 +171,10 @@ aegis_status_t qe_purge_namespace(AegisDB *db, const char *ns, int dry_run,
     }
     free(ids);
     *out_count = count;
-    if (!dry_run)
+    if (!dry_run) {
         atomic_fetch_add_explicit(&db->metrics.memories_purged, count,
                                   memory_order_relaxed);
+    }
     return AEGIS_OK;
 }
 
@@ -182,8 +196,9 @@ static int history_cb(uint64_t offset, const uint8_t *payload, size_t len,
     (void)offset;
     HistCtx *h = ctx;
     MemoryRecord r;
-    if (record_decode(payload, len, &r) != 0)
+    if (record_decode(payload, len, &r) != 0) {
         return 0;
+    }
     if (r.id != h->id) {
         record_free(&r);
         return 0;
@@ -206,8 +221,9 @@ static int history_cb(uint64_t offset, const uint8_t *payload, size_t len,
 aegis_status_t qe_history(AegisDB *db, uint64_t id, const char *ns,
                           MemoryRecord **out_versions, size_t *out_n) {
     aegis_status_t st = require_phase(db, 1);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return st;
+    }
     *out_versions = NULL;
     *out_n = 0;
 
@@ -223,18 +239,21 @@ aegis_status_t qe_history(AegisDB *db, uint64_t id, const char *ns,
     int rc = log_scan(&db->log, 0, end, history_cb, &h, &res);
     pthread_rwlock_unlock(&db->log_lock);
     if (rc != 0 || h.err) {
-        for (size_t i = 0; i < h.n; i++)
+        for (size_t i = 0; i < h.n; i++) {
             record_free(&h.arr[i]);
+        }
         free(h.arr);
         return AEGIS_ERR_INTERNAL;
     }
-    if (h.n == 0)
+    if (h.n == 0) {
         return AEGIS_ERR_NOT_FOUND; /* id never existed */
+    }
     /* All versions of an id share its agent_id, so one namespace check suffices;
      * a cross-tenant id reads as NOT_FOUND (no existence leak). */
     if (ns_denies(ns, &h.arr[h.n - 1])) {
-        for (size_t i = 0; i < h.n; i++)
+        for (size_t i = 0; i < h.n; i++) {
             record_free(&h.arr[i]);
+        }
         free(h.arr);
         return AEGIS_ERR_NOT_FOUND;
     }
@@ -255,16 +274,18 @@ static int as_of_cb(uint64_t offset, const uint8_t *payload, size_t len,
     (void)offset;
     AsOfCtx *a = ctx;
     MemoryRecord r;
-    if (record_decode(payload, len, &r) != 0)
+    if (record_decode(payload, len, &r) != 0) {
         return 0;
+    }
     if (r.id != a->id || r.updated > a->as_of) {
         record_free(&r);
         return 0;
     }
     /* Scan is in append (causal) order, so the last version with updated <= as_of
      * is the one live at that time. */
-    if (a->have)
+    if (a->have) {
         record_free(&a->best);
+    }
     a->best = r;
     a->have = 1;
     return 0;
@@ -273,8 +294,9 @@ static int as_of_cb(uint64_t offset, const uint8_t *payload, size_t len,
 aegis_status_t qe_get_as_of(AegisDB *db, uint64_t id, const char *ns,
                             uint64_t as_of, MemoryRecord *out) {
     aegis_status_t st = require_phase(db, 1);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return st;
+    }
 
     AsOfCtx a = {id, as_of, 0, {0}};
     LogScanResult res;
@@ -286,12 +308,14 @@ aegis_status_t qe_get_as_of(AegisDB *db, uint64_t id, const char *ns,
     int rc = log_scan(&db->log, 0, end, as_of_cb, &a, &res);
     pthread_rwlock_unlock(&db->log_lock);
     if (rc != 0) {
-        if (a.have)
+        if (a.have) {
             record_free(&a.best);
+        }
         return AEGIS_ERR_INTERNAL;
     }
-    if (!a.have)
+    if (!a.have) {
         return AEGIS_ERR_NOT_FOUND; /* did not exist at as_of */
+    }
     /* A tombstone or another tenant's record reads as NOT_FOUND: as of that
      * time, this caller "knew" nothing here. */
     if (a.best.deleted || ns_denies(ns, &a.best)) {
@@ -311,9 +335,11 @@ size_t qe_sweep_expired(AegisDB *db, uint64_t now) {
     uint64_t *ids = collect_ids(db, keep_expired, &now, &n, NULL);
 
     size_t swept = 0;
-    for (size_t i = 0; i < n; i++)
-        if (qe_delete(db, ids[i], NULL) == AEGIS_OK)
+    for (size_t i = 0; i < n; i++) {
+        if (qe_delete(db, ids[i], NULL) == AEGIS_OK) {
             swept++;
+        }
+    }
     free(ids);
     return swept;
 }
@@ -330,35 +356,44 @@ static size_t merge_cluster(AegisDB *db, MemoryRecord *recs, size_t n,
                             const char *ns) {
     /* survivor = latest updated (tie -> greatest id) */
     size_t sv = 0;
-    for (size_t i = 1; i < n; i++)
+    for (size_t i = 1; i < n; i++) {
         if (recs[i].updated > recs[sv].updated ||
-            (recs[i].updated == recs[sv].updated && recs[i].id > recs[sv].id))
+            (recs[i].updated == recs[sv].updated && recs[i].id > recs[sv].id)) {
             sv = i;
+        }
+    }
     uint64_t survivor = recs[sv].id;
 
     /* union of all tags + max importance/confidence across the cluster */
     const char **utags = NULL;
-    size_t un = 0, ucap = 0;
-    float imp = 0, conf = 0;
+    size_t un = 0;
+    size_t ucap = 0;
+    float imp = 0;
+    float conf = 0;
     for (size_t i = 0; i < n; i++) {
-        if (recs[i].importance > imp)
+        if (recs[i].importance > imp) {
             imp = recs[i].importance;
-        if (recs[i].confidence > conf)
+        }
+        if (recs[i].confidence > conf) {
             conf = recs[i].confidence;
+        }
         for (size_t t = 0; t < recs[i].tag_count; t++) {
             int seen = 0;
-            for (size_t u = 0; u < un; u++)
+            for (size_t u = 0; u < un; u++) {
                 if (strcmp(utags[u], recs[i].tags[t]) == 0) {
                     seen = 1;
                     break;
                 }
-            if (seen)
+            }
+            if (seen) {
                 continue;
+            }
             if (un == ucap) {
                 size_t nc = ucap ? ucap * 2 : 8;
                 const char **g = realloc(utags, nc * sizeof(*g));
-                if (!g)
+                if (!g) {
                     break; /* best-effort: keep the tags gathered so far */
+                }
                 utags = g;
                 ucap = nc;
             }
@@ -368,11 +403,13 @@ static size_t merge_cluster(AegisDB *db, MemoryRecord *recs, size_t n,
 
     /* migrate the losers' relationships onto the survivor */
     for (size_t i = 0; i < n; i++) {
-        if (recs[i].id == survivor)
+        if (recs[i].id == survivor) {
             continue;
-        for (size_t r = 0; r < recs[i].rel_count; r++)
+        }
+        for (size_t r = 0; r < recs[i].rel_count; r++) {
             qe_relate(db, survivor, recs[i].relationships[r].to_id,
                       recs[i].relationships[r].kind, ns);
+        }
     }
 
     /* fold the merged tags + fields into the survivor */
@@ -386,8 +423,9 @@ static size_t merge_cluster(AegisDB *db, MemoryRecord *recs, size_t n,
     patch.has_confidence = 1;
     patch.confidence = conf;
     MemoryRecord upd;
-    if (qe_update(db, survivor, &patch, ns, &upd) == AEGIS_OK)
+    if (qe_update(db, survivor, &patch, ns, &upd) == AEGIS_OK) {
         record_free(&upd);
+    }
     free(utags);
 
     /* tombstone the losers, recording provenance first: the survivor `supersedes`
@@ -397,11 +435,13 @@ static size_t merge_cluster(AegisDB *db, MemoryRecord *recs, size_t n,
      * Best-effort: a failed relate (e.g. rel cap hit) doesn't block the merge. */
     size_t merged = 0;
     for (size_t i = 0; i < n; i++) {
-        if (recs[i].id == survivor)
+        if (recs[i].id == survivor) {
             continue;
+        }
         qe_relate(db, survivor, recs[i].id, "supersedes", ns);
-        if (qe_delete(db, recs[i].id, ns) == AEGIS_OK)
+        if (qe_delete(db, recs[i].id, ns) == AEGIS_OK) {
             merged++;
+        }
     }
     return merged;
 }
@@ -409,8 +449,9 @@ static size_t merge_cluster(AegisDB *db, MemoryRecord *recs, size_t n,
 aegis_status_t qe_consolidate(AegisDB *db, const char *ns, float min_similarity,
                               size_t *out_clusters, size_t *out_merged) {
     aegis_status_t st = require_phase(db, 3); /* semantic search */
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return st;
+    }
     *out_clusters = 0;
     *out_merged = 0;
 
@@ -428,8 +469,9 @@ aegis_status_t qe_consolidate(AegisDB *db, const char *ns, float min_similarity,
          * it (it was a loser) — qe_get returns NOT_FOUND and we skip it, which
          * is how cluster members self-exclude without an explicit visited set. */
         MemoryRecord r;
-        if (qe_get(db, ids[i], ns, &r) != AEGIS_OK)
+        if (qe_get(db, ids[i], ns, &r) != AEGIS_OK) {
             continue;
+        }
         if (r.embedding_dim == 0) {
             record_free(&r);
             continue;
@@ -451,15 +493,17 @@ aegis_status_t qe_consolidate(AegisDB *db, const char *ns, float min_similarity,
         size_t rn = 0;
         aegis_status_t rc = qe_search(db, &p, &recs, &rn);
         record_free(&r); /* after qe_search — p.embedding aliases r.embedding */
-        if (rc != AEGIS_OK)
+        if (rc != AEGIS_OK) {
             continue;
+        }
 
         if (rn >= 2) { /* the record plus at least one duplicate */
             *out_merged += merge_cluster(db, recs, rn, ns);
             (*out_clusters)++;
         }
-        for (size_t j = 0; j < rn; j++)
+        for (size_t j = 0; j < rn; j++) {
             record_free(&recs[j]);
+        }
         free(recs);
     }
     free(ids);
@@ -480,12 +524,14 @@ aegis_status_t qe_forget(AegisDB *db, const char *ns, MemoryType type,
                          int dry_run, size_t max_forget, size_t *out_scanned,
                          size_t *out_forgotten) {
     aegis_status_t st = require_phase(db, 1);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return st;
+    }
     *out_scanned = 0;
     *out_forgotten = 0;
-    if (half_life_ms < MIN_HALF_LIFE_MS)
+    if (half_life_ms < MIN_HALF_LIFE_MS) {
         half_life_ms = MIN_HALF_LIFE_MS;
+    }
 
     /* snapshot the live ids of the target type (hash scan; no record reads) */
     size_t n = 0;
@@ -498,21 +544,24 @@ aegis_status_t qe_forget(AegisDB *db, const char *ns, MemoryType type,
 
     uint64_t now = db_now_ms();
     for (size_t i = 0; i < n; i++) {
-        if (max_forget && *out_forgotten >= max_forget)
+        if (max_forget && *out_forgotten >= max_forget) {
             break; /* safety cap */
+        }
         MemoryRecord r;
         /* qe_get enforces the namespace (NOT_FOUND for another tenant) and skips
          * anything a prior iteration already tombstoned. */
-        if (qe_get(db, ids[i], ns, &r) != AEGIS_OK)
+        if (qe_get(db, ids[i], ns, &r) != AEGIS_OK) {
             continue;
+        }
         (*out_scanned)++;
         double age = now > r.updated ? (double)(now - r.updated) : 0.0;
         /* 0.5^(age/half_life) == exp(-ln2 * age/half_life) */
         double recency = exp(-0.6931471805599453 * age / (double)half_life_ms);
         double retention = (double)r.importance * recency;
         record_free(&r);
-        if (retention >= (double)min_retention)
+        if (retention >= (double)min_retention) {
             continue; /* still worth keeping */
+        }
         if (dry_run) {
             (*out_forgotten)++; /* would forget */
         } else if (qe_delete(db, ids[i], ns) == AEGIS_OK) {
@@ -520,8 +569,9 @@ aegis_status_t qe_forget(AegisDB *db, const char *ns, MemoryType type,
         }
     }
     free(ids);
-    if (!dry_run)
+    if (!dry_run) {
         atomic_fetch_add_explicit(&db->metrics.memories_forgotten,
                                   *out_forgotten, memory_order_relaxed);
+    }
     return AEGIS_OK;
 }

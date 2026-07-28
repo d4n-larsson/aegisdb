@@ -239,6 +239,25 @@ format:
 format-check:
 	$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_SRC)
 
+# ---------------------------------------------------------------------------
+# Static-analysis lint: clang-tidy (.clang-tidy). Enforced in CI via tidy-check
+# (the config sets WarningsAsErrors). No compile_commands.json needed — the core
+# sources build with uniform flags, passed after `--`.
+#   make tidy         # apply the auto-fixable checks in place
+#   make tidy-check   # verify only (what CI runs)
+# ---------------------------------------------------------------------------
+CLANG_TIDY    ?= clang-tidy
+TIDY_SRC      := $(shell find src -name '*.c')
+TIDY_CC_FLAGS := $(CSTD) -Iinclude -Ithird_party/cjson -D_GNU_SOURCE \
+                 -DAEGIS_VERSION_STRING='"$(VERSION)"'
+
+.PHONY: tidy tidy-check
+tidy:
+	$(CLANG_TIDY) --fix $(TIDY_SRC) -- $(TIDY_CC_FLAGS)
+
+tidy-check:
+	$(CLANG_TIDY) $(TIDY_SRC) -- $(TIDY_CC_FLAGS)
+
 clean:
 	rm -rf $(BUILD)
 

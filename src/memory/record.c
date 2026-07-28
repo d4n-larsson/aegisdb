@@ -16,51 +16,60 @@
 
 void record_init(MemoryRecord *r) {
     memset(r, 0, sizeof(*r));
-    r->importance = 0.0f;
-    r->confidence = 1.0f;
+    r->importance = 0.0F;
+    r->confidence = 1.0F;
 }
 
 void record_free(MemoryRecord *r) {
-    if (!r)
+    if (!r) {
         return;
+    }
     free(r->agent_id);
-    for (size_t i = 0; i < r->tag_count; i++)
+    for (size_t i = 0; i < r->tag_count; i++) {
         free(r->tags[i]);
+    }
     free(r->tags);
     free(r->embedding);
-    for (size_t i = 0; i < r->rel_count; i++)
+    for (size_t i = 0; i < r->rel_count; i++) {
         free(r->relationships[i].kind);
+    }
     free(r->relationships);
     free(r->data);
     memset(r, 0, sizeof(*r));
 }
 
 static char *dup_str(const char *s) {
-    if (!s)
+    if (!s) {
         return NULL;
+    }
     size_t n = strlen(s) + 1;
     char *p = malloc(n);
-    if (p)
+    if (p) {
         memcpy(p, s, n);
+    }
     return p;
 }
 
 int record_set_tags(MemoryRecord *r, const char *const *tags, size_t n) {
-    for (size_t i = 0; i < r->tag_count; i++)
+    for (size_t i = 0; i < r->tag_count; i++) {
         free(r->tags[i]);
+    }
     free(r->tags);
     r->tags = NULL;
     r->tag_count = 0;
-    if (n == 0)
+    if (n == 0) {
         return 0;
+    }
     r->tags = calloc(n, sizeof(char *));
-    if (!r->tags)
+    if (!r->tags) {
         return -1;
+    }
     for (size_t i = 0; i < n; i++) {
         r->tags[i] = dup_str(tags[i]);
         if (!r->tags[i]) {
-            for (size_t j = 0; j < i; j++)
+            for (size_t j = 0; j < i; j++) {
                 free(r->tags[j]);
+            }
             free(r->tags);
             r->tags = NULL;
             return -1;
@@ -74,23 +83,26 @@ int record_add_relationship(MemoryRecord *r, uint64_t from_id, uint64_t to_id,
                             const char *kind) {
     Relationship *na =
         realloc(r->relationships, (r->rel_count + 1) * sizeof(Relationship));
-    if (!na)
+    if (!na) {
         return -1;
+    }
     r->relationships = na;
     Relationship *e = &r->relationships[r->rel_count];
     e->from_id = from_id;
     e->to_id = to_id;
     e->kind = kind ? dup_str(kind) : NULL;
-    if (kind && !e->kind)
+    if (kind && !e->kind) {
         return -1;
+    }
     r->rel_count++;
     return 0;
 }
 
 MemoryRecord *record_clone(const MemoryRecord *src) {
     MemoryRecord *r = malloc(sizeof(*r));
-    if (!r)
+    if (!r) {
         return NULL;
+    }
     record_init(r);
     r->id = src->id;
     r->type = src->type;
@@ -103,23 +115,27 @@ MemoryRecord *record_clone(const MemoryRecord *src) {
 
     if (src->agent_id) {
         r->agent_id = dup_str(src->agent_id);
-        if (!r->agent_id)
+        if (!r->agent_id) {
             goto fail;
+        }
     }
     if (src->tag_count &&
-        record_set_tags(r, (const char *const *)src->tags, src->tag_count))
+        record_set_tags(r, (const char *const *)src->tags, src->tag_count)) {
         goto fail;
+    }
     if (src->embedding_dim && src->vec_count) {
         /* Overflow-safe: bound vec_count*dim and the *sizeof(float) allocation
          * before multiplying (division form, like record_decode). Records reach
          * clone already validated, so this is defense in depth — but it keeps a
          * pathological in-memory record from turning into a heap overflow. */
-        if (src->vec_count > (SIZE_MAX / sizeof(float)) / src->embedding_dim)
+        if (src->vec_count > (SIZE_MAX / sizeof(float)) / src->embedding_dim) {
             goto fail;
+        }
         size_t n = src->vec_count * src->embedding_dim;
         r->embedding = malloc(n * sizeof(float));
-        if (!r->embedding)
+        if (!r->embedding) {
             goto fail;
+        }
         memcpy(r->embedding, src->embedding, n * sizeof(float));
         r->embedding_dim = src->embedding_dim;
         r->vec_count = src->vec_count;
@@ -127,13 +143,15 @@ MemoryRecord *record_clone(const MemoryRecord *src) {
     for (size_t i = 0; i < src->rel_count; i++) {
         if (record_add_relationship(r, src->relationships[i].from_id,
                                     src->relationships[i].to_id,
-                                    src->relationships[i].kind))
+                                    src->relationships[i].kind)) {
             goto fail;
+        }
     }
     if (src->data_len) {
         r->data = malloc(src->data_len);
-        if (!r->data)
+        if (!r->data) {
             goto fail;
+        }
         memcpy(r->data, src->data, src->data_len);
         r->data_len = src->data_len;
     }
@@ -154,14 +172,16 @@ typedef struct {
 } Buf;
 
 static void buf_reserve(Buf *b, size_t extra) {
-    if (b->err)
+    if (b->err) {
         return;
+    }
     if (b->len + extra < b->len) {
         b->err = 1;
         return;
     } /* size_t overflow */
-    if (b->len + extra <= b->cap)
+    if (b->len + extra <= b->cap) {
         return;
+    }
     size_t cap = b->cap ? b->cap * 2 : 128;
     while (cap < b->len + extra) {
         size_t next = cap * 2;
@@ -182,8 +202,9 @@ static void buf_reserve(Buf *b, size_t extra) {
 
 static void put_bytes(Buf *b, const void *s, size_t n) {
     buf_reserve(b, n);
-    if (b->err)
+    if (b->err) {
         return;
+    }
     memcpy(b->p + b->len, s, n);
     b->len += n;
 }
@@ -238,8 +259,9 @@ int record_encode(const MemoryRecord *r, uint8_t **out, size_t *out_len) {
         return -1;
     }
     put_u16(&b, (uint16_t)r->tag_count);
-    for (size_t i = 0; i < r->tag_count; i++)
+    for (size_t i = 0; i < r->tag_count; i++) {
         put_lenstr(&b, r->tags[i], strlen(r->tags[i]));
+    }
 
     /* v2: vec_count, dim, then vec_count*dim floats (contiguous vectors). */
     if (r->vec_count > UINT32_MAX || r->embedding_dim > UINT32_MAX) {
@@ -248,8 +270,9 @@ int record_encode(const MemoryRecord *r, uint8_t **out, size_t *out_len) {
     }
     put_u32(&b, (uint32_t)r->vec_count);
     put_u32(&b, (uint32_t)r->embedding_dim);
-    for (size_t i = 0; i < r->vec_count * r->embedding_dim; i++)
+    for (size_t i = 0; i < r->vec_count * r->embedding_dim; i++) {
         put_f32(&b, r->embedding[i]);
+    }
 
     /* The wire count is u16; truncation here would produce an undecodable frame
      * (durable data loss). qe_relate caps rel_count far below this, so tripping
@@ -293,8 +316,9 @@ static int cur_take(Cur *c, void *dst, size_t n) {
         c->err = 1;
         return -1;
     }
-    if (dst)
+    if (dst) {
         memcpy(dst, c->p + c->off, n);
+    }
     c->off += n;
     return 0;
 }
@@ -328,11 +352,13 @@ static float get_f32(Cur *c) {
  * allocation failure or truncation sets c->err and returns NULL. */
 static char *get_lenstr(Cur *c, int *was_null) {
     uint32_t n = get_u32(c);
-    if (was_null)
+    if (was_null) {
         *was_null = 0;
+    }
     if (n == NULL_LEN) {
-        if (was_null)
+        if (was_null) {
             *was_null = 1;
+        }
         return NULL;
     }
     /* subtraction-form (off <= len invariant): cannot overflow, unlike off + n */
@@ -356,12 +382,14 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
     record_init(out);
 
     uint8_t ver = get_u8(&c);
-    if (ver != 1 && ver != 2)
+    if (ver != 1 && ver != 2) {
         goto fail; /* read v1 (single vec) and v2 */
+    }
     out->id = get_u64(&c);
     out->type = (MemoryType)get_u8(&c);
-    if (out->type > MEM_SEMANTIC)
+    if (out->type > MEM_SEMANTIC) {
         goto fail; /* reject a corrupt/out-of-range enum */
+    }
     out->created = get_u64(&c);
     out->updated = get_u64(&c);
     out->importance = get_f32(&c);
@@ -370,31 +398,37 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
      * malicious replication peer could carry a non-finite / out-of-range weight
      * that would poison ranking math (NaN comparisons are all false). Clamp back
      * to the defaults so decode is self-defending. */
-    if (!isfinite(out->importance) || out->importance < 0.0f ||
-        out->importance > 1.0f)
-        out->importance = 0.0f;
-    if (!isfinite(out->confidence) || out->confidence < 0.0f ||
-        out->confidence > 1.0f)
-        out->confidence = 1.0f;
+    if (!isfinite(out->importance) || out->importance < 0.0F ||
+        out->importance > 1.0F) {
+        out->importance = 0.0F;
+    }
+    if (!isfinite(out->confidence) || out->confidence < 0.0F ||
+        out->confidence > 1.0F) {
+        out->confidence = 1.0F;
+    }
     out->deleted = get_u8(&c);
     out->expires_at = get_u64(&c);
 
     int wasnull;
     out->agent_id = get_lenstr(&c, &wasnull);
-    if (c.err)
+    if (c.err) {
         goto fail;
+    }
 
     uint16_t tc = get_u16(&c);
-    if (c.err)
+    if (c.err) {
         goto fail;
+    }
     if (tc) {
         out->tags = calloc(tc, sizeof(char *));
-        if (!out->tags)
+        if (!out->tags) {
             goto fail;
+        }
         for (uint16_t i = 0; i < tc; i++) {
             out->tags[i] = get_lenstr(&c, NULL);
-            if (c.err || !out->tags[i])
+            if (c.err || !out->tags[i]) {
                 goto fail;
+            }
             out->tag_count = (size_t)i + 1;
         }
     }
@@ -403,10 +437,12 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
      * [vec_count*dim floats]. */
     uint32_t vec_count = (ver >= 2) ? get_u32(&c) : 1;
     uint32_t dim = get_u32(&c);
-    if (c.err)
+    if (c.err) {
         goto fail;
-    if (ver == 1 && dim == 0)
+    }
+    if (ver == 1 && dim == 0) {
         vec_count = 0; /* v1 with no embedding */
+    }
     if (dim && vec_count) {
         /* `vec_count`/`dim` are attacker-controlled on the decode path (a
          * replicated frame, or a tampered/corrupt log). Bound the float count
@@ -415,24 +451,28 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
          * defeating the check and undersizing the malloc -> heap overflow.
          * Division-form checks cannot overflow (c.off <= c.len invariant). */
         size_t avail_floats = (c.len - c.off) / 4;
-        if (vec_count > avail_floats / dim)
-            goto fail;                          /* total > payload */
+        if (vec_count > avail_floats / dim) {
+            goto fail; /* total > payload */
+        }
         size_t total = (size_t)vec_count * dim; /* <= avail_floats now */
         out->embedding = malloc(total * sizeof(float));
-        if (!out->embedding)
+        if (!out->embedding) {
             goto fail;
+        }
         for (size_t i = 0; i < total; i++) {
             out->embedding[i] = get_f32(&c);
-            if (c.err)
+            if (c.err) {
                 goto fail; /* every read is in-bounds; guard anyway */
+            }
         }
         out->embedding_dim = dim;
         out->vec_count = vec_count;
     }
 
     uint16_t rc = get_u16(&c);
-    if (c.err)
+    if (c.err) {
         goto fail;
+    }
     for (uint16_t i = 0; i < rc; i++) {
         uint64_t from = get_u64(&c);
         uint64_t to = get_u64(&c);
@@ -443,24 +483,28 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
         }
         int rv = record_add_relationship(out, from, to, kind);
         free(kind);
-        if (rv)
+        if (rv) {
             goto fail;
+        }
     }
 
     uint32_t dl = get_u32(&c);
-    if (c.err || dl > c.len - c.off)
+    if (c.err || dl > c.len - c.off) {
         goto fail; /* subtraction-form: no overflow */
+    }
     if (dl) {
         out->data = malloc(dl);
-        if (!out->data)
+        if (!out->data) {
             goto fail;
+        }
         memcpy(out->data, c.p + c.off, dl);
         c.off += dl;
     }
     out->data_len = dl;
 
-    if (c.err)
+    if (c.err) {
         goto fail;
+    }
     return 0;
 fail:
     record_free(out);

@@ -39,13 +39,15 @@
  * (a build-time-only env read — test seam and ops escape hatch); then the
  * built-in default. */
 static size_t resolve_shard_target(size_t configured) {
-    if (configured > 0)
+    if (configured > 0) {
         return configured;
+    }
     const char *e = getenv("AEGIS_SHARD_TARGET");
     if (e) {
         long v = strtol(e, NULL, 10);
-        if (v > 0)
+        if (v > 0) {
             return (size_t)v;
+        }
     }
     return SHARD_TARGET;
 }
@@ -56,12 +58,14 @@ static size_t resolve_shard_target(size_t configured) {
 static size_t pick_nshards(size_t n, size_t configured_target) {
     size_t by_size =
         n / resolve_shard_target(configured_target); /* 0 for n < target */
-    if (by_size < 2)
+    if (by_size < 2) {
         return 1; /* single graph for small indexes */
+    }
     long cpus = sysconf(_SC_NPROCESSORS_ONLN);
     size_t cap = SHARD_MAX;
-    if (cpus > 0 && (size_t)cpus < cap)
+    if (cpus > 0 && (size_t)cpus < cap) {
         cap = (size_t)cpus;
+    }
     return by_size < cap ? by_size : cap;
 }
 
@@ -165,8 +169,9 @@ static void deltas_free(SemDelta *d, size_t n); /* defined with the build API */
 static size_t map_probe(const DenseSlot *map, size_t mcap, uint64_t id) {
     size_t mask = mcap - 1;
     size_t i = (size_t)mix64(id) & mask;
-    while (map[i].used && map[i].id != id)
+    while (map[i].used && map[i].id != id) {
         i = (i + 1) & mask;
+    }
     return i;
 }
 
@@ -174,13 +179,15 @@ static size_t map_probe(const DenseSlot *map, size_t mcap, uint64_t id) {
  * source of truth, so this also resolves any prior probe-chain layout). */
 static int map_grow(SemanticIndex *s, size_t newcap) {
     DenseSlot *nm = calloc(newcap, sizeof(DenseSlot));
-    if (!nm)
+    if (!nm) {
         return -1;
+    }
     size_t mask = newcap - 1;
     for (size_t i = 0; i < s->n; i++) {
         size_t j = (size_t)mix64(s->e[i].id) & mask;
-        while (nm[j].used)
+        while (nm[j].used) {
             j = (j + 1) & mask;
+        }
         nm[j].used = 1;
         nm[j].id = s->e[i].id;
         nm[j].idx = i;
@@ -202,8 +209,9 @@ static void map_delete_at(SemanticIndex *s, size_t i) {
         size_t k;
         do {
             j = (j + 1) & mask;
-            if (!m[j].used)
+            if (!m[j].used) {
                 return;
+            }
             k = (size_t)mix64(m[j].id) & mask; /* home slot of m[j] */
         } while (i <= j ? (i < k && k <= j) : (i < k || k <= j));
         m[i] = m[j]; /* moves id+idx together; used stays 1 */
@@ -213,22 +221,27 @@ static void map_delete_at(SemanticIndex *s, size_t i) {
 
 /* ----- record -> vec_count map (rc) ------------------------------------- */
 static size_t rc_probe(const RCount *m, size_t cap, uint64_t rec) {
-    size_t mask = cap - 1, i = (size_t)mix64(rec) & mask;
-    while (m[i].used && m[i].rec != rec)
+    size_t mask = cap - 1;
+    size_t i = (size_t)mix64(rec) & mask;
+    while (m[i].used && m[i].rec != rec) {
         i = (i + 1) & mask;
+    }
     return i;
 }
 static int rc_grow(SemanticIndex *s, size_t newcap) {
     RCount *nm = calloc(newcap, sizeof(RCount));
-    if (!nm)
+    if (!nm) {
         return -1;
+    }
     size_t mask = newcap - 1;
     for (size_t i = 0; i < s->rccap; i++) {
-        if (!s->rc[i].used)
+        if (!s->rc[i].used) {
             continue;
+        }
         size_t j = (size_t)mix64(s->rc[i].rec) & mask;
-        while (nm[j].used)
+        while (nm[j].used) {
             j = (j + 1) & mask;
+        }
         nm[j] = s->rc[i];
     }
     free(s->rc);
@@ -237,19 +250,22 @@ static int rc_grow(SemanticIndex *s, size_t newcap) {
     return 0;
 }
 static uint32_t rc_get(const SemanticIndex *s, uint64_t rec) {
-    if (s->rccap == 0)
+    if (s->rccap == 0) {
         return 0;
+    }
     size_t i = rc_probe(s->rc, s->rccap, rec);
     return s->rc[i].used ? s->rc[i].count : 0;
 }
 static int rc_set(SemanticIndex *s, uint64_t rec, uint32_t count) {
-    if (s->rccap == 0 && rc_grow(s, 64) != 0)
+    if (s->rccap == 0 && rc_grow(s, 64) != 0) {
         return -1;
+    }
     size_t i = rc_probe(s->rc, s->rccap, rec);
     if (!s->rc[i].used) {
         if ((s->rcn + 1) * 10 > s->rccap * 7) {
-            if (rc_grow(s, s->rccap * 2) != 0)
+            if (rc_grow(s, s->rccap * 2) != 0) {
                 return -1;
+            }
             i = rc_probe(s->rc, s->rccap, rec);
         }
         s->rc[i].used = 1;
@@ -260,18 +276,21 @@ static int rc_set(SemanticIndex *s, uint64_t rec, uint32_t count) {
     return 0;
 }
 static void rc_del(SemanticIndex *s, uint64_t rec) {
-    if (s->rccap == 0)
+    if (s->rccap == 0) {
         return;
+    }
     size_t mask = s->rccap - 1;
     size_t i = rc_probe(s->rc, s->rccap, rec);
-    if (!s->rc[i].used)
+    if (!s->rc[i].used) {
         return;
+    }
     s->rc[i].used = 0;
     s->rcn--;
     for (size_t j = (i + 1) & mask; s->rc[j].used; j = (j + 1) & mask) {
         size_t home = (size_t)mix64(s->rc[j].rec) & mask;
-        if (i <= j ? (i < home && home <= j) : (i < home || home <= j))
+        if (i <= j ? (i < home && home <= j) : (i < home || home <= j)) {
             continue;
+        }
         s->rc[i] = s->rc[j];
         s->rc[j].used = 0;
         i = j;
@@ -282,8 +301,9 @@ SemanticIndex *semantic_index_create(size_t dim, size_t ann_threshold,
                                      size_t ef_search, int quantize,
                                      size_t shard_target) {
     SemanticIndex *s = calloc(1, sizeof(*s));
-    if (!s)
+    if (!s) {
         return NULL;
+    }
     s->dim = dim;
     s->ann_threshold = ann_threshold ? ann_threshold : DEFAULT_ANN_THRESHOLD;
     s->ef_search = ef_search;
@@ -300,21 +320,24 @@ static int graph_present(const SemanticIndex *s) { return s->nshards > 0; }
 /* Total live vectors across all shards. */
 static size_t graph_count(const SemanticIndex *s) {
     size_t total = 0;
-    for (size_t i = 0; i < s->nshards; i++)
+    for (size_t i = 0; i < s->nshards; i++) {
         total += hnsw_count(s->shards[i]);
+    }
     return total;
 }
 
 /* Free an array of `n` shard graphs and the array itself. */
 static void shards_free(Hnsw **shards, size_t n) {
-    for (size_t i = 0; i < n; i++)
+    for (size_t i = 0; i < n; i++) {
         hnsw_free(shards[i]);
+    }
     free(shards);
 }
 
 size_t semantic_index_count(const SemanticIndex *s) {
-    if (!s)
+    if (!s) {
         return 0;
+    }
     /* Above the threshold the graph is authoritative; the dense array is freed. */
     return graph_present(s) ? graph_count(s) : s->n;
 }
@@ -322,8 +345,9 @@ size_t semantic_index_count(const SemanticIndex *s) {
 /* Free the dense array + id-map, keeping the HNSW graph. Used once the graph
  * becomes authoritative so each vector is stored once (in the graph). */
 static void drop_dense(SemanticIndex *s) {
-    for (size_t i = 0; i < s->n; i++)
+    for (size_t i = 0; i < s->n; i++) {
         free(s->e[i].vec);
+    }
     free(s->e);
     s->e = NULL;
     s->n = s->cap = 0;
@@ -333,18 +357,21 @@ static void drop_dense(SemanticIndex *s) {
 }
 
 void semantic_index_free(SemanticIndex *s) {
-    if (!s)
+    if (!s) {
         return;
+    }
     semantic_index_clear(s);
     free(s);
 }
 
 /* Reset to empty, preserving dim/ann_threshold/ef_search. */
 void semantic_index_clear(SemanticIndex *s) {
-    if (!s)
+    if (!s) {
         return;
-    for (size_t i = 0; i < s->n; i++)
+    }
+    for (size_t i = 0; i < s->n; i++) {
         free(s->e[i].vec);
+    }
     free(s->e);
     s->e = NULL;
     s->n = s->cap = 0;
@@ -372,14 +399,16 @@ void semantic_index_clear(SemanticIndex *s) {
  * the server uses the deferred off-lock path below; this stays for
  * single-threaded contexts and tests. Returns 0/-1. */
 int semantic_index_build_now(SemanticIndex *s) {
-    if (!s || graph_present(s))
+    if (!s || graph_present(s)) {
         return -1;
+    }
     HnswParams p = {.ef_search = s->ef_search,
                     .seed = HNSW_BUILD_SEED,
                     .quantize = s->quantize};
     Hnsw *h = hnsw_create(s->dim, &p);
-    if (!h)
+    if (!h) {
         return -1;
+    }
     for (size_t i = 0; i < s->n; i++) {
         if (hnsw_add(h, s->e[i].id, s->e[i].vec, s->dim) != 0) {
             hnsw_free(h);
@@ -408,8 +437,9 @@ int semantic_index_build_now(SemanticIndex *s) {
 
 /* Free a delta array (and the vector copies it owns). */
 static void deltas_free(SemDelta *d, size_t n) {
-    for (size_t i = 0; i < n; i++)
+    for (size_t i = 0; i < n; i++) {
         free(d[i].vec);
+    }
     free(d);
 }
 
@@ -418,11 +448,13 @@ int semantic_index_needs_build(const SemanticIndex *s) {
 }
 
 SemBuildJob *semantic_index_build_begin(SemanticIndex *s) {
-    if (!semantic_index_needs_build(s))
+    if (!semantic_index_needs_build(s)) {
         return NULL;
+    }
     SemBuildJob *j = calloc(1, sizeof(*j));
-    if (!j)
+    if (!j) {
         return NULL;
+    }
     j->dim = s->dim;
     j->n = s->n;
     j->nshards =
@@ -439,7 +471,7 @@ SemBuildJob *semantic_index_build_begin(SemanticIndex *s) {
     }
     for (size_t i = 0; i < s->n; i++) {
         j->synids[i] = s->e[i].id;
-        memcpy(j->vecs + i * s->dim, s->e[i].vec, s->dim * sizeof(float));
+        memcpy(j->vecs + (i * s->dim), s->e[i].vec, s->dim * sizeof(float));
     }
     s->building = 1;
     s->build_failed = 0;
@@ -467,9 +499,10 @@ static void *build_shard_worker(void *arg) {
         return NULL;
     }
     for (size_t i = 0; i < j->n; i++) {
-        if (shard_index(j->synids[i], j->nshards) != w->shard)
+        if (shard_index(j->synids[i], j->nshards) != w->shard) {
             continue;
-        if (hnsw_add(h, j->synids[i], j->vecs + i * j->dim, j->dim) != 0) {
+        }
+        if (hnsw_add(h, j->synids[i], j->vecs + (i * j->dim), j->dim) != 0) {
             hnsw_free(h);
             w->out = NULL;
             return NULL;
@@ -480,8 +513,9 @@ static void *build_shard_worker(void *arg) {
 }
 
 int semantic_index_build_run(SemBuildJob *job) {
-    if (!job)
+    if (!job) {
         return -1;
+    }
     size_t P = job->nshards ? job->nshards : 1;
     Hnsw **shards = calloc(P, sizeof(Hnsw *));
     struct shard_work *work = calloc(P, sizeof(*work));
@@ -502,21 +536,25 @@ int semantic_index_build_run(SemBuildJob *job) {
     if (P > 1) {
         for (size_t i = 0; i < P; i++) {
             if (pthread_create(&tids[i], NULL, build_shard_worker, &work[i]) !=
-                0)
+                0) {
                 break;
+            }
             started++;
         }
     }
-    for (size_t i = started; i < P; i++)
+    for (size_t i = started; i < P; i++) {
         build_shard_worker(&work[i]);
-    for (size_t i = 0; i < started; i++)
+    }
+    for (size_t i = 0; i < started; i++) {
         pthread_join(tids[i], NULL);
+    }
 
     int ok = 1;
     for (size_t i = 0; i < P; i++) {
         shards[i] = work[i].out;
-        if (!shards[i])
+        if (!shards[i]) {
             ok = 0;
+        }
     }
     free(work);
     free(tids);
@@ -549,8 +587,9 @@ int semantic_index_build_apply(SemBuildJob *job) {
         const SemDelta *d = &job->pending[i];
         Hnsw *g = job->shards[shard_index(d->synid, job->nshards)];
         if (d->vec) {
-            if (hnsw_add(g, d->synid, d->vec, job->dim) != 0)
+            if (hnsw_add(g, d->synid, d->vec, job->dim) != 0) {
                 rc = -1;
+            }
         } else {
             hnsw_remove(g, d->synid);
         }
@@ -563,8 +602,9 @@ int semantic_index_build_apply(SemBuildJob *job) {
 
 /* Free a job and everything it owns. */
 static void build_job_free(SemBuildJob *job) {
-    if (!job)
+    if (!job) {
         return;
+    }
     shards_free(job->shards, job->nshards);
     deltas_free(job->pending, job->npending);
     free(job->synids);
@@ -611,15 +651,17 @@ int semantic_index_build_commit(SemanticIndex *s, SemBuildJob *job) {
  * place, -1 on allocation failure. */
 static int dense_put(SemanticIndex *s, uint64_t id, const float *vec,
                      size_t dim) {
-    if (s->mcap == 0 && map_grow(s, MAP_INITIAL_CAP) != 0)
+    if (s->mcap == 0 && map_grow(s, MAP_INITIAL_CAP) != 0) {
         return -1;
+    }
 
     size_t j = map_probe(s->map, s->mcap, id);
     if (s->map[j].used) {
         SemEntry *e = &s->e[s->map[j].idx];
         float *nv = realloc(e->vec, dim * sizeof(float));
-        if (!nv)
+        if (!nv) {
             return -1;
+        }
         memcpy(nv, vec, dim * sizeof(float));
         e->vec = nv;
         e->norm = l2norm(vec, dim);
@@ -628,8 +670,9 @@ static int dense_put(SemanticIndex *s, uint64_t id, const float *vec,
 
     /* New id. Copy the vector first so an allocation failure changes nothing. */
     float *nv = malloc(dim * sizeof(float));
-    if (!nv)
+    if (!nv) {
         return -1;
+    }
     memcpy(nv, vec, dim * sizeof(float));
 
     if (s->n == s->cap) {
@@ -664,11 +707,13 @@ static int dense_put(SemanticIndex *s, uint64_t id, const float *vec,
 
 /* Remove one synthetic-id vector from the dense array (caller ensures no HNSW). */
 static void dense_remove(SemanticIndex *s, uint64_t synid) {
-    if (s->mcap == 0)
+    if (s->mcap == 0) {
         return;
+    }
     size_t j = map_probe(s->map, s->mcap, synid);
-    if (!s->map[j].used)
+    if (!s->map[j].used) {
         return;
+    }
     size_t idx = s->map[j].idx;
     map_delete_at(s, j);
 
@@ -719,10 +764,12 @@ static int vec_add(SemanticIndex *s, uint64_t synid, const float *vec) {
         Hnsw *g = s->shards[shard_index(synid, s->nshards)];
         return hnsw_add(g, synid, vec, s->dim) == 0 ? 0 : -1;
     }
-    if (dense_put(s, synid, vec, s->dim) < 0)
+    if (dense_put(s, synid, vec, s->dim) < 0) {
         return -1;
-    if (s->building)
+    }
+    if (s->building) {
         delta_push(s, synid, vec);
+    }
     return 0;
 }
 static void vec_remove(SemanticIndex *s, uint64_t synid) {
@@ -731,24 +778,30 @@ static void vec_remove(SemanticIndex *s, uint64_t synid) {
         return;
     }
     dense_remove(s, synid);
-    if (s->building)
+    if (s->building) {
         delta_push(s, synid, NULL);
+    }
 }
 
 int semantic_index_add(SemanticIndex *s, uint64_t id, const float *vecs,
                        size_t vec_count, size_t dim) {
-    if (dim != s->dim || vec_count == 0 || vec_count > (MV_SLOT_MASK + 1u))
+    if (dim != s->dim || vec_count == 0 || vec_count > (MV_SLOT_MASK + 1U)) {
         return -1;
+    }
     /* replace: drop the record's existing vectors (its prior slots) */
     uint32_t old = rc_get(s, id);
-    for (uint32_t slot = 0; slot < old; slot++)
+    for (uint32_t slot = 0; slot < old; slot++) {
         vec_remove(s, mv_syn(id, slot));
+    }
 
-    for (size_t slot = 0; slot < vec_count; slot++)
-        if (vec_add(s, mv_syn(id, slot), vecs + slot * dim) != 0)
+    for (size_t slot = 0; slot < vec_count; slot++) {
+        if (vec_add(s, mv_syn(id, slot), vecs + (slot * dim)) != 0) {
             return -1;
-    if (rc_set(s, id, (uint32_t)vec_count) != 0)
+        }
+    }
+    if (rc_set(s, id, (uint32_t)vec_count) != 0) {
         return -1;
+    }
 
     /* Crossing ann_threshold no longer builds the graph inline — that froze
      * every reader and writer for the whole build. The build is now deferred
@@ -759,8 +812,9 @@ int semantic_index_add(SemanticIndex *s, uint64_t id, const float *vecs,
 
 void semantic_index_remove(SemanticIndex *s, uint64_t id) {
     uint32_t old = rc_get(s, id);
-    for (uint32_t slot = 0; slot < old; slot++)
+    for (uint32_t slot = 0; slot < old; slot++) {
         vec_remove(s, mv_syn(id, slot));
+    }
     rc_del(s, id);
 }
 
@@ -772,10 +826,12 @@ typedef struct {
 static int cmp_scored_desc(const void *a, const void *b) {
     float fa = ((const Scored *)a)->score;
     float fb = ((const Scored *)b)->score;
-    if (fa < fb)
+    if (fa < fb) {
         return 1;
-    if (fa > fb)
+    }
+    if (fa > fb) {
         return -1;
+    }
     return 0;
 }
 
@@ -783,13 +839,18 @@ static int cmp_scored_desc(const void *a, const void *b) {
  * (the next to evict): a size-k heap built this way retains the k top scores. */
 static void scored_sift_down(Scored *a, size_t n, size_t i) {
     for (;;) {
-        size_t l = 2 * i + 1, r = 2 * i + 2, low = i;
-        if (l < n && a[l].score < a[low].score)
+        size_t l = (2 * i) + 1;
+        size_t r = (2 * i) + 2;
+        size_t low = i;
+        if (l < n && a[l].score < a[low].score) {
             low = l;
-        if (r < n && a[r].score < a[low].score)
+        }
+        if (r < n && a[r].score < a[low].score) {
             low = r;
-        if (low == i)
+        }
+        if (low == i) {
             break;
+        }
         Scored t = a[i];
         a[i] = a[low];
         a[low] = t;
@@ -808,8 +869,9 @@ typedef struct {
 static int dedup_topk(Scored *cand, size_t m, size_t top_k, uint64_t **out_ids,
                       float **out_scores, size_t *out_n) {
     size_t cap = 16;
-    while (cap < m * 2)
+    while (cap < m * 2) {
         cap *= 2;
+    }
     DedupSlot *ds = calloc(cap, sizeof(DedupSlot));
     Scored *uni = malloc((m ? m : 1) * sizeof(Scored));
     if (!ds || !uni) {
@@ -817,15 +879,18 @@ static int dedup_topk(Scored *cand, size_t m, size_t top_k, uint64_t **out_ids,
         free(uni);
         return -1;
     }
-    size_t un = 0, mask = cap - 1;
+    size_t un = 0;
+    size_t mask = cap - 1;
     for (size_t i = 0; i < m; i++) {
         uint64_t rec = cand[i].id;
         size_t h = mix64(rec) & mask;
-        while (ds[h].used && ds[h].rec != rec)
+        while (ds[h].used && ds[h].rec != rec) {
             h = (h + 1) & mask;
+        }
         if (ds[h].used) {
-            if (cand[i].score > uni[ds[h].idx].score)
+            if (cand[i].score > uni[ds[h].idx].score) {
                 uni[ds[h].idx].score = cand[i].score; /* best-of-N */
+            }
         } else {
             ds[h].used = 1;
             ds[h].rec = rec;
@@ -839,13 +904,15 @@ static int dedup_topk(Scored *cand, size_t m, size_t top_k, uint64_t **out_ids,
 
     size_t k = (top_k && top_k < un) ? top_k : un;
     if (k < un) {
-        for (size_t i = k / 2; i-- > 0;)
+        for (size_t i = k / 2; i-- > 0;) {
             scored_sift_down(uni, k, i);
-        for (size_t i = k; i < un; i++)
+        }
+        for (size_t i = k; i < un; i++) {
             if (uni[i].score > uni[0].score) {
                 uni[0] = uni[i];
                 scored_sift_down(uni, k, 0);
             }
+        }
     }
     qsort(uni, k, sizeof(Scored), cmp_scored_desc);
     uint64_t *ids = malloc((k ? k : 1) * sizeof(uint64_t));
@@ -870,8 +937,9 @@ static int dedup_topk(Scored *cand, size_t m, size_t top_k, uint64_t **out_ids,
 int semantic_index_search(const SemanticIndex *s, const float *query,
                           size_t dim, size_t top_k, uint64_t **out_ids,
                           float **out_scores, size_t *out_n) {
-    if (dim != s->dim)
+    if (dim != s->dim) {
         return -1;
+    }
 
     if (graph_present(s)) {
         /* Fetch the top candidates from every shard and merge. Fetching the
@@ -894,14 +962,16 @@ int semantic_index_search(const SemanticIndex *s, const float *query,
             cap += per < live ? per : live;
         }
         Scored *cand = malloc((cap ? cap : 1) * sizeof(Scored));
-        if (!cand)
+        if (!cand) {
             return -1;
+        }
         size_t cn = 0;
         for (size_t si = 0; si < s->nshards; si++) {
             size_t live = hnsw_count(s->shards[si]);
             size_t fetch = per < live ? per : live;
-            if (fetch == 0)
+            if (fetch == 0) {
                 continue;
+            }
             uint64_t *sid = NULL;
             float *ssc = NULL;
             size_t sn = 0;
@@ -926,16 +996,18 @@ int semantic_index_search(const SemanticIndex *s, const float *query,
     /* dense/exact: score every stored vector, then collapse best-of-N */
     float qnorm = l2norm(query, dim);
     Scored *cand = malloc((s->n ? s->n : 1) * sizeof(Scored));
-    if (!cand)
+    if (!cand) {
         return -1;
+    }
     size_t m = 0;
     for (size_t i = 0; i < s->n; i++) {
-        if (!s->e[i].used)
+        if (!s->e[i].used) {
             continue;
+        }
         float dot = dot_f32(s->e[i].vec, query, dim);
         float denom = s->e[i].norm * qnorm;
         cand[m].id = mv_rec(s->e[i].id);
-        cand[m].score = denom > 0 ? (float)(dot / denom) : 0.0f;
+        cand[m].score = denom > 0 ? (dot / denom) : 0.0F;
         m++;
     }
     int rc = dedup_topk(cand, m, top_k, out_ids, out_scores, out_n);
@@ -946,8 +1018,9 @@ int semantic_index_search(const SemanticIndex *s, const float *query,
 
 int semantic_index_save(const SemanticIndex *s, const char *path,
                         uint64_t covered_log_size, const uint8_t *key) {
-    if (s->nshards == 1)
+    if (s->nshards == 1) {
         return hnsw_save(s->shards[0], path, covered_log_size, key);
+    }
     /* No graph yet, or a multi-shard graph: the checkpoint format holds a single
      * graph, so a sharded index is not checkpointed — recovery rebuilds it from
      * the log, which is fast now that the build is parallel. Drop any stale file
@@ -977,11 +1050,13 @@ static int rc_rebuild_cb(uint64_t synid, const float *vec, void *ctx) {
 
 int semantic_index_load(SemanticIndex *s, const char *path,
                         uint64_t *out_covered_log_size, const uint8_t *key) {
-    if (graph_present(s) || s->n != 0)
+    if (graph_present(s) || s->n != 0) {
         return -1; /* must be a fresh index */
+    }
     Hnsw *g = hnsw_load(path, s->dim, out_covered_log_size, key);
-    if (!g)
+    if (!g) {
         return -1;
+    }
     /* A checkpoint saved in a different quantization mode than we're configured
      * for is rejected, so recovery rebuilds it in the configured mode. */
     if (hnsw_is_quantized(g) != (s->quantize ? 1 : 0)) {
@@ -1012,15 +1087,19 @@ int semantic_index_load(SemanticIndex *s, const char *path,
  * id->slot and record-count maps, and any HNSW shards. Vectors dominate; this is
  * the figure to watch since indexes are held in RAM. Excludes allocator overhead. */
 size_t semantic_index_bytes(const SemanticIndex *s) {
-    if (!s)
+    if (!s) {
         return 0;
-    size_t total = sizeof(*s) + s->cap * sizeof(SemEntry) +
-                   s->mcap * sizeof(DenseSlot) + s->rccap * sizeof(RCount);
-    for (size_t i = 0; i < s->cap; i++)
-        if (s->e[i].used)
+    }
+    size_t total = sizeof(*s) + (s->cap * sizeof(SemEntry)) +
+                   (s->mcap * sizeof(DenseSlot)) + (s->rccap * sizeof(RCount));
+    for (size_t i = 0; i < s->cap; i++) {
+        if (s->e[i].used) {
             total += s->dim * sizeof(float); /* per-entry vector */
-    for (size_t i = 0; i < s->nshards; i++)
+        }
+    }
+    for (size_t i = 0; i < s->nshards; i++) {
         total += hnsw_bytes(s->shards[i]);
+    }
     return total;
 }
 
@@ -1030,14 +1109,19 @@ void semantic_index_reconcile(SemanticIndex *s,
      * regardless of vector count). Snapshot them, then remove those not kept —
      * gathering first so removal doesn't disturb the map we're iterating. */
     uint64_t *recs = malloc((s->rcn ? s->rcn : 1) * sizeof(uint64_t));
-    if (!recs)
+    if (!recs) {
         return;
+    }
     size_t n = 0;
-    for (size_t i = 0; i < s->rccap; i++)
-        if (s->rc[i].used)
+    for (size_t i = 0; i < s->rccap; i++) {
+        if (s->rc[i].used) {
             recs[n++] = s->rc[i].rec;
-    for (size_t i = 0; i < n; i++)
-        if (!keep(recs[i], ctx))
+        }
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (!keep(recs[i], ctx)) {
             semantic_index_remove(s, recs[i]);
+        }
+    }
     free(recs);
 }

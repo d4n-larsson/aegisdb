@@ -68,5 +68,16 @@ python3 -m venv .venv && .venv/bin/pip install clang-format==22.1.8
 make format CLANG_FORMAT=.venv/bin/clang-format
 ```
 
-The naming/idiom conventions above are beyond what clang-format checks; a
-clang-tidy configuration to enforce them is being added separately.
+**clang-tidy** (`.clang-tidy`) enforces the canonical mechanical style that
+clang-format doesn't cover — braces around every conditional/loop body, one
+declaration per line, clarifying parentheses in mixed arithmetic, uppercase
+literal suffixes. Same workflow, same version pin:
+
+```sh
+make tidy         # apply the auto-fixable checks in place
+make tidy-check   # verify only (what CI runs)
+```
+
+The bug-pattern and portability checks (`bugprone-*`, `clang-analyzer-*`,
+`portability-*`) are being enabled separately — their fixits are unsafe and
+their findings need manual triage.

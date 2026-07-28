@@ -20,9 +20,10 @@ static const uint32_t K[64] = {
 
 static void transform(uint32_t s[8], const uint8_t p[64]) {
     uint32_t w[64];
-    for (int i = 0; i < 16; i++)
-        w[i] = ((uint32_t)p[i * 4] << 24) | ((uint32_t)p[i * 4 + 1] << 16) |
-               ((uint32_t)p[i * 4 + 2] << 8) | (uint32_t)p[i * 4 + 3];
+    for (int i = 0; i < 16; i++) {
+        w[i] = ((uint32_t)p[i * 4] << 24) | ((uint32_t)p[(i * 4) + 1] << 16) |
+               ((uint32_t)p[(i * 4) + 2] << 8) | (uint32_t)p[(i * 4) + 3];
+    }
     for (int i = 16; i < 64; i++) {
         uint32_t s0 =
             rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
@@ -30,8 +31,14 @@ static void transform(uint32_t s[8], const uint8_t p[64]) {
             rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
         w[i] = w[i - 16] + s0 + w[i - 7] + s1;
     }
-    uint32_t a = s[0], b = s[1], c = s[2], d = s[3];
-    uint32_t e = s[4], f = s[5], g = s[6], h = s[7];
+    uint32_t a = s[0];
+    uint32_t b = s[1];
+    uint32_t c = s[2];
+    uint32_t d = s[3];
+    uint32_t e = s[4];
+    uint32_t f = s[5];
+    uint32_t g = s[6];
+    uint32_t h = s[7];
     for (int i = 0; i < 64; i++) {
         uint32_t S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
         uint32_t ch = (e & f) ^ (~e & g);
@@ -75,15 +82,17 @@ void sha256(const void *data, size_t len, uint8_t out[SHA256_DIGEST_LEN]) {
     buf[len] = 0x80;
     size_t padlen = (len < 56) ? 64 : 128;
     uint64_t bits = total * 8;
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < 8; i++) {
         buf[padlen - 1 - i] = (uint8_t)(bits >> (8 * i));
+    }
     transform(s, buf);
-    if (padlen == 128)
+    if (padlen == 128) {
         transform(s, buf + 64);
+    }
     for (int i = 0; i < 8; i++) {
         out[i * 4] = (uint8_t)(s[i] >> 24);
-        out[i * 4 + 1] = (uint8_t)(s[i] >> 16);
-        out[i * 4 + 2] = (uint8_t)(s[i] >> 8);
-        out[i * 4 + 3] = (uint8_t)s[i];
+        out[(i * 4) + 1] = (uint8_t)(s[i] >> 16);
+        out[(i * 4) + 2] = (uint8_t)(s[i] >> 8);
+        out[(i * 4) + 3] = (uint8_t)s[i];
     }
 }

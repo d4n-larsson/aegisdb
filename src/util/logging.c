@@ -21,18 +21,20 @@ void aegis_log_set_level(AegisLogLevel level) { g_level = level; }
 AegisLogLevel aegis_log_get_level(void) { return g_level; }
 
 int aegis_log_level_from_string(const char *s, AegisLogLevel *out) {
-    if (!s)
+    if (!s) {
         return -1;
-    if (strcasecmp(s, "error") == 0)
+    }
+    if (strcasecmp(s, "error") == 0) {
         *out = AEGIS_LOG_ERROR;
-    else if (strcasecmp(s, "warn") == 0 || strcasecmp(s, "warning") == 0)
+    } else if (strcasecmp(s, "warn") == 0 || strcasecmp(s, "warning") == 0) {
         *out = AEGIS_LOG_WARN;
-    else if (strcasecmp(s, "info") == 0)
+    } else if (strcasecmp(s, "info") == 0) {
         *out = AEGIS_LOG_INFO;
-    else if (strcasecmp(s, "debug") == 0)
+    } else if (strcasecmp(s, "debug") == 0) {
         *out = AEGIS_LOG_DEBUG;
-    else
+    } else {
         return -1;
+    }
     return 0;
 }
 
@@ -66,8 +68,9 @@ static const char *level_tag(AegisLogLevel level) {
 }
 
 void aegis_log_emit(AegisLogLevel level, const char *fmt, ...) {
-    if (level > g_level)
+    if (level > g_level) {
         return;
+    }
 
     /* Wall-clock timestamp with millisecond precision. */
     struct timeval tv;
@@ -91,13 +94,15 @@ void aegis_log_emit(AegisLogLevel level, const char *fmt, ...) {
     char line[2176];
     int len = snprintf(line, sizeof(line), "%s %s [aegisdb] %s\n", ts,
                        level_tag(level), msg);
-    if (len < 0)
+    if (len < 0) {
         return;
+    }
     /* On truncation snprintf returns the would-be length; the buffer holds only
      * sizeof-1 chars + NUL. Clamp to the actual char count so we never write the
      * trailing NUL or read one byte past the buffer. */
-    if (len >= (int)sizeof(line))
+    if (len >= (int)sizeof(line)) {
         len = (int)sizeof(line) - 1;
+    }
     fwrite(line, 1, (size_t)len, stderr);
     fflush(stderr);
 }

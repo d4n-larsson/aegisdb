@@ -15,14 +15,16 @@
 static const char PING[] = "{\"operation\":\"ping\"}\n";
 
 int health_check(int port) {
-    if (port <= 0 || port > 65535)
+    if (port <= 0 || port > 65535) {
         return 1;
+    }
 
     char portstr[16];
     snprintf(portstr, sizeof(portstr), "%d", port);
     int fd = net_dial("127.0.0.1", portstr); /* loopback, numeric — no DNS */
-    if (fd < 0)
+    if (fd < 0) {
         return 1;
+    }
 
     /* Bound every blocking call so a hung server can't outlast the container's
      * HEALTHCHECK timeout. */
@@ -34,8 +36,9 @@ int health_check(int port) {
         ssize_t r = recv(fd, buf, sizeof(buf) - 1, 0);
         if (r > 0) {
             buf[r] = '\0';
-            if (strstr(buf, "\"ok\":true"))
+            if (strstr(buf, "\"ok\":true")) {
                 rv = 0;
+            }
         }
     }
 

@@ -23,10 +23,12 @@ static int scan_cb(uint64_t offset, const uint8_t *payload, size_t len,
                    void *ctx) {
     ScanCtx *sc = ctx;
     MemoryRecord r;
-    if (record_decode(payload, len, &r) != 0)
+    if (record_decode(payload, len, &r) != 0) {
         return 0; /* skip undecodable frame, keep scanning */
-    if (r.id > sc->max_id)
+    }
+    if (r.id > sc->max_id) {
         sc->max_id = r.id;
+    }
     hash_index_put(sc->db->hash, r.id, offset, (uint32_t)len, (uint8_t)r.type,
                    (uint8_t)(r.deleted ? 1 : 0), r.expires_at);
     record_free(&r);
@@ -38,7 +40,8 @@ long recovery_run(AegisDB *db) {
      * covered offset, so we can trust [0, covered) and scan only the tail. A
      * missing, corrupt, or stale (covers more than the log holds) checkpoint
      * falls back to a full scan from offset 0. */
-    uint64_t covered = 0, snap_next_id = 0;
+    uint64_t covered = 0;
+    uint64_t snap_next_id = 0;
     int have_checkpoint = 0;
     const uint8_t *ckey =
         db->config.encryption_enabled ? db->config.encryption_key : NULL;
@@ -58,8 +61,9 @@ long recovery_run(AegisDB *db) {
                 (unsigned long long)covered, (unsigned long long)db->log.size);
             hash_index_free(db->hash);
             db->hash = hash_index_create();
-            if (!db->hash)
+            if (!db->hash) {
                 return -1;
+            }
         }
     }
 
@@ -81,12 +85,13 @@ long recovery_run(AegisDB *db) {
 
     /* Corruption in the middle of the log: the bad frames were skipped and the
      * surrounding records recovered. Surface it loudly — this is data loss. */
-    if (res.corrupt_frames > 0)
+    if (res.corrupt_frames > 0) {
         LOG_ERROR("recovery: skipped %zu corrupt frame(s); %s",
                   res.corrupt_frames,
                   res.recovered_after_hole
                       ? "recovered records past the damage (log left intact)"
                       : "damage was at the tail");
+    }
 
     /* Drop a torn tail left by a mid-write crash. */
     if (res.truncate_to < (uint64_t)db->log.size) {
@@ -136,28 +141,33 @@ long recovery_run(AegisDB *db) {
     HashIndex *h = db->hash;
     for (size_t i = 0; i < h->cap; i++) {
         const HashEntry *e = &h->buckets[i];
-        if (!e->used || e->deleted)
+        if (!e->used || e->deleted) {
             continue;
+        }
         uint8_t *buf = NULL;
         size_t blen = 0;
-        if (log_read(&db->log, e->offset, &buf, &blen) != 0)
+        if (log_read(&db->log, e->offset, &buf, &blen) != 0) {
             continue;
+        }
         MemoryRecord r;
         if (record_decode(buf, blen, &r) == 0) {
             time_index_add(db->time, r.created, r.id);
-            for (size_t k = 0; k < r.tag_count; k++)
+            for (size_t k = 0; k < r.tag_count; k++) {
                 tag_index_add(db->tags, r.tags[k], r.id);
+            }
             /* Seed per-tenant usage from the surviving live set so quotas are
              * accurate immediately after a restart (matches append_and_hash's
              * accounting unit: +1 record, +frame-payload bytes). Only under
              * auth, where namespaces exist. */
-            if (db->config.auth_token_count > 0 && r.agent_id)
+            if (db->config.auth_token_count > 0 && r.agent_id) {
                 tenant_usage_adjust(db->tenants, r.agent_id, 1, (long)blen);
+            }
             if (r.embedding_dim == db->config.embedding_dimensions &&
                 r.embedding && r.vec_count &&
-                (!sem_loaded || e->offset >= sem_covered))
+                (!sem_loaded || e->offset >= sem_covered)) {
                 semantic_index_add(db->sem, r.id, r.embedding, r.vec_count,
                                    r.embedding_dim);
+            }
             record_free(&r);
             live++;
         }
@@ -167,8 +177,9 @@ long recovery_run(AegisDB *db) {
     /* The loaded graph reflects the checkpoint's covered prefix and cannot see
      * records deleted in the tail (pass 2 skips deleted hash entries), so evict
      * any semantic id the final hash no longer reports live. */
-    if (sem_loaded)
+    if (sem_loaded) {
         semantic_index_reconcile(db->sem, recover_keep, db->hash);
+    }
 
     LOG_DEBUG("recovery: secondary indexes populated from %ld live record(s)",
               live);

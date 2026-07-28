@@ -27,12 +27,15 @@ static void on_signal(int sig) {
 
 int main(int argc, char **argv) {
     /* Subcommands run a client / token tool instead of the server. */
-    if (argc >= 2 && strcmp(argv[1], "client") == 0)
+    if (argc >= 2 && strcmp(argv[1], "client") == 0) {
         return client_main(argc - 1, argv + 1);
-    if (argc >= 2 && strcmp(argv[1], "gen-token") == 0)
+    }
+    if (argc >= 2 && strcmp(argv[1], "gen-token") == 0) {
         return gen_token_main(argc - 1, argv + 1);
-    if (argc >= 2 && strcmp(argv[1], "gen-key") == 0)
+    }
+    if (argc >= 2 && strcmp(argv[1], "gen-key") == 0) {
         return gen_key_main(argc - 1, argv + 1);
+    }
 
     Config cfg;
     config_defaults(&cfg);
@@ -47,9 +50,10 @@ int main(int argc, char **argv) {
     if (cfg.hash_token) {
         uint8_t d[SHA256_DIGEST_LEN];
         sha256(cfg.hash_token, strlen(cfg.hash_token), d);
-        char hex[2 * SHA256_DIGEST_LEN + 1];
-        for (int i = 0; i < SHA256_DIGEST_LEN; i++)
-            snprintf(hex + i * 2, 3, "%02x", d[i]);
+        char hex[(2 * SHA256_DIGEST_LEN) + 1];
+        for (int i = 0; i < SHA256_DIGEST_LEN; i++) {
+            snprintf(hex + (i * 2), 3, "%02x", d[i]);
+        }
         printf("sha256$%s\n", hex);
         config_free(&cfg);
         return 0;
@@ -82,24 +86,26 @@ int main(int argc, char **argv) {
     LOG_INFO("AegisDB %s starting (log level: %s)", AEGIS_VERSION_STRING,
              aegis_log_level_name((AegisLogLevel)cfg.log_level));
 
-    if (cfg.auth_token_count == 0)
+    if (cfg.auth_token_count == 0) {
         LOG_WARN("no auth tokens configured; the server accepts "
                  "unauthenticated requests from anyone who can reach the port");
-    else
+    } else {
         LOG_INFO("authentication enabled (%zu token%s configured)",
                  cfg.auth_token_count, cfg.auth_token_count == 1 ? "" : "s");
+    }
 
     LOG_INFO("durability: %s", aegis_durability_name(cfg.durability));
-    if (cfg.durability == AEGIS_DURABILITY_BATCH && cfg.fsync_batch_size > 1)
+    if (cfg.durability == AEGIS_DURABILITY_BATCH && cfg.fsync_batch_size > 1) {
         LOG_WARN(
             "durability=batch: up to %zu acknowledged write(s) may be lost "
             "on crash, and an idle server may leave them unflushed "
             "indefinitely; use --durability sync or interval to bound this",
             cfg.fsync_batch_size);
-    else if (cfg.durability == AEGIS_DURABILITY_INTERVAL)
+    } else if (cfg.durability == AEGIS_DURABILITY_INTERVAL) {
         LOG_INFO("durability=interval: log flushed every ~%llu ms; "
                  "acknowledged writes within that window may be lost on crash",
                  (unsigned long long)cfg.fsync_interval_ms);
+    }
 
     if (cfg.encryption_enabled) {
         char fp[13];
@@ -108,18 +114,20 @@ int main(int argc, char **argv) {
                  "XChaCha20-Poly1305; key fingerprint %s)",
                  fp);
     }
-    if (cfg.checkpoint_sec)
+    if (cfg.checkpoint_sec) {
         LOG_INFO("index checkpoint every %us (recovery replays only the tail "
                  "written since the last checkpoint)",
                  cfg.checkpoint_sec);
-    else
+    } else {
         LOG_WARN("index checkpoints disabled; recovery will full-scan the log");
+    }
 
-    if (cfg.max_index_bytes)
+    if (cfg.max_index_bytes) {
         LOG_INFO(
             "index-memory cap: %zu bytes (inserts return MEMORY_LIMIT past "
             "it; sampled periodically)",
             cfg.max_index_bytes);
+    }
 
     AegisDB db;
     if (db_open(&db, &cfg) != 0) {
@@ -131,25 +139,31 @@ int main(int argc, char **argv) {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = on_signal;
-    if (sigaction(SIGINT, &sa, NULL) != 0 || sigaction(SIGTERM, &sa, NULL) != 0)
+    if (sigaction(SIGINT, &sa, NULL) != 0 ||
+        sigaction(SIGTERM, &sa, NULL) != 0) {
         LOG_WARN("could not install signal handlers; SIGINT/SIGTERM may not "
                  "shut the server down cleanly");
+    }
 
     /* Maintenance: sweep expired working memory every 30s, checkpoint the index
      * on its cadence, (in INTERVAL durability) flush the log on its cadence, and
      * compact the log every --compact-sec (only when >=25% of it is dead). */
     Compactor *maint = compaction_start(&db, 30, cfg.compact_sec);
-    if (maint)
-        LOG_DEBUG("maintenance thread started (working-memory sweep every 30s, "
-                  "compaction check every %us)",
-                  cfg.compact_sec);
-    else {
+    if (maint) {
+        {
+            LOG_DEBUG(
+                "maintenance thread started (working-memory sweep every 30s, "
+                "compaction check every %us)",
+                cfg.compact_sec);
+        }
+    } else {
         LOG_WARN("could not start maintenance thread; "
                  "expired working memory will not be swept");
-        if (cfg.durability == AEGIS_DURABILITY_INTERVAL)
+        if (cfg.durability == AEGIS_DURABILITY_INTERVAL) {
             LOG_WARN(
                 "durability=interval needs the maintenance thread; the log "
                 "will only be flushed on shutdown");
+        }
     }
 
     /* Replication (Phase 1 read replicas). Primary: serve the log stream if a
@@ -165,17 +179,19 @@ int main(int argc, char **argv) {
         }
         db.repl_source = replication_source_start(&db, cfg.replication_port,
                                                   cfg.replication_token);
-        if (!db.repl_source)
+        if (!db.repl_source) {
             LOG_WARN(
                 "replication: source failed to start; no replicas can follow");
+        }
     }
     if (cfg.replicate_from_host[0] != '\0') {
         db.repl_follower = replication_follower_start(
             &db, cfg.replicate_from_host, cfg.replicate_from_port,
             cfg.replication_token);
-        if (!db.repl_follower)
+        if (!db.repl_follower) {
             LOG_WARN(
                 "replication: follower failed to start; replica will not sync");
+        }
         LOG_INFO("read-only replica of %s:%d", cfg.replicate_from_host,
                  cfg.replicate_from_port);
     }

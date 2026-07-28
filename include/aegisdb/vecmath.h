@@ -9,8 +9,9 @@
  * double for precision. */
 static inline float l2norm(const float *v, size_t dim) {
     double acc = 0;
-    for (size_t i = 0; i < dim; i++)
+    for (size_t i = 0; i < dim; i++) {
         acc += (double)v[i] * v[i];
+    }
     return (float)sqrt(acc);
 }
 
@@ -26,7 +27,10 @@ static inline float l2norm(const float *v, size_t dim) {
  * assume the inputs don't alias. */
 static inline float dot_f32(const float *restrict a, const float *restrict b,
                             size_t dim) {
-    float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+    float s0 = 0;
+    float s1 = 0;
+    float s2 = 0;
+    float s3 = 0;
     size_t i = 0;
     for (; i + 4 <= dim; i += 4) {
         s0 += a[i] * b[i];
@@ -35,8 +39,9 @@ static inline float dot_f32(const float *restrict a, const float *restrict b,
         s3 += a[i + 3] * b[i + 3];
     }
     float s = (s0 + s1) + (s2 + s3);
-    for (; i < dim; i++)
+    for (; i < dim; i++) {
         s += a[i] * b[i];
+    }
     return s;
 }
 

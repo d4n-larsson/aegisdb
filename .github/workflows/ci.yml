@@ -60,6 +60,19 @@ jobs:
           /tmp/cf/bin/pip install --quiet clang-format==22.1.8
           make format-check CLANG_FORMAT=/tmp/cf/bin/clang-format
 
+  tidy:
+    name: clang-tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Pinned like clang-format; the .clang-tidy allowlist keeps new checks from
+      # a newer tool out, but pin anyway for reproducible gate results.
+      - name: Lint (clang-tidy, pinned)
+        run: |
+          python3 -m venv /tmp/ct
+          /tmp/ct/bin/pip install --quiet clang-tidy==22.1.8
+          make tidy-check CLANG_TIDY=/tmp/ct/bin/clang-tidy
+
   asan:
     name: ASan + UBSan (make check)
     runs-on: ubuntu-latest
