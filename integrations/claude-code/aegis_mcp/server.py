@@ -45,8 +45,21 @@ def main() -> int:
     try:
         from mcp.server.fastmcp import FastMCP
     except ImportError:
-        print("[aegis-mcp] the 'mcp' package is required to run the server: "
-              "pip install mcp", file=sys.stderr)
+        # Distinguish "missing" from "present but incompatible": mcp 2.0 dropped
+        # `mcp.server.fastmcp`, and reporting that as a missing package sends the
+        # user off to install what they already have.
+        try:
+            from importlib.metadata import version
+            found = version("mcp")
+        except Exception:  # noqa: BLE001 — diagnostics only, never mask the real error
+            found = ""
+        if found:
+            print(f"[aegis-mcp] the installed 'mcp' package ({found}) does not "
+                  f"provide mcp.server.fastmcp; this server needs mcp<2: "
+                  f"pip install 'mcp<2'", file=sys.stderr)
+        else:
+            print("[aegis-mcp] the 'mcp' package is required to run the server: "
+                  "pip install 'mcp<2'", file=sys.stderr)
         return 1
 
     tools = build_tools()
