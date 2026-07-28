@@ -511,7 +511,7 @@ aegis_mcp/
   tools.py        # core save/search/get/update/relate logic
   recall.py       # automatic-recall query/format + time budget
   capture.py      # session salience heuristic + persistence
-  server.py       # FastMCP binding (lazy-imports `mcp`)
+  server.py       # MCP binding (lazy-imports `mcp`; supports SDK 1.x and 2.x)
   hooks.py        # console-script entry points (aegisdb-recall-hook / -capture-hook)
 hooks/
   recall_hook.py  # UserPromptSubmit (checkout path: python3 …/hooks/recall_hook.py)
