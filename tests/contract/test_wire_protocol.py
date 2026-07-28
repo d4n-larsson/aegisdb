@@ -1114,7 +1114,12 @@ def test_search_explain(binary, port):
               "explain score == weight * similarity * recency_factor")
         check(abs(e["importance"] - 0.9) < 1e-4, "explain reports the record importance")
 
-        # recency decay: a half-life shrinks recency_factor below 1
+        # recency decay: a half-life shrinks recency_factor below 1. The factor
+        # is 0.5**(age_ms/half_life_ms), so it is exactly 1.0 when age is 0 —
+        # sleep so the record is measurably older than "now" (otherwise a fast
+        # insert->search round-trip within the same millisecond makes age 0 and
+        # the factor 1.0, a spurious failure seen on faster builds).
+        time.sleep(0.01)
         r = srv.req({"operation": "search", "embedding": va, "top_k": 1,
                      "explain": True, "half_life_ms": 1})
         e = r["records"][0]["explain"]
