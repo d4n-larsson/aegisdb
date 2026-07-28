@@ -38,6 +38,7 @@ that they are still the documented ones.
 Usage:
     python3 scripts/first_contact.py --build --package local
     python3 scripts/first_contact.py --package pypi --port 19470
+    python3 scripts/first_contact.py --build --mcp-spec 'mcp<2'   # older SDK major
 """
 from __future__ import annotations
 
@@ -215,7 +216,7 @@ class Package:
         return [os.path.join(self.venv, "bin", script)]
 
 
-def install_package(source: str, workdir: str) -> Package:
+def install_package(source: str, workdir: str, mcp_spec: str = "") -> Package:
     if source == "pypi":
         step("Resolve the published package with uvx (as .mcp.json does)")
         if shutil.which("uvx") is None:
@@ -236,6 +237,13 @@ def install_package(source: str, workdir: str) -> Package:
     env["SETUPTOOLS_SCM_PRETEND_VERSION"] = "0.0.0+first-contact"
     run([pip, "install", "--quiet", os.path.join(REPO, "integrations", "claude-code")],
         timeout=900, env=env)
+    if mcp_spec:
+        # server.py supports both SDK majors, so CI runs this check once per
+        # major; a fresh resolve only ever exercises the newest one.
+        info(f"pinning the MCP SDK to {mcp_spec!r} for this run")
+        run([pip, "install", "--quiet", mcp_spec], timeout=900, env=env)
+        shown = run([pip, "show", "mcp"], timeout=120).stdout.splitlines()
+        info(next((ln for ln in shown if ln.startswith("Version:")), "mcp: ?"))
     return Package(source, venv)
 
 
@@ -381,7 +389,7 @@ def mcp_round_trip(pkg: Package, project: str, port: int, mcp_env: dict) -> None
             "protocolVersion": "2025-06-18",
             "capabilities": {},
             "clientInfo": {"name": "aegisdb-first-contact", "version": "0"},
-        }, timeout=120)  # first call pays for the FastMCP import
+        }, timeout=120)  # first call pays for the SDK import
         info(f"initialized: {json.dumps(init.get('serverInfo', {}))}")
         client.notify("notifications/initialized")
 
@@ -467,12 +475,19 @@ def main(argv: list[str] | None = None) -> int:
                     help=f"host port to publish (default: {DEFAULT_PORT}); a "
                          f"non-default port makes the entry points read "
                          f"AEGIS_HOST/AEGIS_PORT instead of their defaults")
+    ap.add_argument("--mcp-spec", default="",
+                    help="pip requirement pinning the MCP SDK under test (e.g. "
+                         "'mcp<2'); --package local only, since uvx resolves the "
+                         "published package's own dependencies")
     ap.add_argument("--keep", action="store_true",
                     help="leave the container and volume behind for debugging")
     args = ap.parse_args(argv)
+    if args.mcp_spec and args.package != "local":
+        ap.error("--mcp-spec only applies to --package local")
 
     print(f"first-contact: image={'(local build)' if args.build else args.image} "
-          f"package={args.package} port={args.port}")
+          f"package={args.package} port={args.port}"
+          + (f" mcp-spec={args.mcp_spec}" if args.mcp_spec else ""))
     if args.port == DEFAULT_PORT:
         # Better a clear message than a confusing pass against the wrong server.
         with socket.socket() as probe:
@@ -491,7 +506,7 @@ def main(argv: list[str] | None = None) -> int:
         start_container(image, args.port)
         readme_client_commands()
         host_tcp_ping(args.port)
-        pkg = install_package(args.package, workdir)
+        pkg = install_package(args.package, workdir, args.mcp_spec)
         mcp_env = scaffold_project(pkg, project, args.port)
         mcp_round_trip(pkg, project, args.port, mcp_env)
         recall_hook_injects(pkg, project, args.port)

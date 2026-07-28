@@ -41,11 +41,22 @@ concurrency:
 
 jobs:
   quickstart:
-    name: quickstart (this commit)
+    name: quickstart (this commit, ${{ matrix.label }})
     # Skip on the schedule: a nightly run of the local build would only re-test
     # the last merge, which the push to main already covered.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # server.py supports both MCP SDK majors, so both are gated: a fresh
+      # resolve only ever picks the newest, which is how the 2.0 rename reached
+      # a release. The pin is applied after the package install.
+      matrix:
+        include:
+          - label: mcp 2.x
+            mcp_spec: ''
+          - label: mcp 1.x
+            mcp_spec: 'mcp<2'
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -55,7 +66,9 @@ jobs:
       # port — which is what makes the entry points resolve their host/port from
       # their built-in defaults, exactly as a zero-config user gets them.
       - name: Walk the quickstart (local image + local package)
-        run: python3 scripts/first_contact.py --build --package local
+        run: |
+          python3 scripts/first_contact.py --build --package local \
+            ${{ matrix.mcp_spec && format('--mcp-spec ''{0}''', matrix.mcp_spec) || '' }}
 
   published:
     name: quickstart (published artifacts)

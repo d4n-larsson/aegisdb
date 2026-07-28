@@ -16,11 +16,12 @@ dependencies = [
     # hooks run on the standard library alone, so this is only required to serve
     # tools to Claude Code, not to test or run the hooks.
     #
-    # Capped below 2.0: it removed `mcp.server.fastmcp` (FastMCP) in favour of
-    # `mcp.server.mcpserver.MCPServer`, so an uncapped `mcp>=1.0` resolves to a
-    # release server.py cannot import — a fresh `uvx aegisdb-mcp` fails to start.
-    # Lift the cap in the same change that ports server.py to the 2.x API.
-    "mcp>=1.0,<2",
+    # server.py supports both majors (see its `_server_class`), so the range
+    # spans them. The upper bound is deliberate and stays: an unbounded
+    # `mcp>=1.0` is what let mcp 2.0's rename of FastMCP -> MCPServer break every
+    # fresh install in v0.5.4. Raise the ceiling only after checking the next
+    # major actually works (`make first-contact` starts a real server).
+    "mcp>=1.0,<3",
 ]
 
 [project.urls]
