@@ -1,0 +1,72 @@
+name: First contact
+
+# Walks the documented quickstart end to end — docker run, the README's client
+# commands, `aegisdb-init`, the MCP server over stdio, and the recall hook — so a
+# broken first run is caught by CI instead of by a launch visitor. Nothing else
+# here covers that path: the C suites never touch the container image, and the
+# integration's contract tests call MemoryTools in-process, so they exercise
+# neither the installed console scripts nor the MCP protocol.
+#
+# Two jobs, one script (scripts/first_contact.py):
+#   quickstart — what this commit would ship (image built here, package installed
+#                from the checkout). Deterministic, so it gates PRs.
+#   published  — what users actually get right now (ghcr.io latest + PyPI via
+#                uvx). Depends on external registries, so it stays off the PR
+#                path and runs on a schedule; dispatch it right after cutting a
+#                release, when both artifacts have just changed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - 'src/**'
+      - 'include/**'
+      - 'third_party/**'
+      - 'CMakeLists.txt'
+      - 'integrations/claude-code/**'
+      - 'scripts/first_contact.py'
+      - '.github/workflows/first-contact.yml'
+  schedule:
+    # Daily, an hour after the fuzz soak so the two don't contend for runners.
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: first-contact-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quickstart:
+    name: quickstart (this commit)
+    # Skip on the schedule: a nightly run of the local build would only re-test
+    # the last merge, which the push to main already covered.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      # The runner has no AegisDB running, so this uses the documented default
+      # port — which is what makes the entry points resolve their host/port from
+      # their built-in defaults, exactly as a zero-config user gets them.
+      - name: Walk the quickstart (local image + local package)
+        run: python3 scripts/first_contact.py --build --package local
+
+  published:
+    name: quickstart (published artifacts)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      # .mcp.json launches the server with `uvx`, so the published path needs uv.
+      - uses: astral-sh/setup-uv@v5
+      - name: Walk the quickstart (ghcr.io image + PyPI package)
+        run: python3 scripts/first_contact.py --package pypi

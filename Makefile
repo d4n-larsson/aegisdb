@@ -59,7 +59,7 @@ DEPS := $(CORE_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(CJSON_OBJ:.o=.d) \
 
 PYTHON ?= python3
 
-.PHONY: all clean test integration check eval eval-tasks inspector inspector-test bench wire-bench fuzz fuzz-regress fuzz-corpus
+.PHONY: all clean test integration check eval eval-tasks inspector inspector-test first-contact bench wire-bench fuzz fuzz-regress fuzz-corpus
 all: $(BIN)
 
 $(BIN): $(CORE_OBJ) $(CJSON_OBJ) $(MAIN_OBJ)
@@ -115,6 +115,15 @@ inspector:
 # endpoint (config/stats/browse/embed/explain/edit/delete + the op allowlist).
 inspector-test: $(BIN)
 	$(PYTHON) tools/inspector/test_bridge.py $(BIN)
+
+# First-contact check (LAUNCH.md gate): walks the documented quickstart from
+# scratch — docker run, the README's client commands, aegisdb-init, the MCP
+# server over stdio, and the recall hook. Needs docker; builds nothing from this
+# Makefile (the image is built by docker). Defaults to this commit's artifacts;
+# for what users get today: FIRST_CONTACT_ARGS='--package pypi' (needs uv).
+# On a box already running AegisDB, publish elsewhere: FIRST_CONTACT_ARGS='--port 19470'.
+first-contact:
+	$(PYTHON) scripts/first_contact.py --build --package local $(FIRST_CONTACT_ARGS)
 
 # Line-coverage report (gcov; no lcov/gcovr needed). Rebuilds everything
 # instrumented, runs the unit tests AND the contract suite, and aggregates.

@@ -15,7 +15,12 @@ dependencies = [
     # The MCP server entry point needs the official SDK. All core logic and the
     # hooks run on the standard library alone, so this is only required to serve
     # tools to Claude Code, not to test or run the hooks.
-    "mcp>=1.0",
+    #
+    # Capped below 2.0: it removed `mcp.server.fastmcp` (FastMCP) in favour of
+    # `mcp.server.mcpserver.MCPServer`, so an uncapped `mcp>=1.0` resolves to a
+    # release server.py cannot import — a fresh `uvx aegisdb-mcp` fails to start.
+    # Lift the cap in the same change that ports server.py to the 2.x API.
+    "mcp>=1.0,<2",
 ]
 
 [project.urls]
