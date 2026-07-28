@@ -37,8 +37,9 @@
  * the caller must treat it as a durability failure). errno is left set. */
 static int fsync_retry(int fd) {
     while (fsync(fd) != 0) {
-        if (errno == EINTR)
+        if (errno == EINTR) {
             continue;
+        }
         return -1;
     }
     return 0;
@@ -49,11 +50,13 @@ static int read_full(int fd, off_t off, void *buf, size_t n) {
     size_t got = 0;
     while (got < n) {
         ssize_t r = pread(fd, p + got, n - got, off + (off_t)got);
-        if (r == 0)
+        if (r == 0) {
             return 1; /* EOF before n bytes */
+        }
         if (r < 0) {
-            if (errno == EINTR)
+            if (errno == EINTR) {
                 continue;
+            }
             return -1;
         }
         got += (size_t)r;
@@ -67,8 +70,9 @@ static int write_full(int fd, off_t off, const void *buf, size_t n) {
     while (put < n) {
         ssize_t w = pwrite(fd, p + put, n - put, off + (off_t)put);
         if (w < 0) {
-            if (errno == EINTR)
+            if (errno == EINTR) {
                 continue;
+            }
             return -1;
         }
         put += (size_t)w;
@@ -87,10 +91,12 @@ static void build_header(uint8_t *hdr, size_t len, uint32_t payload_crc) {
 /* Validate a 16-byte header in `hdr`. Returns 0 and writes the length and
  * payload CRC out when the magic and header CRC are intact; -1 otherwise. */
 static int parse_header(const uint8_t *hdr, uint32_t *len, uint32_t *pcrc) {
-    if (aegis_get_u32le(hdr) != LOG_FRAME_MAGIC)
+    if (aegis_get_u32le(hdr) != LOG_FRAME_MAGIC) {
         return -1;
-    if (aegis_get_u32le(hdr + 12) != crc32_compute(hdr, 12))
+    }
+    if (aegis_get_u32le(hdr + 12) != crc32_compute(hdr, 12)) {
         return -1;
+    }
     *len = aegis_get_u32le(hdr + 4);
     *pcrc = aegis_get_u32le(hdr + 8);
     return 0;
@@ -109,10 +115,12 @@ static void build_header_v3(uint8_t *hdr, size_t len, const uint8_t nonce[24]) {
 /* Validate a 36-byte v3 header (magic + HEADER_CRC); write the payload length.
  * The nonce is at hdr+V3_NONCE_OFF. Returns 0/-1. */
 static int parse_header_v3(const uint8_t *hdr, uint32_t *len) {
-    if (aegis_get_u32le(hdr) != LOG_FRAME_MAGIC_ENC)
+    if (aegis_get_u32le(hdr) != LOG_FRAME_MAGIC_ENC) {
         return -1;
-    if (aegis_get_u32le(hdr + 32) != crc32_compute(hdr, 32))
+    }
+    if (aegis_get_u32le(hdr + 32) != crc32_compute(hdr, 32)) {
         return -1;
+    }
     *len = aegis_get_u32le(hdr + 4);
     return 0;
 }
@@ -121,8 +129,9 @@ static int parse_header_v3(const uint8_t *hdr, uint32_t *len) {
  * the v2 frame format, stopping at the first torn/corrupt v1 frame. */
 static int migrate_legacy_log(const char *path) {
     int oldfd = open(path, O_RDONLY | O_CLOEXEC);
-    if (oldfd < 0)
+    if (oldfd < 0) {
         return -1;
+    }
     off_t size = lseek(oldfd, 0, SEEK_END);
     if (size < 0) {
         close(oldfd);
@@ -137,17 +146,20 @@ static int migrate_legacy_log(const char *path) {
         return -1;
     }
 
-    off_t in = 0, out = 0;
+    off_t in = 0;
+    off_t out = 0;
     long migrated = 0;
     int failed = 0;
     while (in + V1_FRAME_HEADER <= size) {
         uint8_t h[V1_FRAME_HEADER];
-        if (read_full(oldfd, in, h, V1_FRAME_HEADER) != 0)
+        if (read_full(oldfd, in, h, V1_FRAME_HEADER) != 0) {
             break;
+        }
         uint32_t crc = aegis_get_u32le(h);
         uint32_t len = aegis_get_u32le(h + 4);
-        if (in + V1_FRAME_HEADER + (off_t)len > size)
+        if (in + V1_FRAME_HEADER + (off_t)len > size) {
             break; /* torn tail */
+        }
         uint8_t *buf = malloc(len ? len : 1);
         if (!buf) {
             failed = 1;
@@ -196,10 +208,11 @@ static int migrate_legacy_log(const char *path) {
     /* Make the rename durable: without a directory fsync a crash here could
      * revert to the legacy file, which the next open re-migrates — harmless but
      * wasteful, and it leaves the .migrate scratch behind. */
-    if (fs_fsync_parent(path) != 0)
+    if (fs_fsync_parent(path) != 0) {
         LOG_WARN("log: fsync of the log directory failed after migrating %s; "
                  "the migration may be repeated after a crash",
                  path);
+    }
     LOG_INFO("log: migrated %ld legacy frame(s) to v2 format", migrated);
     return 0;
 }
@@ -208,24 +221,30 @@ static int migrate_legacy_log(const char *path) {
  * one it was sealed with. Returns 1 (verified), 0 (wrong key / unreadable). An
  * empty log trivially verifies. */
 static int verify_first_frame(LogFile *lf, off_t end) {
-    if (end < V3_FRAME_HEADER)
+    if (end < V3_FRAME_HEADER) {
         return 1; /* nothing sealed yet */
+    }
     uint8_t hdr[V3_FRAME_HEADER];
-    if (read_full(lf->fd, 0, hdr, V3_FRAME_HEADER) != 0)
+    if (read_full(lf->fd, 0, hdr, V3_FRAME_HEADER) != 0) {
         return 0;
+    }
     uint32_t len;
-    if (parse_header_v3(hdr, &len) != 0)
+    if (parse_header_v3(hdr, &len) != 0) {
         return 0;
-    if ((off_t)V3_FRAME_HEADER + (off_t)len + AEAD_TAG_LEN > end)
+    }
+    if ((off_t)V3_FRAME_HEADER + (off_t)len + AEAD_TAG_LEN > end) {
         return 0;
+    }
     uint8_t *ct = malloc(len ? len : 1);
     uint8_t *pt = malloc(len ? len : 1);
     uint8_t tag[AEAD_TAG_LEN];
     int ok = 0;
     if (ct && pt && read_full(lf->fd, V3_FRAME_HEADER, ct, len) == 0 &&
-        read_full(lf->fd, (off_t)V3_FRAME_HEADER + len, tag, AEAD_TAG_LEN) == 0)
+        read_full(lf->fd, (off_t)V3_FRAME_HEADER + len, tag, AEAD_TAG_LEN) ==
+            0) {
         ok = aead_open(lf->key, hdr + V3_NONCE_OFF, hdr, V3_AAD_LEN, ct, len,
                        pt, tag) == 0;
+    }
     free(ct);
     free(pt);
     return ok;
@@ -233,8 +252,9 @@ static int verify_first_frame(LogFile *lf, off_t end) {
 
 int log_open(LogFile *lf, const char *path, size_t fsync_batch,
              const uint8_t *key, LogOpenStatus *status) {
-    if (status)
+    if (status) {
         *status = LOG_OPEN_ERR_IO;
+    }
     memset(lf, 0, sizeof(*lf));
     strncpy(lf->path, path, sizeof(lf->path) - 1);
     lf->fsync_batch = fsync_batch;
@@ -242,23 +262,26 @@ int log_open(LogFile *lf, const char *path, size_t fsync_batch,
         lf->encrypted = 1;
         memcpy(lf->key, key, AEAD_KEY_LEN);
     }
-    if (pthread_mutex_init(&lf->wlock, NULL) != 0)
+    if (pthread_mutex_init(&lf->wlock, NULL) != 0) {
         return -1;
+    }
     lf->fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (lf->fd < 0) {
         pthread_mutex_destroy(&lf->wlock);
         return -1;
     }
     off_t end = lseek(lf->fd, 0, SEEK_END);
-    if (end < 0)
+    if (end < 0) {
         goto fail;
+    }
 
     /* Reconcile the on-disk mode with the key argument (fail-closed). An empty
      * log adopts the requested mode; a non-empty one must match. */
     if (end >= 4) {
         uint8_t m[4];
-        if (read_full(lf->fd, 0, m, 4) != 0)
+        if (read_full(lf->fd, 0, m, 4) != 0) {
             goto fail;
+        }
         uint32_t magic = aegis_get_u32le(m);
         int on_disk_encrypted = (magic == LOG_FRAME_MAGIC_ENC);
         int on_disk_plain_v2 = (magic == LOG_FRAME_MAGIC);
@@ -267,16 +290,18 @@ int log_open(LogFile *lf, const char *path, size_t fsync_batch,
             LOG_ERROR("log: %s is encrypted but no --encryption-key-file was "
                       "given",
                       path);
-            if (status)
+            if (status) {
                 *status = LOG_OPEN_ERR_PLAIN_ON_ENC;
+            }
             goto fail_quiet;
         }
         if (on_disk_plain_v2 && key) {
             LOG_ERROR("log: %s is plaintext but a key was given; run "
                       "--encrypt-migrate to convert it",
                       path);
-            if (status)
+            if (status) {
                 *status = LOG_OPEN_ERR_KEY_ON_PLAIN;
+            }
             goto fail_quiet;
         }
         if (!on_disk_encrypted && !on_disk_plain_v2) {
@@ -286,8 +311,9 @@ int log_open(LogFile *lf, const char *path, size_t fsync_batch,
                 LOG_ERROR("log: %s is a legacy plaintext log; migrate it to v2 "
                           "unencrypted first, then --encrypt-migrate",
                           path);
-                if (status)
+                if (status) {
                     *status = LOG_OPEN_ERR_KEY_ON_PLAIN;
+                }
                 goto fail_quiet;
             }
             close(lf->fd);
@@ -302,24 +328,28 @@ int log_open(LogFile *lf, const char *path, size_t fsync_batch,
                 return -1;
             }
             end = lseek(lf->fd, 0, SEEK_END);
-            if (end < 0)
+            if (end < 0) {
                 goto fail;
+            }
         } else if (on_disk_encrypted && !verify_first_frame(lf, end)) {
             LOG_ERROR("log: the given key does not decrypt %s (wrong key)",
                       path);
-            if (status)
+            if (status) {
                 *status = LOG_OPEN_ERR_WRONG_KEY;
+            }
             goto fail_quiet;
         }
     }
     lf->size = end;
-    if (status)
+    if (status) {
         *status = LOG_OPEN_OK;
+    }
     return 0;
 
 fail:
-    if (status)
+    if (status) {
         *status = LOG_OPEN_ERR_IO;
+    }
 fail_quiet:
     close(lf->fd);
     lf->fd = -1;
@@ -348,17 +378,20 @@ int log_close(LogFile *lf) {
 }
 
 int log_fsync(LogFile *lf) {
-    if (lf->fd < 0)
+    if (lf->fd < 0) {
         return 0;
+    }
     pthread_mutex_lock(&lf->wlock);
     int rv = fsync_retry(lf->fd);
     int err = errno;
-    if (rv == 0)
+    if (rv == 0) {
         lf->since_fsync = 0; /* leave the counter set so a retry flushes */
+    }
     pthread_mutex_unlock(&lf->wlock);
-    if (rv != 0)
+    if (rv != 0) {
         LOG_ERROR("log: fsync of %s failed: %s (write not durable)", lf->path,
                   strerror(err));
+    }
     return rv;
 }
 
@@ -372,12 +405,14 @@ static int log_append_encrypted(LogFile *lf, const uint8_t *payload, size_t len,
                                 uint64_t *out_offset) {
     uint8_t hdr[V3_FRAME_HEADER];
     uint8_t nonce[AEAD_NONCE_LEN];
-    if (aegis_fill_random(nonce, sizeof nonce) != 0)
+    if (aegis_fill_random(nonce, sizeof nonce) != 0) {
         return -1;
+    }
     build_header_v3(hdr, len, nonce);
     uint8_t *ct = malloc(len ? len : 1);
-    if (!ct)
+    if (!ct) {
         return -1;
+    }
     uint8_t tag[AEAD_TAG_LEN];
     aead_seal(lf->key, nonce, hdr, V3_AAD_LEN, payload, len, ct, tag);
 
@@ -395,17 +430,20 @@ static int log_append_encrypted(LogFile *lf, const uint8_t *payload, size_t len,
     lf->since_fsync++;
     pthread_mutex_unlock(&lf->wlock);
     free(ct);
-    if (out_offset)
+    if (out_offset) {
         *out_offset = (uint64_t)off;
+    }
     return 0;
 }
 
 int log_append(LogFile *lf, const uint8_t *payload, size_t len,
                uint64_t *out_offset) {
-    if (len > 0xFFFFFFFFu)
+    if (len > 0xFFFFFFFFU) {
         return -1;
-    if (lf->encrypted)
+    }
+    if (lf->encrypted) {
         return log_append_encrypted(lf, payload, len, out_offset);
+    }
     uint8_t hdr[LOG_FRAME_HEADER];
     build_header(hdr, len, crc32_compute(payload, len));
 
@@ -422,8 +460,9 @@ int log_append(LogFile *lf, const uint8_t *payload, size_t len,
      * after releasing the index lock, so a durable write does not hold that lock
      * across the fsync. */
     pthread_mutex_unlock(&lf->wlock);
-    if (out_offset)
+    if (out_offset) {
         *out_offset = (uint64_t)off;
+    }
     return 0;
 }
 
@@ -434,20 +473,24 @@ int log_append(LogFile *lf, const uint8_t *payload, size_t len,
  * the log mutex, so a writer that finds the counter already reset was made
  * durable by a concurrent writer's fsync. */
 int log_fsync_if_batched(LogFile *lf) {
-    if (lf->fd < 0)
+    if (lf->fd < 0) {
         return 0;
+    }
     pthread_mutex_lock(&lf->wlock);
-    int rv = 0, err = 0;
+    int rv = 0;
+    int err = 0;
     if (lf->fsync_batch == 0 || lf->since_fsync >= lf->fsync_batch) {
         rv = fsync_retry(lf->fd);
         err = errno;
-        if (rv == 0)
+        if (rv == 0) {
             lf->since_fsync = 0; /* on failure, retry on the next append */
+        }
     }
     pthread_mutex_unlock(&lf->wlock);
-    if (rv != 0)
+    if (rv != 0) {
         LOG_ERROR("log: fsync of %s failed: %s (write not durable)", lf->path,
                   strerror(err));
+    }
     return rv;
 }
 
@@ -455,15 +498,18 @@ int log_fsync_if_batched(LogFile *lf) {
 static int log_read_encrypted(LogFile *lf, uint64_t offset, uint8_t **out,
                               size_t *out_len) {
     uint8_t hdr[V3_FRAME_HEADER];
-    if (read_full(lf->fd, (off_t)offset, hdr, V3_FRAME_HEADER) != 0)
+    if (read_full(lf->fd, (off_t)offset, hdr, V3_FRAME_HEADER) != 0) {
         return -1;
+    }
     uint32_t len;
-    if (parse_header_v3(hdr, &len) != 0)
+    if (parse_header_v3(hdr, &len) != 0) {
         return -1;
+    }
     uint8_t *buf = malloc(len ? len : 1);
     uint8_t tag[AEAD_TAG_LEN];
-    if (!buf)
+    if (!buf) {
         return -1;
+    }
     if (read_full(lf->fd, (off_t)offset + V3_FRAME_HEADER, buf, len) != 0 ||
         read_full(lf->fd, (off_t)offset + V3_FRAME_HEADER + len, tag,
                   AEAD_TAG_LEN) != 0) {
@@ -482,17 +528,22 @@ static int log_read_encrypted(LogFile *lf, uint64_t offset, uint8_t **out,
 }
 
 int log_read(LogFile *lf, uint64_t offset, uint8_t **out, size_t *out_len) {
-    if (lf->encrypted)
+    if (lf->encrypted) {
         return log_read_encrypted(lf, offset, out, out_len);
+    }
     uint8_t hdr[LOG_FRAME_HEADER];
-    if (read_full(lf->fd, (off_t)offset, hdr, LOG_FRAME_HEADER) != 0)
+    if (read_full(lf->fd, (off_t)offset, hdr, LOG_FRAME_HEADER) != 0) {
         return -1;
-    uint32_t len, pcrc;
-    if (parse_header(hdr, &len, &pcrc) != 0)
+    }
+    uint32_t len;
+    uint32_t pcrc;
+    if (parse_header(hdr, &len, &pcrc) != 0) {
         return -1;
+    }
     uint8_t *buf = malloc(len ? len : 1);
-    if (!buf)
+    if (!buf) {
         return -1;
+    }
     if (read_full(lf->fd, (off_t)offset + LOG_FRAME_HEADER, buf, len) != 0) {
         free(buf);
         return -1;
@@ -513,8 +564,9 @@ size_t log_frame_overhead(const LogFile *lf) {
 int log_truncate(LogFile *lf, uint64_t valid_end) {
     pthread_mutex_lock(&lf->wlock);
     int rv = ftruncate(lf->fd, (off_t)valid_end);
-    if (rv == 0)
+    if (rv == 0) {
         lf->size = (off_t)valid_end;
+    }
     pthread_mutex_unlock(&lf->wlock);
     return rv;
 }
@@ -533,24 +585,31 @@ static off_t find_next_frame(const LogFile *lf, off_t from, off_t end) {
     uint8_t win[WIN];
     for (off_t base = from; base + hdr_len <= end;) {
         size_t want = (size_t)(end - base);
-        if (want > WIN)
+        if (want > WIN) {
             want = WIN;
-        if (read_full(lf->fd, base, win, want) != 0)
+        }
+        if (read_full(lf->fd, base, win, want) != 0) {
             break;
+        }
         size_t limit = want >= (size_t)hdr_len ? want - (size_t)hdr_len : 0;
         for (size_t i = 0; i <= limit; i++) {
-            if (aegis_get_u32le(win + i) != want_magic)
+            if (aegis_get_u32le(win + i) != want_magic) {
                 continue;
+            }
             off_t off = base + (off_t)i;
             uint8_t hdr[V3_FRAME_HEADER];
-            uint32_t len, pcrc;
-            if (read_full(lf->fd, off, hdr, hdr_len) != 0)
+            uint32_t len;
+            uint32_t pcrc;
+            if (read_full(lf->fd, off, hdr, hdr_len) != 0) {
                 continue;
+            }
             if (enc ? (parse_header_v3(hdr, &len) != 0)
-                    : (parse_header(hdr, &len, &pcrc) != 0))
+                    : (parse_header(hdr, &len, &pcrc) != 0)) {
                 continue;
-            if (off + overhead + (off_t)len > end)
+            }
+            if (off + overhead + (off_t)len > end) {
                 continue;
+            }
             return off;
         }
         /* Advance, overlapping by the header size so a magic straddling the
@@ -566,8 +625,10 @@ int log_scan(LogFile *lf, uint64_t start, uint64_t scan_end, log_scan_cb cb,
     off_t end = (off_t)scan_end;
     uint64_t clean_end =
         start; /* [0, start) is assumed clean (e.g. checkpoint) */
-    size_t good = 0, corrupt = 0;
-    int hole = 0, recovered_after_hole = 0;
+    size_t good = 0;
+    size_t corrupt = 0;
+    int hole = 0;
+    int recovered_after_hole = 0;
 
     const int enc = lf->encrypted;
     const off_t hdr_len = enc ? V3_FRAME_HEADER : LOG_FRAME_HEADER;
@@ -575,28 +636,33 @@ int log_scan(LogFile *lf, uint64_t start, uint64_t scan_end, log_scan_cb cb,
 
     while (off < end) {
         uint8_t hdr[V3_FRAME_HEADER];
-        if (off + hdr_len > end || read_full(lf->fd, off, hdr, hdr_len) != 0)
+        if (off + hdr_len > end || read_full(lf->fd, off, hdr, hdr_len) != 0) {
             break; /* trailing partial header: torn tail */
+        }
 
-        uint32_t len, pcrc;
+        uint32_t len;
+        uint32_t pcrc;
         int hdr_ok = enc ? (parse_header_v3(hdr, &len) == 0)
                          : (parse_header(hdr, &len, &pcrc) == 0);
         if (!hdr_ok) {
             /* Damaged or misaligned header: resync to the next valid frame. */
             off_t nxt = find_next_frame(lf, off + 1, end);
-            if (nxt >= end)
+            if (nxt >= end) {
                 break; /* nothing recoverable ahead: torn tail */
+            }
             hole = 1;
             corrupt++;
             off = nxt;
             continue;
         }
-        if (off + overhead + (off_t)len > end)
+        if (off + overhead + (off_t)len > end) {
             break; /* header valid but payload/tag incomplete: torn tail */
+        }
 
         uint8_t *buf = malloc(len ? len : 1);
-        if (!buf)
+        if (!buf) {
             return -1;
+        }
         int bad = 0;
         if (enc) {
             uint8_t tag[AEAD_TAG_LEN];
@@ -630,12 +696,14 @@ int log_scan(LogFile *lf, uint64_t start, uint64_t scan_end, log_scan_cb cb,
         free(buf);
         good++;
         off += overhead + (off_t)len;
-        if (hole)
+        if (hole) {
             recovered_after_hole = 1;
-        else
+        } else {
             clean_end = (uint64_t)off;
-        if (rv != 0)
+        }
+        if (rv != 0) {
             break;
+        }
     }
 
     if (out) {

@@ -9,8 +9,9 @@ static pthread_once_t g_table_once = PTHREAD_ONCE_INIT;
 static void build_table(void) {
     for (uint32_t i = 0; i < 256; i++) {
         uint32_t c = i;
-        for (int k = 0; k < 8; k++)
-            c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+        for (int k = 0; k < 8; k++) {
+            c = (c & 1) ? (0xEDB88320U ^ (c >> 1)) : (c >> 1);
+        }
         g_table[i] = c;
     }
 }
@@ -22,8 +23,9 @@ uint32_t crc32_update(uint32_t crc, const void *data, size_t len) {
     pthread_once(&g_table_once, build_table);
     const unsigned char *p = (const unsigned char *)data;
     crc = ~crc;
-    while (len--)
+    while (len--) {
         crc = g_table[(crc ^ *p++) & 0xff] ^ (crc >> 8);
+    }
     return ~crc;
 }
 

@@ -24,19 +24,22 @@ static int file_exists(const char *path) {
 /* -1 if the file is missing or cannot be stat'd. */
 static long long file_size(const char *path) {
     struct stat st;
-    if (stat(path, &st) != 0)
+    if (stat(path, &st) != 0) {
         return -1;
+    }
     return (long long)st.st_size;
 }
 
 /* Read an entire (small) file into a NUL-terminated heap buffer, or NULL. */
 static char *read_text(const char *path) {
     long long sz = file_size(path);
-    if (sz < 0 || sz > (1 << 20))
+    if (sz < 0 || sz > (1 << 20)) {
         return NULL; /* manifests are tiny */
+    }
     FILE *f = fopen(path, "rbe");
-    if (!f)
+    if (!f) {
         return NULL;
+    }
     char *buf = malloc((size_t)sz + 1);
     if (!buf) {
         fclose(f);
@@ -50,8 +53,9 @@ static char *read_text(const char *path) {
 
 int restore_run(const Config *cfg) {
     const char *src = cfg->restore_from;
-    char man_path[AEGIS_PATH_MAX], src_log[AEGIS_PATH_MAX],
-        src_meta[AEGIS_PATH_MAX];
+    char man_path[AEGIS_PATH_MAX];
+    char src_log[AEGIS_PATH_MAX];
+    char src_meta[AEGIS_PATH_MAX];
     snprintf(man_path, sizeof(man_path), "%s/manifest.json", src);
     snprintf(src_log, sizeof(src_log), "%s/memory.log", src);
     snprintf(src_meta, sizeof(src_meta), "%s/metadata.db", src);
@@ -136,7 +140,8 @@ int restore_run(const Config *cfg) {
     }
 
     /* Never clobber a live database. */
-    char dst_log[AEGIS_PATH_MAX], dst_meta[AEGIS_PATH_MAX];
+    char dst_log[AEGIS_PATH_MAX];
+    char dst_meta[AEGIS_PATH_MAX];
     snprintf(dst_log, sizeof(dst_log), "%s/memory.log", cfg->data_dir);
     snprintf(dst_meta, sizeof(dst_meta), "%s/metadata.db", cfg->data_dir);
     if (fs_mkdir_p(cfg->data_dir) != 0) {
@@ -149,14 +154,15 @@ int restore_run(const Config *cfg) {
      * fs_copy_file then overwrites the empty file we just created. */
     int claim = open(dst_log, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
     if (claim < 0) {
-        if (errno == EEXIST)
+        if (errno == EEXIST) {
             LOG_ERROR(
                 "restore: %s already contains a database; restore into an "
                 "empty --data-dir",
                 cfg->data_dir);
-        else
+        } else {
             LOG_ERROR("restore: cannot create %s: %s", dst_log,
                       strerror(errno));
+        }
         goto done;
     }
     close(claim);

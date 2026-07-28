@@ -24,12 +24,14 @@
  * score == weight * similarity * recency_factor for semantic queries. */
 static cJSON *search_explain_json(const SearchExplain *e) {
     cJSON *o = cJSON_CreateObject();
-    if (!o)
+    if (!o) {
         return NULL;
+    }
     cJSON_AddBoolToObject(o, "semantic", e->semantic);
     cJSON_AddNumberToObject(o, "score", e->score);
-    if (e->semantic)
+    if (e->semantic) {
         cJSON_AddNumberToObject(o, "similarity", e->similarity);
+    }
     cJSON_AddNumberToObject(o, "importance", e->importance);
     cJSON_AddNumberToObject(o, "confidence", e->confidence);
     cJSON_AddNumberToObject(o, "weight", e->weight);
@@ -39,8 +41,9 @@ static cJSON *search_explain_json(const SearchExplain *e) {
 
 static cJSON *resp_record(const MemoryRecord *r, int include_embeddings) {
     cJSON *o = json_ok();
-    if (!o)
+    if (!o) {
         return NULL;
+    }
     cJSON_AddItemToObject(o, "record", json_record(r, include_embeddings));
     return o;
 }
@@ -74,10 +77,12 @@ static int build_input_record(AegisDB *db, const cJSON *req, MemoryRecord *in,
     memcpy(in->data, data, in->data_len);
 
     double d;
-    if (jr_f64(req, "importance", &d) == 0)
+    if (jr_f64(req, "importance", &d) == 0) {
         in->importance = (float)d;
-    if (jr_f64(req, "confidence", &d) == 0)
+    }
+    if (jr_f64(req, "confidence", &d) == 0) {
         in->confidence = (float)d;
+    }
     const char *agent = jr_str(req, "agent_id", NULL);
     if (agent) {
         in->agent_id = strdup(agent);
@@ -181,15 +186,18 @@ static cJSON *handle_ping(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
  * the index read lock. */
 static void stats_add_storage(cJSON *o, AegisDB *db) {
     pthread_rwlock_rdlock(&db->index_lock);
-    size_t live = 0, tombstones = 0;
+    size_t live = 0;
+    size_t tombstones = 0;
     const HashIndex *h = db->hash;
     for (size_t i = 0; i < h->cap; i++) {
-        if (!h->buckets[i].used)
+        if (!h->buckets[i].used) {
             continue;
-        if (h->buckets[i].deleted)
+        }
+        if (h->buckets[i].deleted) {
             tombstones++;
-        else
+        } else {
             live++;
+        }
     }
     cJSON_AddNumberToObject(o, "records", (double)live);
     cJSON_AddNumberToObject(o, "tombstones", (double)tombstones);
@@ -237,8 +245,9 @@ static void stats_add_metrics(cJSON *o, AegisDB *db) {
         "export", "purge",   "consolidate", "forget",   "other"};
     Metrics *mt = &db->metrics;
     cJSON *m = cJSON_AddObjectToObject(o, "metrics");
-    if (!m)
+    if (!m) {
         return;
+    }
     cJSON_AddNumberToObject(
         m, "requests",
         (double)atomic_load_explicit(&mt->requests, memory_order_relaxed));
@@ -261,11 +270,13 @@ static void stats_add_metrics(cJSON *o, AegisDB *db) {
                             (double)atomic_load_explicit(&mt->memories_purged,
                                                          memory_order_relaxed));
     cJSON *bo = cJSON_AddObjectToObject(m, "by_op");
-    if (bo)
-        for (int i = 0; i < MOP__N; i++)
+    if (bo) {
+        for (int i = 0; i < MOP__N; i++) {
             cJSON_AddNumberToObject(bo, op_names[i],
                                     (double)atomic_load_explicit(
                                         &mt->by_op[i], memory_order_relaxed));
+        }
+    }
 }
 
 /* Per-tenant usage against the configured caps (admin-only op, so this is
@@ -273,8 +284,9 @@ static void stats_add_metrics(cJSON *o, AegisDB *db) {
  * single-tenant / no-quota response unchanged. */
 static void stats_add_tenants(cJSON *o, AegisDB *db) {
     if (!(db->config.tenant_max_records || db->config.tenant_max_bytes ||
-          db->config.tenant_rate_qps > 0))
+          db->config.tenant_rate_qps > 0)) {
         return;
+    }
     cJSON *lim = cJSON_AddObjectToObject(o, "tenant_limits");
     if (lim) {
         cJSON_AddNumberToObject(lim, "max_records",
@@ -299,7 +311,8 @@ static void stats_add_tenants(cJSON *o, AegisDB *db) {
 /* Replication posture (only when this node participates). */
 static void stats_add_replication(cJSON *o, AegisDB *db) {
     if (db->repl_follower) {
-        uint64_t applied = 0, primary_size = 0;
+        uint64_t applied = 0;
+        uint64_t primary_size = 0;
         int connected = 0;
         replication_follower_status(db->repl_follower, &applied, &primary_size,
                                     &connected);
@@ -339,12 +352,13 @@ static cJSON *handle_stats(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
                             (double)(db_now_ms() - db->started_ms));
     cJSON_AddStringToObject(o, "durability",
                             aegis_durability_name(db->config.durability));
-    if (db->config.durability == AEGIS_DURABILITY_BATCH)
+    if (db->config.durability == AEGIS_DURABILITY_BATCH) {
         cJSON_AddNumberToObject(o, "fsync_batch",
                                 (double)db->config.fsync_batch_size);
-    else if (db->config.durability == AEGIS_DURABILITY_INTERVAL)
+    } else if (db->config.durability == AEGIS_DURABILITY_INTERVAL) {
         cJSON_AddNumberToObject(o, "fsync_interval_ms",
                                 (double)db->config.fsync_interval_ms);
+    }
 
     stats_add_storage(o, db);
 
@@ -373,10 +387,12 @@ static cJSON *handle_snapshot(AegisDB *db, const cJSON *req,
     }
     DbSnapshotInfo info;
     int rc = db_snapshot(db, name, &info);
-    if (rc == DB_SNAPSHOT_BADNAME)
+    if (rc == DB_SNAPSHOT_BADNAME) {
         return json_error("INVALID_REQUEST", "invalid snapshot name");
-    if (rc != DB_SNAPSHOT_OK)
+    }
+    if (rc != DB_SNAPSHOT_OK) {
         return json_error_status(AEGIS_ERR_INTERNAL);
+    }
 
     cJSON *o = json_ok();
     cJSON_AddStringToObject(o, "snapshot", info.dir);
@@ -395,8 +411,9 @@ static int parse_filters(const cJSON *req, const char *ns, SearchParams *p,
 /* Build one input record from `spec`, pin it to `ns` when set. 0/-1 via *err. */
 static int build_pinned(AegisDB *db, const cJSON *spec, const char *ns,
                         MemoryRecord *in, aegis_status_t *err) {
-    if (build_input_record(db, spec, in, err) != 0)
+    if (build_input_record(db, spec, in, err) != 0) {
         return -1;
+    }
     if (ns) { /* a namespaced token writes only into its own tenant */
         free(in->agent_id);
         in->agent_id = strdup(ns);
@@ -414,19 +431,22 @@ static int build_pinned(AegisDB *db, const cJSON *spec, const char *ns,
 static cJSON *handle_insert_batch(AegisDB *db, const cJSON *arr, const char *ns,
                                   int include_embeddings) {
     int n = cJSON_GetArraySize(arr);
-    if (n < 1 || n > MAX_BATCH)
+    if (n < 1 || n > MAX_BATCH) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
 
     MemoryRecord *ins = calloc((size_t)n, sizeof(MemoryRecord));
-    if (!ins)
+    if (!ins) {
         return json_error_status(AEGIS_ERR_INTERNAL);
+    }
     for (int i = 0; i < n; i++) {
         aegis_status_t err;
         if (build_pinned(db, cJSON_GetArrayItem(arr, i), ns, &ins[i], &err) !=
             0) {
             record_free(&ins[i]);
-            for (int j = 0; j < i; j++)
+            for (int j = 0; j < i; j++) {
                 record_free(&ins[j]);
+            }
             free(ins);
             return json_error_status(err); /* nothing written yet */
         }
@@ -458,8 +478,9 @@ static cJSON *handle_insert(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     const char *ns = ctx->ns;
     int emb = want_embeddings(req);
     cJSON *arr = cJSON_GetObjectItemCaseSensitive(req, "records");
-    if (cJSON_IsArray(arr))
+    if (cJSON_IsArray(arr)) {
         return handle_insert_batch(db, arr, ns, emb);
+    }
 
     MemoryRecord in;
     aegis_status_t err;
@@ -473,8 +494,9 @@ static cJSON *handle_insert(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     MemoryRecord out;
     aegis_status_t st = qe_insert(db, &in, session, ttl, &out);
     record_free(&in);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return json_error_status(st);
+    }
     cJSON *r = resp_record(&out, emb);
     record_free(&out);
     return r;
@@ -483,8 +505,9 @@ static cJSON *handle_insert(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
 static cJSON *handle_get(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     const char *ns = ctx->ns;
     uint64_t id;
-    if (jr_u64(req, "id", &id) != 0)
+    if (jr_u64(req, "id", &id) != 0) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
     const char *agent = ns ? ns : jr_str(req, "agent_id", NULL);
     MemoryRecord out;
     /* Point-in-time get (ROADMAP 3.1): `as_of` (epoch ms) returns the record as
@@ -493,8 +516,9 @@ static cJSON *handle_get(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     aegis_status_t st = (jr_u64(req, "as_of", &as_of) == 0)
                             ? qe_get_as_of(db, id, agent, as_of, &out)
                             : qe_get(db, id, agent, &out);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return json_error_status(st);
+    }
     cJSON *r = resp_record(&out, want_embeddings(req));
     record_free(&out);
     return r;
@@ -504,14 +528,16 @@ static cJSON *handle_history(AegisDB *db, const cJSON *req,
                              const AuthCtx *ctx) {
     const char *ns = ctx->ns;
     uint64_t id;
-    if (jr_u64(req, "id", &id) != 0)
+    if (jr_u64(req, "id", &id) != 0) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
     const char *agent = ns ? ns : jr_str(req, "agent_id", NULL);
     MemoryRecord *vers = NULL;
     size_t n = 0;
     aegis_status_t st = qe_history(db, id, agent, &vers, &n);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return json_error_status(st);
+    }
 
     int inc_emb = want_embeddings(req);
     cJSON *o = json_ok();
@@ -535,8 +561,9 @@ static cJSON *handle_history(AegisDB *db, const cJSON *req,
 static cJSON *handle_update(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     const char *ns = ctx->ns;
     uint64_t id;
-    if (jr_u64(req, "id", &id) != 0)
+    if (jr_u64(req, "id", &id) != 0) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
     UpdatePatch patch;
     memset(&patch, 0, sizeof(patch));
     const char *data = jr_str(req, "data", NULL);
@@ -557,8 +584,9 @@ static cJSON *handle_update(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     const char **tags = NULL;
     size_t tn = 0;
     if (cJSON_GetObjectItemCaseSensitive(req, "tags")) {
-        if (jr_str_array(req, "tags", &tags, &tn, MAX_TAGS) != 0)
+        if (jr_str_array(req, "tags", &tags, &tn, MAX_TAGS) != 0) {
             return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+        }
         patch.has_tags = 1;
         patch.tags = tags;
         patch.tag_count = tn;
@@ -566,8 +594,9 @@ static cJSON *handle_update(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     MemoryRecord out;
     aegis_status_t st = qe_update(db, id, &patch, ns, &out);
     free(tags);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return json_error_status(st);
+    }
     cJSON *r = resp_record(&out, want_embeddings(req));
     record_free(&out);
     return r;
@@ -578,8 +607,9 @@ static cJSON *handle_delete(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     uint64_t id;
     if (jr_u64(req, "id", &id) == 0) {
         aegis_status_t st = qe_delete(db, id, ns);
-        if (st != AEGIS_OK)
+        if (st != AEGIS_OK) {
             return json_error_status(st);
+        }
         cJSON *o = json_ok();
         cJSON_AddNumberToObject(o, "id", (double)id);
         cJSON_AddBoolToObject(o, "deleted", 1);
@@ -588,13 +618,15 @@ static cJSON *handle_delete(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     /* no id: delete every record matching the filters (requires >=1 filter) */
     SearchParams p;
     const char **tags = NULL;
-    if (parse_filters(req, ns, &p, &tags) != 0)
+    if (parse_filters(req, ns, &p, &tags) != 0) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
     size_t deleted = 0;
     aegis_status_t st = qe_delete_by_query(db, &p, ns, &deleted);
     free(tags);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return json_error_status(st);
+    }
     cJSON *o = json_ok();
     cJSON_AddNumberToObject(o, "deleted", (double)deleted);
     return o;
@@ -605,21 +637,26 @@ static cJSON *handle_export(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     /* Subject = the token's namespace, or an admin-specified agent_id. Refuse a
      * subjectless export (that would be "dump the whole DB"). */
     const char *target = ns ? ns : jr_str(req, "agent_id", NULL);
-    if (!target || !*target)
+    if (!target || !*target) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
-    uint64_t v, after = 0;
-    if (jr_u64(req, "after_id", &v) == 0)
+    }
+    uint64_t v;
+    uint64_t after = 0;
+    if (jr_u64(req, "after_id", &v) == 0) {
         after = v;
+    }
     size_t limit = 100;
-    if (jr_u64(req, "limit", &v) == 0)
+    if (jr_u64(req, "limit", &v) == 0) {
         limit = v > 1000 ? 1000 : (size_t)v;
+    }
 
     MemoryRecord *recs = NULL;
     size_t n = 0;
     int more = 0;
     aegis_status_t st = qe_export(db, target, after, limit, &recs, &n, &more);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return json_error_status(st);
+    }
 
     int inc_emb = want_embeddings(req);
     cJSON *o = json_ok();
@@ -642,21 +679,24 @@ static cJSON *handle_export(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
 static cJSON *handle_purge(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     const char *ns = ctx->ns;
     const char *target = ns ? ns : jr_str(req, "agent_id", NULL);
-    if (!target || !*target)
+    if (!target || !*target) {
         return json_error_status(
             AEGIS_ERR_INVALID_REQUEST); /* no global purge */
+    }
     int dry_run = jr_bool(req, "dry_run", 0);
     int compact = jr_bool(req, "compact", 1);
 
     size_t purged = 0;
     aegis_status_t st = qe_purge_namespace(db, target, dry_run, &purged);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return json_error_status(st);
+    }
     /* Compact so the tombstoned payloads actually leave the on-disk log — the
      * point of right-to-be-forgotten. Skippable for a batched/scheduled compact. */
     int compacted = 0;
-    if (!dry_run && compact && purged > 0)
+    if (!dry_run && compact && purged > 0) {
         compacted = (compaction_run_once(db) == 0);
+    }
 
     cJSON *o = json_ok();
     cJSON_AddStringToObject(o, "namespace", target);
@@ -673,11 +713,13 @@ static int parse_filters(const cJSON *req, const char *ns, SearchParams *p,
                          const char ***out_tags) {
     memset(p, 0, sizeof(*p));
     if (jr_u64(req, "start_time", &p->start_time) == 0 &&
-        jr_u64(req, "end_time", &p->end_time) == 0)
+        jr_u64(req, "end_time", &p->end_time) == 0) {
         p->has_time = 1;
+    }
     const char *type = jr_str(req, "type", NULL);
-    if (type && memory_type_from_string(type, &p->type) == 0)
+    if (type && memory_type_from_string(type, &p->type) == 0) {
         p->has_type = 1;
+    }
     double ms;
     if (jr_f64(req, "max_importance", &ms) == 0) {
         p->has_max_importance = 1;
@@ -688,8 +730,9 @@ static int parse_filters(const cJSON *req, const char *ns, SearchParams *p,
     p->match_all = (strcmp(match, "any") != 0);
     const char **tags = NULL;
     size_t tn = 0;
-    if (jr_str_array(req, "tags", &tags, &tn, MAX_TAGS) != 0)
+    if (jr_str_array(req, "tags", &tags, &tn, MAX_TAGS) != 0) {
         return -1;
+    }
     p->tags = tags;
     p->tag_count = tn;
     *out_tags = tags;
@@ -700,20 +743,23 @@ static cJSON *handle_count(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     const char *ns = ctx->ns;
     SearchParams p;
     const char **tags = NULL;
-    if (parse_filters(req, ns, &p, &tags) != 0)
+    if (parse_filters(req, ns, &p, &tags) != 0) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
     size_t count = 0;
     int capped = 0;
     aegis_status_t st = qe_count(db, &p, &count, &capped);
     free(tags);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return json_error_status(st);
+    }
     cJSON *o = json_ok();
     cJSON_AddNumberToObject(o, "count", (double)count);
     /* Flag a count that hit the broad-scan cap so callers don't treat the
      * bounded floor as the true total. */
-    if (capped)
+    if (capped) {
         cJSON_AddBoolToObject(o, "capped", 1);
+    }
     return o;
 }
 
@@ -726,10 +772,12 @@ static cJSON *handle_consolidate(AegisDB *db, const cJSON *req,
     float min_sim = (jr_f64(req, "min_similarity", &ms) == 0)
                         ? (float)ms
                         : (float)CONSOLIDATE_DEFAULT_MIN;
-    size_t clusters = 0, merged = 0;
+    size_t clusters = 0;
+    size_t merged = 0;
     aegis_status_t st = qe_consolidate(db, ns, min_sim, &clusters, &merged);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return json_error_status(st);
+    }
     cJSON *o = json_ok();
     cJSON_AddNumberToObject(o, "clusters", (double)clusters);
     cJSON_AddNumberToObject(o, "merged", (double)merged);
@@ -753,16 +801,19 @@ static cJSON *handle_forget(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
      * Curated semantic facts are protected unless the caller names the type. */
     MemoryType type = MEM_EPISODIC;
     const char *ts = jr_str(req, "type", NULL);
-    if (ts && memory_type_from_string(ts, &type) != 0)
+    if (ts && memory_type_from_string(ts, &type) != 0) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
     int dry_run = jr_bool(req, "dry_run", 0);
     size_t max_forget = (jr_u64(req, "max_forget", &v) == 0) ? (size_t)v : 0;
 
-    size_t scanned = 0, forgotten = 0;
+    size_t scanned = 0;
+    size_t forgotten = 0;
     aegis_status_t st = qe_forget(db, ns, type, half_life, min_ret, dry_run,
                                   max_forget, &scanned, &forgotten);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return json_error_status(st);
+    }
     cJSON *o = json_ok();
     cJSON_AddNumberToObject(o, "scanned", (double)scanned);
     cJSON_AddNumberToObject(o, "forgotten", (double)forgotten);
@@ -776,27 +827,32 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     memset(&p, 0, sizeof(p));
     uint64_t v;
     if (jr_u64(req, "start_time", &p.start_time) == 0 &&
-        jr_u64(req, "end_time", &p.end_time) == 0)
+        jr_u64(req, "end_time", &p.end_time) == 0) {
         p.has_time = 1;
+    }
     const char *type = jr_str(req, "type", NULL);
-    if (type && memory_type_from_string(type, &p.type) == 0)
+    if (type && memory_type_from_string(type, &p.type) == 0) {
         p.has_type = 1;
+    }
     /* A namespaced token sees only its tenant; admin/no-auth may filter freely. */
     p.agent_id = ns ? ns : jr_str(req, "agent_id", NULL);
     const char *match = jr_str(req, "match", "all");
     p.match_all = (strcmp(match, "any") != 0);
-    if (jr_u64(req, "top_k", &v) == 0)
+    if (jr_u64(req, "top_k", &v) == 0) {
         p.top_k = v > MAX_TOP_K ? MAX_TOP_K : (size_t)v; /* bound work/allocs */
-    if (jr_u64(req, "offset", &v) == 0)
+    }
+    if (jr_u64(req, "offset", &v) == 0) {
         p.offset = v > MAX_OFFSET ? MAX_OFFSET : (size_t)v; /* pagination */
+    }
     double ms;
     if (jr_f64(req, "min_score", &ms) == 0) {
         p.has_min_score = 1;
         p.min_score = (float)ms;
     }
-    if (jr_u64(req, "half_life_ms", &v) == 0 && v > 0)
+    if (jr_u64(req, "half_life_ms", &v) == 0 && v > 0) {
         p.half_life_ms =
             v < MIN_HALF_LIFE_MS ? MIN_HALF_LIFE_MS : v; /* 0/absent = off */
+    }
     if (jr_f64(req, "max_importance", &ms) == 0) {
         p.has_max_importance = 1;
         p.max_importance = (float)ms;
@@ -807,8 +863,9 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
 
     const char **tags = NULL;
     size_t tn = 0;
-    if (jr_str_array(req, "tags", &tags, &tn, MAX_TAGS) != 0)
+    if (jr_str_array(req, "tags", &tags, &tn, MAX_TAGS) != 0) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
     p.tags = tags;
     p.tag_count = tn;
     float *emb = NULL;
@@ -830,16 +887,18 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     aegis_status_t st = qe_search_ex(db, &p, &recs, explain ? &expl : NULL, &n);
     free(tags);
     free(emb);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return json_error_status(st);
+    }
 
     int inc_emb = want_embeddings(req);
     cJSON *o = json_ok();
     cJSON *arr = cJSON_AddArrayToObject(o, "records");
     for (size_t i = 0; i < n; i++) {
         cJSON *jr = json_record(&recs[i], inc_emb);
-        if (explain && expl)
+        if (explain && expl) {
             cJSON_AddItemToObject(jr, "explain", search_explain_json(&expl[i]));
+        }
         cJSON_AddItemToArray(arr, jr);
         record_free(&recs[i]);
     }
@@ -854,16 +913,19 @@ static cJSON *handle_promote(AegisDB *db, const cJSON *req,
     const char *ns = ctx->ns;
     const char *session = jr_str(req, "session_id", NULL);
     uint64_t wid;
-    if (jr_u64(req, "working_id", &wid) != 0)
+    if (jr_u64(req, "working_id", &wid) != 0) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
     const char *to = jr_str(req, "to_type", "episodic");
     MemoryType tt;
-    if (memory_type_from_string(to, &tt) != 0)
+    if (memory_type_from_string(to, &tt) != 0) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
     MemoryRecord out;
     aegis_status_t st = qe_promote(db, session, wid, tt, ns, &out);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return json_error_status(st);
+    }
     cJSON *r = resp_record(&out, want_embeddings(req));
     record_free(&out);
     return r;
@@ -871,20 +933,24 @@ static cJSON *handle_promote(AegisDB *db, const cJSON *req,
 
 static cJSON *handle_relate(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     const char *ns = ctx->ns;
-    uint64_t from, to;
-    if (jr_u64(req, "from_id", &from) != 0 || jr_u64(req, "to_id", &to) != 0)
+    uint64_t from;
+    uint64_t to;
+    if (jr_u64(req, "from_id", &from) != 0 || jr_u64(req, "to_id", &to) != 0) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
     const char *kind = jr_str(req, "kind", NULL);
     /* qe_relate enforces that both endpoints live in the caller's namespace */
     aegis_status_t st = qe_relate(db, from, to, kind, ns);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return json_error_status(st);
+    }
     cJSON *o = json_ok();
     cJSON *rel = cJSON_AddObjectToObject(o, "relationship");
     cJSON_AddNumberToObject(rel, "from_id", (double)from);
     cJSON_AddNumberToObject(rel, "to_id", (double)to);
-    if (kind)
+    if (kind) {
         cJSON_AddStringToObject(rel, "kind", kind);
+    }
     return o;
 }
 
@@ -892,21 +958,24 @@ static cJSON *handle_traverse(AegisDB *db, const cJSON *req,
                               const AuthCtx *ctx) {
     const char *ns = ctx->ns;
     uint64_t id;
-    if (jr_u64(req, "id", &id) != 0)
+    if (jr_u64(req, "id", &id) != 0) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
     uint64_t depth = 1;
     jr_u64(req, "depth", &depth);
     /* Clamp before the cast to int: an untrusted u64 depth would otherwise cast
      * to a garbage (possibly negative) value, and a huge depth is pathological
      * work regardless. A graph walk deeper than this isn't useful. */
-    if (depth > MAX_TRAVERSE_DEPTH)
+    if (depth > MAX_TRAVERSE_DEPTH) {
         depth = MAX_TRAVERSE_DEPTH;
+    }
     const char *agent = ns ? ns : jr_str(req, "agent_id", NULL);
     MemoryRecord *recs = NULL;
     size_t n = 0;
     aegis_status_t st = qe_traverse(db, id, (int)depth, agent, &recs, &n);
-    if (st != AEGIS_OK)
+    if (st != AEGIS_OK) {
         return json_error_status(st);
+    }
     int emb = want_embeddings(req);
     cJSON *o = json_ok();
     cJSON *arr = cJSON_AddArrayToObject(o, "records");
@@ -924,8 +993,9 @@ static cJSON *handle_traverse(AegisDB *db, const cJSON *req,
 /* Constant-time fixed-length byte compare (no early exit). */
 static int ct_eq_bytes(const uint8_t *a, const uint8_t *b, size_t n) {
     unsigned char diff = 0;
-    for (size_t i = 0; i < n; i++)
+    for (size_t i = 0; i < n; i++) {
         diff |= (unsigned char)(a[i] ^ b[i]);
+    }
     return diff == 0;
 }
 
@@ -959,16 +1029,18 @@ static const char *scope_str(int scope) {
 static int gen_random_token(char out[65]) {
     uint8_t buf[32];
     FILE *f = fopen("/dev/urandom", "rbe");
-    if (!f)
+    if (!f) {
         return -1;
+    }
     size_t n = fread(buf, 1, sizeof buf, f);
     fclose(f);
-    if (n != sizeof buf)
+    if (n != sizeof buf) {
         return -1;
+    }
     static const char hx[] = "0123456789abcdef";
     for (int i = 0; i < 32; i++) {
         out[2 * i] = hx[buf[i] >> 4];
-        out[2 * i + 1] = hx[buf[i] & 0xf];
+        out[(2 * i) + 1] = hx[buf[i] & 0xf];
     }
     out[64] = '\0';
     return 0;
@@ -988,8 +1060,9 @@ static cJSON *handle_token_list(AegisDB *db, const cJSON *req,
         config_token_fingerprint(t, id);
         cJSON *e = cJSON_CreateObject();
         cJSON_AddStringToObject(e, "id", id);
-        if (t->namespace)
+        if (t->namespace) {
             cJSON_AddStringToObject(e, "namespace", t->namespace);
+        }
         cJSON_AddStringToObject(e, "scope", scope_str(t->scope));
         cJSON_AddItemToArray(arr, e);
     }
@@ -1004,15 +1077,18 @@ static cJSON *handle_token_list(AegisDB *db, const cJSON *req,
  * token, which parses as a global-admin token — that survive a reload. Stricter
  * than valid_agent_id (which permits spaces) because of the delimited format. */
 static int token_namespace_ok(const char *ns) {
-    if (!ns)
+    if (!ns) {
         return 0;
+    }
     size_t n = strlen(ns);
-    if (n < 1 || n > MAX_AGENT_ID)
+    if (n < 1 || n > MAX_AGENT_ID) {
         return 0;
+    }
     for (size_t i = 0; i < n; i++) {
         unsigned char c = (unsigned char)ns[i];
-        if (c <= 0x20 || c == 0x7f)
+        if (c <= 0x20 || c == 0x7f) {
             return 0; /* printable, no whitespace/control */
+        }
     }
     return 1;
 }
@@ -1027,19 +1103,23 @@ static cJSON *handle_token_add(AegisDB *db, const cJSON *req,
     const char *tok = jr_str(req, "new_token", NULL);
     const char *ns = jr_str(req, "namespace", NULL);
     int scope;
-    if (scope_from_str(jr_str(req, "scope", ns ? "rw" : "admin"), &scope) != 0)
+    if (scope_from_str(jr_str(req, "scope", ns ? "rw" : "admin"), &scope) !=
+        0) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
     /* admin scope is global (no namespace); a namespaced token is ro/rw. */
-    if (scope == AEGIS_SCOPE_ADMIN)
+    if (scope == AEGIS_SCOPE_ADMIN) {
         ns = NULL;
-    else if (!token_namespace_ok(ns))
+    } else if (!token_namespace_ok(ns)) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
 
     char generated[65];
     int minted = 0;
     if (!tok) {
-        if (gen_random_token(generated) != 0)
+        if (gen_random_token(generated) != 0) {
             return json_error_status(AEGIS_ERR_INTERNAL);
+        }
         tok = generated;
         minted = 1;
     }
@@ -1053,18 +1133,21 @@ static cJSON *handle_token_add(AegisDB *db, const cJSON *req,
     config_token_fingerprint(
         &db->config.auth_tokens[db->config.auth_token_count - 1], id);
     int persisted = 0;
-    if (db->config.auth_token_file[0])
+    if (db->config.auth_token_file[0]) {
         persisted = (config_write_token_file(&db->config,
                                              db->config.auth_token_file) == 0);
+    }
     pthread_rwlock_unlock(&db->auth_lock);
-    if (db->config.auth_token_file[0] && !persisted)
+    if (db->config.auth_token_file[0] && !persisted) {
         LOG_WARN("token_add: could not persist to %s",
                  db->config.auth_token_file);
+    }
 
     cJSON *o = json_ok();
     cJSON_AddStringToObject(o, "id", id);
-    if (minted)
+    if (minted) {
         cJSON_AddStringToObject(o, "token", generated); /* shown once */
+    }
     cJSON_AddBoolToObject(o, "persisted", persisted);
     return o;
 }
@@ -1074,17 +1157,20 @@ static cJSON *handle_token_revoke(AegisDB *db, const cJSON *req,
                                   const AuthCtx *ctx) {
     (void)ctx;
     const char *id = jr_str(req, "id", NULL);
-    if (!id)
+    if (!id) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
     pthread_rwlock_wrlock(&db->auth_lock);
     int removed = config_remove_token(&db->config, id);
     int persisted = 0;
-    if (removed && db->config.auth_token_file[0])
+    if (removed && db->config.auth_token_file[0]) {
         persisted = (config_write_token_file(&db->config,
                                              db->config.auth_token_file) == 0);
+    }
     pthread_rwlock_unlock(&db->auth_lock);
-    if (!removed)
+    if (!removed) {
         return json_error_status(AEGIS_ERR_NOT_FOUND);
+    }
     cJSON *o = json_ok();
     cJSON_AddBoolToObject(o, "revoked", 1);
     cJSON_AddBoolToObject(o, "persisted", persisted);
@@ -1126,8 +1212,9 @@ static aegis_status_t resolve_identity(AegisDB *db, const cJSON *req,
                 sha256(t->token, strlen(t->token), cand);
                 want = cand;
             }
-            if (ct_eq_bytes(th, want, SHA256_DIGEST_LEN))
+            if (ct_eq_bytes(th, want, SHA256_DIGEST_LEN)) {
                 match = t;
+            }
         }
     }
     aegis_status_t st = AEGIS_ERR_UNAUTHORIZED;
@@ -1148,12 +1235,12 @@ typedef cJSON *(*OpHandler)(AegisDB *db, const cJSON *req, const AuthCtx *ctx);
 /* Per-operation flags. */
 enum {
     OP_WRITE =
-        1u, /* mutates: needs a write token AND refused on a read-only replica */
+        1U, /* mutates: needs a write token AND refused on a read-only replica */
     OP_GLOBAL =
-        2u, /* admin/global token only — a namespaced caller is forbidden */
+        2U, /* admin/global token only — a namespaced caller is forbidden */
     OP_WRITE_TOK =
-        4u, /* needs a write token, but is NOT a replica write (snapshot) */
-    OP_NOAUTH = 8u, /* dispatched before identity resolution (ping) */
+        4U, /* needs a write token, but is NOT a replica write (snapshot) */
+    OP_NOAUTH = 8U, /* dispatched before identity resolution (ping) */
 };
 
 typedef struct {
@@ -1190,11 +1277,14 @@ static const OpDef OPS[] = {
 };
 
 static const OpDef *find_op(const char *op) {
-    if (!op)
+    if (!op) {
         return NULL;
-    for (size_t i = 0; i < sizeof(OPS) / sizeof(OPS[0]); i++)
-        if (strcmp(op, OPS[i].name) == 0)
+    }
+    for (size_t i = 0; i < sizeof(OPS) / sizeof(OPS[0]); i++) {
+        if (strcmp(op, OPS[i].name) == 0) {
             return &OPS[i];
+        }
+    }
     return NULL;
 }
 
@@ -1226,8 +1316,9 @@ static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
     }
 
     /* "ping" is exempt so liveness and startup probes work unauthenticated. */
-    if (d->flags & OP_NOAUTH)
+    if (d->flags & OP_NOAUTH) {
         return d->fn(db, req, NULL);
+    }
 
     AuthCtx ctx;
     aegis_status_t ast = resolve_identity(db, req, &ctx);
@@ -1260,10 +1351,12 @@ static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
 
     /* Admin-only ops (stats, token_*, snapshot) forbid a namespaced caller;
      * snapshot additionally requires a write token. */
-    if ((d->flags & OP_GLOBAL) && ctx.ns)
+    if ((d->flags & OP_GLOBAL) && ctx.ns) {
         return json_error_status(AEGIS_ERR_FORBIDDEN);
-    if ((d->flags & OP_WRITE_TOK) && !ctx.can_write)
+    }
+    if ((d->flags & OP_WRITE_TOK) && !ctx.can_write) {
         return json_error_status(AEGIS_ERR_FORBIDDEN);
+    }
 
     LOG_DEBUG("dispatch: operation \"%s\" (ns=%s)", opsafe,
               ctx.ns ? ctx.ns : "*");
@@ -1278,18 +1371,21 @@ static MetricOp metric_op(const char *op) {
 static uint64_t monotonic_micros(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+    return ((uint64_t)ts.tv_sec * 1000000ULL) +
+           ((uint64_t)ts.tv_nsec / 1000ULL);
 }
 
 /* True if `resp` is an error response, and if so its error code (or NULL). */
 static int resp_is_error(const cJSON *resp, const char **code) {
     const cJSON *ok = cJSON_GetObjectItemCaseSensitive(resp, "ok");
-    if (!ok || !cJSON_IsFalse(ok))
+    if (!ok || !cJSON_IsFalse(ok)) {
         return 0;
+    }
     const cJSON *err = cJSON_GetObjectItemCaseSensitive(resp, "error");
     const cJSON *c = err ? cJSON_GetObjectItemCaseSensitive(err, "code") : NULL;
-    if (code)
+    if (code) {
         *code = (c && cJSON_IsString(c)) ? c->valuestring : NULL;
+    }
     return 1;
 }
 
@@ -1310,9 +1406,10 @@ cJSON *query_engine_dispatch(AegisDB *db, const cJSON *req) {
     const char *code = NULL;
     if (resp && resp_is_error(resp, &code)) {
         atomic_fetch_add_explicit(&m->errors, 1, memory_order_relaxed);
-        if (code && strcmp(code, "UNAUTHORIZED") == 0)
+        if (code && strcmp(code, "UNAUTHORIZED") == 0) {
             atomic_fetch_add_explicit(&m->unauthorized, 1,
                                       memory_order_relaxed);
+        }
     }
     return resp;
 }

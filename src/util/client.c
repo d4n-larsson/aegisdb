@@ -23,8 +23,9 @@
 static int parse_u64(const char *s, uint64_t *out) {
     char *end = NULL;
     unsigned long long v = strtoull(s, &end, 10);
-    if (!s[0] || (end && *end))
+    if (!s[0] || (end && *end)) {
         return -1;
+    }
     *out = (uint64_t)v;
     return 0;
 }
@@ -32,18 +33,21 @@ static int parse_u64(const char *s, uint64_t *out) {
 /* Split a comma-separated list into a cJSON string array (NULL if empty). */
 static cJSON *csv_to_array(const char *csv) {
     cJSON *arr = cJSON_CreateArray();
-    if (!arr)
+    if (!arr) {
         return NULL;
+    }
     const char *p = csv;
     while (*p) {
         const char *c = strchr(p, ',');
         size_t len = c ? (size_t)(c - p) : strlen(p);
         char *tok = strndup(p, len);
-        if (tok && *tok)
+        if (tok && *tok) {
             cJSON_AddItemToArray(arr, cJSON_CreateString(tok));
+        }
         free(tok);
-        if (!c)
+        if (!c) {
             break;
+        }
         p = c + 1;
     }
     return arr;
@@ -55,12 +59,14 @@ static cJSON *csv_to_array(const char *csv) {
  * large (up to a 64 MiB bound), so this grows a heap buffer and reads in chunks
  * — distinct from netio's fixed-size, byte-at-a-time net_read_line. */
 static char *recv_line(int fd) {
-    size_t cap = 4096, len = 0;
+    size_t cap = 4096;
+    size_t len = 0;
     const size_t max_cap =
-        64u * 1024 * 1024; /* bound a server that never sends \n */
+        64U * 1024 * 1024; /* bound a server that never sends \n */
     char *buf = malloc(cap);
-    if (!buf)
+    if (!buf) {
         return NULL;
+    }
     buf[0] = '\0'; /* so an immediate server close returns a valid empty string,
                     * never an uninitialised, unterminated heap buffer */
     for (;;) {
@@ -79,13 +85,15 @@ static char *recv_line(int fd) {
         }
         ssize_t r = recv(fd, buf + len, cap - len - 1, 0);
         if (r < 0) {
-            if (errno == EINTR)
+            if (errno == EINTR) {
                 continue; /* a caught signal, not a read failure */
+            }
             free(buf);
             return NULL;
         }
-        if (r == 0)
+        if (r == 0) {
             break; /* server closed */
+        }
         len += (size_t)r;
         buf[len] = '\0';
         char *nl = memchr(buf, '\n', len);
@@ -124,8 +132,9 @@ static void client_usage(void) {
  * name). Returns NULL on a usage error. */
 static cJSON *build_request(const char *cmd, int argc, char **argv) {
     cJSON *r = cJSON_CreateObject();
-    if (!r)
+    if (!r) {
         return NULL;
+    }
 
     if (strcmp(cmd, "ping") == 0 || strcmp(cmd, "stats") == 0) {
         cJSON_AddStringToObject(r, "operation", cmd);
@@ -133,98 +142,144 @@ static cJSON *build_request(const char *cmd, int argc, char **argv) {
     }
     if (strcmp(cmd, "get") == 0 || strcmp(cmd, "delete") == 0) {
         uint64_t id;
-        if (argc != 1 || parse_u64(argv[0], &id) != 0)
+        if (argc != 1 || parse_u64(argv[0], &id) != 0) {
             goto usage;
+        }
         cJSON_AddStringToObject(r, "operation", cmd);
         cJSON_AddNumberToObject(r, "id", (double)id);
         return r;
     }
     if (strcmp(cmd, "put") == 0) {
-        const char *type = "episodic", *tags = NULL, *session = NULL;
+        const char *type = "episodic";
+        const char *tags = NULL;
+        const char *session = NULL;
         const char *data = NULL;
-        double imp = 0, conf = 0;
-        int has_imp = 0, has_conf = 0;
+        double imp = 0;
+        double conf = 0;
+        int has_imp = 0;
+        int has_conf = 0;
         uint64_t ttl = 0;
         int has_ttl = 0;
         for (int i = 0; i < argc; i++) {
             const char *a = argv[i];
-            if (!strcmp(a, "--type") && i + 1 < argc)
-                type = argv[++i];
-            else if (!strcmp(a, "--tags") && i + 1 < argc)
-                tags = argv[++i];
-            else if (!strcmp(a, "--session") && i + 1 < argc)
-                session = argv[++i];
-            else if (!strcmp(a, "--importance") && i + 1 < argc) {
+            if (!strcmp(a, "--type") && i + 1 < argc) {
+                {
+                    type = argv[++i];
+                }
+            } else if (!strcmp(a, "--tags") && i + 1 < argc) {
+                {
+                    tags = argv[++i];
+                }
+            } else if (!strcmp(a, "--session") && i + 1 < argc) {
+                {
+                    session = argv[++i];
+                }
+            } else if (!strcmp(a, "--importance") && i + 1 < argc) {
                 imp = atof(argv[++i]);
                 has_imp = 1;
             } else if (!strcmp(a, "--confidence") && i + 1 < argc) {
                 conf = atof(argv[++i]);
                 has_conf = 1;
             } else if (!strcmp(a, "--ttl-ms") && i + 1 < argc) {
-                if (parse_u64(argv[++i], &ttl))
+                if (parse_u64(argv[++i], &ttl)) {
                     goto usage;
+                }
                 has_ttl = 1;
-            } else if (a[0] != '-' && !data)
-                data = a;
-            else
-                goto usage;
+            } else if (a[0] != '-' && !data) {
+                {
+                    data = a;
+                }
+            } else {
+                {
+                    goto usage;
+                }
+            }
         }
-        if (!data)
+        if (!data) {
             goto usage;
+        }
         cJSON_AddStringToObject(r, "operation", "insert");
         cJSON_AddStringToObject(r, "type", type);
         cJSON_AddStringToObject(r, "data", data);
-        if (tags)
+        if (tags) {
             cJSON_AddItemToObject(r, "tags", csv_to_array(tags));
-        if (session)
+        }
+        if (session) {
             cJSON_AddStringToObject(r, "session_id", session);
-        if (has_imp)
+        }
+        if (has_imp) {
             cJSON_AddNumberToObject(r, "importance", imp);
-        if (has_conf)
+        }
+        if (has_conf) {
             cJSON_AddNumberToObject(r, "confidence", conf);
-        if (has_ttl)
+        }
+        if (has_ttl) {
             cJSON_AddNumberToObject(r, "ttl_ms", (double)ttl);
+        }
         return r;
     }
     if (strcmp(cmd, "search") == 0) {
-        const char *type = NULL, *tags = NULL, *match = NULL;
-        uint64_t top_k = 0, start = 0, end = 0;
-        int has_top = 0, has_start = 0, has_end = 0;
+        const char *type = NULL;
+        const char *tags = NULL;
+        const char *match = NULL;
+        uint64_t top_k = 0;
+        uint64_t start = 0;
+        uint64_t end = 0;
+        int has_top = 0;
+        int has_start = 0;
+        int has_end = 0;
         for (int i = 0; i < argc; i++) {
             const char *a = argv[i];
-            if (!strcmp(a, "--type") && i + 1 < argc)
-                type = argv[++i];
-            else if (!strcmp(a, "--tags") && i + 1 < argc)
-                tags = argv[++i];
-            else if (!strcmp(a, "--match") && i + 1 < argc)
-                match = argv[++i];
-            else if (!strcmp(a, "--top-k") && i + 1 < argc) {
-                if (parse_u64(argv[++i], &top_k))
+            if (!strcmp(a, "--type") && i + 1 < argc) {
+                {
+                    type = argv[++i];
+                }
+            } else if (!strcmp(a, "--tags") && i + 1 < argc) {
+                {
+                    tags = argv[++i];
+                }
+            } else if (!strcmp(a, "--match") && i + 1 < argc) {
+                {
+                    match = argv[++i];
+                }
+            } else if (!strcmp(a, "--top-k") && i + 1 < argc) {
+                if (parse_u64(argv[++i], &top_k)) {
                     goto usage;
+                }
                 has_top = 1;
             } else if (!strcmp(a, "--start") && i + 1 < argc) {
-                if (parse_u64(argv[++i], &start))
+                if (parse_u64(argv[++i], &start)) {
                     goto usage;
+                }
                 has_start = 1;
             } else if (!strcmp(a, "--end") && i + 1 < argc) {
-                if (parse_u64(argv[++i], &end))
+                if (parse_u64(argv[++i], &end)) {
                     goto usage;
+                }
                 has_end = 1;
-            } else
-                goto usage;
+            } else {
+                {
+                    goto usage;
+                }
+            }
         }
         cJSON_AddStringToObject(r, "operation", "search");
-        if (type)
+        if (type) {
             cJSON_AddStringToObject(r, "type", type);
-        if (tags)
+        }
+        if (tags) {
             cJSON_AddItemToObject(r, "tags", csv_to_array(tags));
-        if (match)
+        }
+        if (match) {
             cJSON_AddStringToObject(r, "match", match);
+        }
         cJSON_AddNumberToObject(r, "top_k", (double)(has_top ? top_k : 10));
-        if (has_start)
+        if (has_start) {
             cJSON_AddNumberToObject(r, "start_time", (double)start);
-        if (has_end)
+        }
+        if (has_end) {
             cJSON_AddNumberToObject(r, "end_time", (double)end);
+        }
         return r;
     }
 
@@ -241,22 +296,25 @@ int client_main(int argc, char **argv) {
     const char *host = getenv("AEGIS_HOST");
     const char *port = getenv("AEGIS_PORT");
     const char *token = getenv("AEGIS_TOKEN");
-    if (!host)
+    if (!host) {
         host = "127.0.0.1";
-    if (!port)
+    }
+    if (!port) {
         port = "9470";
+    }
 
     /* leading global flags, then the subcommand and its args */
     int i = 1;
     for (; i < argc; i++) {
-        if (!strcmp(argv[i], "--host") && i + 1 < argc)
+        if (!strcmp(argv[i], "--host") && i + 1 < argc) {
             host = argv[++i];
-        else if (!strcmp(argv[i], "--port") && i + 1 < argc)
+        } else if (!strcmp(argv[i], "--port") && i + 1 < argc) {
             port = argv[++i];
-        else if (!strcmp(argv[i], "--token") && i + 1 < argc)
+        } else if (!strcmp(argv[i], "--token") && i + 1 < argc) {
             token = argv[++i];
-        else
+        } else {
             break;
+        }
     }
     if (i >= argc) {
         client_usage();
@@ -268,13 +326,15 @@ int client_main(int argc, char **argv) {
         client_usage();
         return 2;
     }
-    if (token)
+    if (token) {
         cJSON_AddStringToObject(req, "token", token);
+    }
 
     char *line = cJSON_PrintUnformatted(req);
     cJSON_Delete(req);
-    if (!line)
+    if (!line) {
         return 1;
+    }
     size_t n = strlen(line);
     char *framed = malloc(n + 2);
     if (!framed) {
@@ -330,30 +390,41 @@ static void gen_token_usage(void) {
 /* Fill `out` (>= 2n+1 bytes) with a random hex token of n bytes. Returns 0. */
 static int random_hex(char *out, size_t nbytes) {
     FILE *f = fopen("/dev/urandom", "rbe");
-    if (!f)
+    if (!f) {
         return -1;
+    }
     uint8_t buf[64];
-    if (nbytes > sizeof(buf))
+    if (nbytes > sizeof(buf)) {
         nbytes = sizeof(buf);
+    }
     int ok = fread(buf, 1, nbytes, f) == nbytes;
     fclose(f);
-    if (!ok)
+    if (!ok) {
         return -1;
+    }
     aegis_hex_encode(buf, nbytes, out);
     return 0;
 }
 
 int gen_token_main(int argc, char **argv) {
-    const char *ns = NULL, *scope = NULL, *tok = NULL;
+    const char *ns = NULL;
+    const char *scope = NULL;
+    const char *tok = NULL;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
-        if (!strcmp(a, "--namespace") && i + 1 < argc)
-            ns = argv[++i];
-        else if (!strcmp(a, "--scope") && i + 1 < argc)
-            scope = argv[++i];
-        else if (!strcmp(a, "--token") && i + 1 < argc)
-            tok = argv[++i];
-        else {
+        if (!strcmp(a, "--namespace") && i + 1 < argc) {
+            {
+                ns = argv[++i];
+            }
+        } else if (!strcmp(a, "--scope") && i + 1 < argc) {
+            {
+                scope = argv[++i];
+            }
+        } else if (!strcmp(a, "--token") && i + 1 < argc) {
+            {
+                tok = argv[++i];
+            }
+        } else {
             gen_token_usage();
             return 2;
         }
@@ -374,7 +445,7 @@ int gen_token_main(int argc, char **argv) {
     }
     const char *eff_scope = admin ? NULL : (scope ? scope : "rw");
 
-    char generated[2 * 32 + 1];
+    char generated[(2 * 32) + 1];
     if (!tok) {
         if (random_hex(generated, 32) != 0) {
             fprintf(stderr, "gen-token: cannot read /dev/urandom\n");
@@ -385,16 +456,17 @@ int gen_token_main(int argc, char **argv) {
 
     uint8_t d[SHA256_DIGEST_LEN];
     sha256(tok, strlen(tok), d);
-    char hex[2 * SHA256_DIGEST_LEN + 1];
+    char hex[(2 * SHA256_DIGEST_LEN) + 1];
     aegis_hex_encode(d, SHA256_DIGEST_LEN, hex);
 
     fprintf(stderr,
             "Add the first line to your --auth-token-file. The token is shown "
             "only once;\nthe server keeps only its hash.\n\n");
-    if (admin)
+    if (admin) {
         printf("sha256$%s\n", hex);
-    else
+    } else {
         printf("sha256$%s %s %s\n", hex, ns, eff_scope);
+    }
     printf("token: %s\n", tok);
     return 0;
 }
@@ -405,7 +477,7 @@ int gen_key_main(int argc, char **argv) {
         fprintf(stderr, "Usage: aegisdb gen-key\n");
         return 2;
     }
-    char key[2 * 32 + 1];
+    char key[(2 * 32) + 1];
     if (random_hex(key, 32) != 0) {
         fprintf(stderr, "gen-key: cannot read /dev/urandom\n");
         return 1;

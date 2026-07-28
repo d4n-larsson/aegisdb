@@ -33,8 +33,10 @@ int encrypt_migrate_run(const Config *cfg) {
         return -1;
     }
 
-    char path_log[AEGIS_PATH_MAX], path_new[AEGIS_PATH_MAX],
-        path_index[AEGIS_PATH_MAX], path_sem[AEGIS_PATH_MAX];
+    char path_log[AEGIS_PATH_MAX];
+    char path_new[AEGIS_PATH_MAX];
+    char path_index[AEGIS_PATH_MAX];
+    char path_sem[AEGIS_PATH_MAX];
     snprintf(path_log, sizeof path_log, "%s/memory.log", cfg->data_dir);
     snprintf(path_new, sizeof path_new, "%s/memory.log.enc.tmp", cfg->data_dir);
     snprintf(path_index, sizeof path_index, "%s/memory.index", cfg->data_dir);
@@ -45,11 +47,12 @@ int encrypt_migrate_run(const Config *cfg) {
     LogFile src;
     LogOpenStatus st;
     if (log_open(&src, path_log, 0, NULL, &st) != 0) {
-        if (st == LOG_OPEN_ERR_PLAIN_ON_ENC)
+        if (st == LOG_OPEN_ERR_PLAIN_ON_ENC) {
             LOG_ERROR("encrypt-migrate: %s is already encrypted; nothing to do",
                       path_log);
-        else
+        } else {
             LOG_ERROR("encrypt-migrate: cannot open %s", path_log);
+        }
         return -1;
     }
 
@@ -95,9 +98,10 @@ int encrypt_migrate_run(const Config *cfg) {
     unlink(path_index);
     unlink(path_sem);
 
-    if (res.corrupt_frames)
+    if (res.corrupt_frames) {
         LOG_WARN("encrypt-migrate: skipped %zu corrupt frame(s)",
                  res.corrupt_frames);
+    }
     LOG_INFO("encrypt-migrate: %s is now encrypted (%zu frame(s)); start the "
              "server with the same --encryption-key-file",
              path_log, res.good_frames);

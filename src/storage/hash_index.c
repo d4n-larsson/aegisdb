@@ -22,8 +22,9 @@
 
 HashIndex *hash_index_create(void) {
     HashIndex *h = malloc(sizeof(*h));
-    if (!h)
+    if (!h) {
         return NULL;
+    }
     h->cap = INITIAL_CAP;
     h->count = 0;
     h->buckets = calloc(h->cap, sizeof(HashEntry));
@@ -35,8 +36,9 @@ HashIndex *hash_index_create(void) {
 }
 
 void hash_index_free(HashIndex *h) {
-    if (!h)
+    if (!h) {
         return;
+    }
     free(h->buckets);
     free(h);
 }
@@ -46,16 +48,18 @@ static HashEntry *find_slot(HashEntry *buckets, size_t cap, uint64_t id) {
     size_t i = (size_t)mix64(id) & mask;
     for (;;) {
         HashEntry *e = &buckets[i];
-        if (!e->used || e->id == id)
+        if (!e->used || e->id == id) {
             return e;
+        }
         i = (i + 1) & mask;
     }
 }
 
 static int rehash(HashIndex *h, size_t newcap) {
     HashEntry *nb = calloc(newcap, sizeof(HashEntry));
-    if (!nb)
+    if (!nb) {
         return -1;
+    }
     for (size_t i = 0; i < h->cap; i++) {
         if (h->buckets[i].used) {
             HashEntry *d = find_slot(nb, newcap, h->buckets[i].id);
@@ -71,8 +75,9 @@ static int rehash(HashIndex *h, size_t newcap) {
 int hash_index_put(HashIndex *h, uint64_t id, uint64_t offset, uint32_t length,
                    uint8_t type, uint8_t deleted, uint64_t expires_at) {
     if ((double)(h->count + 1) > (double)h->cap * MAX_LOAD) {
-        if (rehash(h, h->cap * 2) != 0)
+        if (rehash(h, h->cap * 2) != 0) {
             return -1;
+        }
     }
     HashEntry *e = find_slot(h->buckets, h->cap, id);
     if (!e->used) {
@@ -90,13 +95,14 @@ int hash_index_put(HashIndex *h, uint64_t id, uint64_t offset, uint32_t length,
 
 const HashEntry *hash_index_get(const HashIndex *h, uint64_t id) {
     HashEntry *e = find_slot(h->buckets, h->cap, id);
-    if (e->used && !e->deleted)
+    if (e->used && !e->deleted) {
         return e;
+    }
     return NULL;
 }
 
 size_t hash_index_bytes(const HashIndex *h) {
-    return h ? sizeof(*h) + h->cap * sizeof(HashEntry) : 0;
+    return h ? sizeof(*h) + (h->cap * sizeof(HashEntry)) : 0;
 }
 
 size_t hash_index_count(const HashIndex *h) { return h->count; }
@@ -108,16 +114,18 @@ size_t hash_index_count(const HashIndex *h) { return h->count; }
  * next_id, or count — is detected, not just entry corruption. */
 uint8_t *hash_index_serialize(const HashIndex *h, uint64_t covered_log_size,
                               uint64_t next_id, size_t *out_len) {
-    size_t len = IDX_HDR + h->count * IDX_ENTRY;
+    size_t len = IDX_HDR + (h->count * IDX_ENTRY);
     uint8_t *buf = malloc(len ? len : 1);
-    if (!buf)
+    if (!buf) {
         return NULL;
+    }
 
     uint8_t *p = buf + IDX_HDR;
     uint64_t written = 0;
     for (size_t i = 0; i < h->cap; i++) {
-        if (!h->buckets[i].used)
+        if (!h->buckets[i].used) {
             continue;
+        }
         const HashEntry *e = &h->buckets[i];
         memcpy(p, &e->id, 8);
         memcpy(p + 8, &e->offset, 8);
@@ -140,7 +148,7 @@ uint8_t *hash_index_serialize(const HashIndex *h, uint64_t covered_log_size,
     uint32_t crc = crc32_compute(buf, 32);
     crc = crc32_update(crc, buf + IDX_HDR, (size_t)written * IDX_ENTRY);
     memcpy(buf + 32, &crc, 4);
-    *out_len = IDX_HDR + (size_t)written * IDX_ENTRY;
+    *out_len = IDX_HDR + ((size_t)written * IDX_ENTRY);
     return buf;
 }
 
@@ -149,8 +157,9 @@ int hash_index_save(const HashIndex *h, const char *path,
                     const uint8_t *key) {
     size_t len = 0;
     uint8_t *buf = hash_index_serialize(h, covered_log_size, next_id, &len);
-    if (!buf)
+    if (!buf) {
         return -1;
+    }
     int rv = ckpt_write(path, key, buf, len);
     free(buf);
     return rv;
@@ -164,8 +173,9 @@ int hash_index_load(HashIndex *h, const char *path,
      * to a full log scan. */
     uint8_t *file = NULL;
     size_t flen = 0;
-    if (ckpt_read(path, key, &file, &flen) != 0)
+    if (ckpt_read(path, key, &file, &flen) != 0) {
         return -1;
+    }
     if (flen < IDX_HDR || memcmp(file, "AIDX", 4) != 0) {
         free(file);
         return -1;
@@ -176,7 +186,9 @@ int hash_index_load(HashIndex *h, const char *path,
         free(file);
         return -1;
     }
-    uint64_t cnt, covered, next_id;
+    uint64_t cnt;
+    uint64_t covered;
+    uint64_t next_id;
     uint32_t want_crc;
     memcpy(&cnt, file + 8, 8);
     memcpy(&covered, file + 16, 8);
@@ -201,8 +213,10 @@ int hash_index_load(HashIndex *h, const char *path,
     }
 
     for (uint64_t i = 0; i < cnt; i++) {
-        const uint8_t *r = entries + i * IDX_ENTRY;
-        uint64_t id, offset, expires_at;
+        const uint8_t *r = entries + (i * IDX_ENTRY);
+        uint64_t id;
+        uint64_t offset;
+        uint64_t expires_at;
         uint32_t length;
         memcpy(&id, r, 8);
         memcpy(&offset, r + 8, 8);
@@ -211,9 +225,11 @@ int hash_index_load(HashIndex *h, const char *path,
         hash_index_put(h, id, offset, length, r[20], r[21], expires_at);
     }
     free(file);
-    if (out_covered_log_size)
+    if (out_covered_log_size) {
         *out_covered_log_size = covered;
-    if (out_next_id)
+    }
+    if (out_next_id) {
         *out_next_id = next_id;
+    }
     return 0;
 }

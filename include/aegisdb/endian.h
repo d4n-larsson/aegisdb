@@ -15,13 +15,15 @@ static inline void aegis_put_u16le(uint8_t *b, uint16_t v) {
 }
 
 static inline void aegis_put_u32le(uint8_t *b, uint32_t v) {
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 4; i++) {
         b[i] = (uint8_t)(v >> (8 * i));
+    }
 }
 
 static inline void aegis_put_u64le(uint8_t *b, uint64_t v) {
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < 8; i++) {
         b[i] = (uint8_t)(v >> (8 * i));
+    }
 }
 
 static inline uint16_t aegis_get_u16le(const uint8_t *b) {
@@ -35,8 +37,9 @@ static inline uint32_t aegis_get_u32le(const uint8_t *b) {
 
 static inline uint64_t aegis_get_u64le(const uint8_t *b) {
     uint64_t v = 0;
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < 8; i++) {
         v |= (uint64_t)b[i] << (8 * i);
+    }
     return v;
 }
 

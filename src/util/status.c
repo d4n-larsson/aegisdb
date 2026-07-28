@@ -70,8 +70,9 @@ const char *aegis_status_message(aegis_status_t s) {
 }
 
 int memory_type_from_string(const char *s, MemoryType *out) {
-    if (!s)
+    if (!s) {
         return -1;
+    }
     if (strcmp(s, "working") == 0) {
         *out = MEM_WORKING;
         return 0;

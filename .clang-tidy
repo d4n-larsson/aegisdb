@@ -1,0 +1,18 @@
+# clang-tidy for AegisDB — canonical mechanical style, enforced in CI (see
+# docs/conventions.md). An explicit allowlist (not a wildcard) so every enabled
+# check is auto-fixable and the WarningsAsErrors gate stays reachable.
+#
+# Bug-pattern checks (bugprone-*, clang-analyzer-*, portability-*) are a separate
+# follow-up: their fixits are unsafe and their findings need manual triage.
+Checks: >
+  -*,
+  readability-braces-around-statements,
+  readability-inconsistent-ifelse-braces,
+  readability-isolate-declaration,
+  readability-math-missing-parentheses,
+  readability-redundant-parentheses,
+  readability-redundant-casting,
+  readability-uppercase-literal-suffix,
+  readability-else-after-return
+WarningsAsErrors: '*'
+HeaderFilterRegex: '(aegisdb/.*|qe_internal)\.h$'

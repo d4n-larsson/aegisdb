@@ -20,7 +20,7 @@
 uint64_t db_now_ms(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
-    return (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)tv.tv_usec / 1000ULL;
+    return ((uint64_t)tv.tv_sec * 1000ULL) + ((uint64_t)tv.tv_usec / 1000ULL);
 }
 
 uint64_t db_next_id(AegisDB *db) {
@@ -47,8 +47,9 @@ static void ameta_encode(uint8_t buf[AMETA_SIZE], uint64_t next_id) {
 /* Decode a 32-byte AMETA payload. Returns 0 and writes *next_id on a valid
  * magic; -1 otherwise. */
 static int ameta_decode(const uint8_t buf[AMETA_SIZE], uint64_t *next_id) {
-    if (memcmp(buf, "AMETA", 5) != 0)
+    if (memcmp(buf, "AMETA", 5) != 0) {
         return -1;
+    }
     memcpy(next_id, buf + 9, 8);
     return 0;
 }
@@ -121,23 +122,26 @@ static void build_abort_locked(AegisDB *db, SemBuildJob *job) {
 }
 
 int db_semantic_build_step(AegisDB *db) {
-    if (!db->sem)
+    if (!db->sem) {
         return 0;
+    }
 
     /* Phase 1: cheap poll under the read lock. */
     pthread_rwlock_rdlock(&db->index_lock);
     int pending = semantic_index_needs_build(db->sem);
     pthread_rwlock_unlock(&db->index_lock);
-    if (!pending)
+    if (!pending) {
         return 0;
+    }
 
     /* Phase 2: snapshot the dense vectors, enter building mode. */
     pthread_rwlock_wrlock(&db->index_lock);
     SemBuildJob *job = semantic_index_build_begin(db->sem);
     size_t snap_n = semantic_index_count(db->sem);
     pthread_rwlock_unlock(&db->index_lock);
-    if (!job)
+    if (!job) {
         return 0; /* raced away / OOM: retry next tick */
+    }
 
     LOG_INFO("semantic index: building HNSW graph from %zu vectors off-lock",
              snap_n);
@@ -201,8 +205,9 @@ int db_semantic_build_step(AegisDB *db) {
 int db_replica_apply(AegisDB *db, uint64_t offset, const uint8_t *payload,
                      size_t len) {
     MemoryRecord r;
-    if (record_decode(payload, len, &r) != 0)
+    if (record_decode(payload, len, &r) != 0) {
         return -1;
+    }
 
     /* Diff against the record's prior live version so update/delete drop stale
      * secondary-index entries before the new version is applied. */
@@ -214,10 +219,12 @@ int db_replica_apply(AegisDB *db, uint64_t offset, const uint8_t *payload,
             MemoryRecord p;
             if (record_decode(pbuf, plen, &p) == 0) {
                 time_index_remove(db->time, p.created, p.id);
-                for (size_t i = 0; i < p.tag_count; i++)
+                for (size_t i = 0; i < p.tag_count; i++) {
                     tag_index_remove(db->tags, p.tags[i], p.id);
-                if (p.embedding_dim && p.vec_count)
+                }
+                if (p.embedding_dim && p.vec_count) {
                     semantic_index_remove(db->sem, p.id);
+                }
                 record_free(&p);
             }
             free(pbuf);
@@ -231,25 +238,29 @@ int db_replica_apply(AegisDB *db, uint64_t offset, const uint8_t *payload,
     }
     if (!r.deleted) {
         time_index_add(db->time, r.created, r.id);
-        for (size_t i = 0; i < r.tag_count; i++)
+        for (size_t i = 0; i < r.tag_count; i++) {
             tag_index_add(db->tags, r.tags[i], r.id);
+        }
         if (r.embedding_dim == db->config.embedding_dimensions && r.embedding &&
-            r.vec_count)
+            r.vec_count) {
             semantic_index_add(db->sem, r.id, r.embedding, r.vec_count,
                                r.embedding_dim);
+        }
     }
 
     pthread_mutex_lock(&db->id_lock);
-    if (r.id + 1 > db->next_id)
+    if (r.id + 1 > db->next_id) {
         db->next_id = r.id + 1;
+    }
     pthread_mutex_unlock(&db->id_lock);
     record_free(&r);
     return 0;
 }
 
 int db_reset_replica(AegisDB *db) {
-    if (log_truncate(&db->log, 0) != 0)
+    if (log_truncate(&db->log, 0) != 0) {
         return -1;
+    }
     HashIndex *nh = hash_index_create();
     TimeIndex *nt = time_index_create();
     TagIndex *ntag = tag_index_create();
@@ -275,13 +286,17 @@ int db_reset_replica(AegisDB *db) {
 /* A snapshot name becomes a single path component under snapshots/, so it must
  * be non-empty and free of separators or dot-traversal. */
 static int snapshot_name_ok(const char *name) {
-    if (!name || !*name)
+    if (!name || !*name) {
         return 0;
-    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+    }
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
         return 0;
-    for (const char *p = name; *p; p++)
-        if (*p == '/' || *p == '\\')
+    }
+    for (const char *p = name; *p; p++) {
+        if (*p == '/' || *p == '\\') {
             return 0;
+        }
+    }
     return 1;
 }
 
@@ -289,8 +304,9 @@ static int snapshot_name_ok(const char *name) {
  * offset untouched, so concurrent appends (which pwrite past `n`) are safe. */
 static int copy_log_prefix(int src_fd, const char *dst_path, uint64_t n) {
     FILE *dst = fopen(dst_path, "wbe");
-    if (!dst)
+    if (!dst) {
         return -1;
+    }
     char buf[AEGIS_IO_BUF_SIZE];
     uint64_t done = 0;
     int ok = 1;
@@ -307,12 +323,15 @@ static int copy_log_prefix(int src_fd, const char *dst_path, uint64_t n) {
         }
         done += (uint64_t)got;
     }
-    if (ok && (fflush(dst) != 0 || fsync(fileno(dst)) != 0))
+    if (ok && (fflush(dst) != 0 || fsync(fileno(dst)) != 0)) {
         ok = 0;
-    if (fclose(dst) != 0)
+    }
+    if (fclose(dst) != 0) {
         ok = 0;
-    if (!ok)
+    }
+    if (!ok) {
         unlink(dst_path);
+    }
     return ok ? 0 : -1;
 }
 
@@ -325,8 +344,9 @@ static int write_meta_file(const char *path, uint64_t nid) {
 }
 
 int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
-    if (!snapshot_name_ok(name))
+    if (!snapshot_name_ok(name)) {
         return DB_SNAPSHOT_BADNAME;
+    }
 
     char dir[AEGIS_PATH_MAX];
     snprintf(dir, sizeof(dir), "%s/snapshots/%s", db->config.data_dir, name);
@@ -346,9 +366,11 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
 
     pthread_rwlock_rdlock(&db->index_lock);
     size_t live = 0;
-    for (size_t i = 0; i < db->hash->cap; i++)
-        if (db->hash->buckets[i].used && !db->hash->buckets[i].deleted)
+    for (size_t i = 0; i < db->hash->cap; i++) {
+        if (db->hash->buckets[i].used && !db->hash->buckets[i].deleted) {
             live++;
+        }
+    }
     pthread_mutex_lock(&db->id_lock);
     uint64_t nid = db->next_id;
     pthread_mutex_unlock(&db->id_lock);
@@ -421,10 +443,12 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
     }
     FILE *mf = fopen(manifest, "wbe");
     int mok = (mf && fwrite(man, 1, (size_t)mn, mf) == (size_t)mn);
-    if (mok && (fflush(mf) != 0 || fsync(fileno(mf)) != 0))
+    if (mok && (fflush(mf) != 0 || fsync(fileno(mf)) != 0)) {
         mok = 0;
-    if (mf && fclose(mf) != 0)
+    }
+    if (mf && fclose(mf) != 0) {
         mok = 0;
+    }
     if (!mok) {
         unlink(manifest);
         LOG_ERROR("snapshot: manifest write failed (%s)", manifest);
@@ -454,19 +478,22 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
  * a high-water mark used as a floor at recovery so next_id can't regress. */
 static uint64_t load_metadata_next_id(const char *path) {
     FILE *f = fopen(path, "rbe");
-    if (!f)
+    if (!f) {
         return 0;
+    }
     uint8_t buf[AMETA_SIZE];
     uint64_t nid = 0;
-    if (fread(buf, 1, sizeof(buf), f) == sizeof(buf))
+    if (fread(buf, 1, sizeof(buf), f) == sizeof(buf)) {
         ameta_decode(buf, &nid); /* leaves nid=0 on a bad/missing magic */
+    }
     fclose(f);
     return nid;
 }
 
 static void free_token_array(AuthToken *toks, size_t n) {
-    if (!toks)
+    if (!toks) {
         return;
+    }
     for (size_t i = 0; i < n; i++) {
         free(toks[i].token);
         free(toks[i].namespace);
@@ -477,8 +504,9 @@ static void free_token_array(AuthToken *toks, size_t n) {
 /* Initialize the four db locks, unwinding any already created if one fails.
  * Returns 0 on success, -1 on failure (nothing left initialized). */
 static int init_db_locks(AegisDB *db) {
-    if (pthread_mutex_init(&db->id_lock, NULL) != 0)
+    if (pthread_mutex_init(&db->id_lock, NULL) != 0) {
         return -1;
+    }
     if (pthread_rwlock_init(&db->index_lock, NULL) != 0) {
         pthread_mutex_destroy(&db->id_lock);
         return -1;
@@ -522,8 +550,9 @@ static int dup_token_array(AegisDB *db, const Config *cfg) {
         return 0;
     }
     AuthToken *copy = calloc(cfg->auth_token_count, sizeof(AuthToken));
-    if (!copy)
+    if (!copy) {
         return -1;
+    }
     size_t i = 0;
     for (; i < cfg->auth_token_count; i++) {
         copy[i] =
@@ -531,11 +560,13 @@ static int dup_token_array(AegisDB *db, const Config *cfg) {
         copy[i].token = NULL;
         copy[i].namespace = NULL;
         if (cfg->auth_tokens[i].token &&
-            !(copy[i].token = strdup(cfg->auth_tokens[i].token)))
+            !(copy[i].token = strdup(cfg->auth_tokens[i].token))) {
             break;
+        }
         if (cfg->auth_tokens[i].namespace &&
-            !(copy[i].namespace = strdup(cfg->auth_tokens[i].namespace)))
+            !(copy[i].namespace = strdup(cfg->auth_tokens[i].namespace))) {
             break;
+        }
     }
     if (i != cfg->auth_token_count) { /* strdup OOM mid-copy */
         free_token_array(copy, i + 1);
@@ -567,10 +598,12 @@ int db_open(AegisDB *db, const Config *cfg) {
     snprintf(db->path_sem, sizeof(db->path_sem), "%s/memory.sem",
              cfg->data_dir);
 
-    if (init_db_locks(db) != 0)
+    if (init_db_locks(db) != 0) {
         return -1;
-    if (dup_token_array(db, cfg) != 0)
+    }
+    if (dup_token_array(db, cfg) != 0) {
         goto fail_locks;
+    }
 
     const uint8_t *log_key =
         cfg->encryption_enabled ? cfg->encryption_key : NULL;
@@ -638,10 +671,12 @@ void db_close(AegisDB *db) {
     db->running = 0;
     LOG_DEBUG("closing database: flushing log and persisting index/metadata");
     log_fsync(&db->log);
-    if (db_checkpoint(db) != 0)
+    if (db_checkpoint(db) != 0) {
         LOG_WARN("failed to persist checkpoint to %s", db->path_index);
-    if (db_save_metadata(db) != 0)
+    }
+    if (db_save_metadata(db) != 0) {
         LOG_WARN("failed to persist metadata to %s", db->path_meta);
+    }
     hash_index_free(db->hash);
     time_index_free(db->time);
     tag_index_free(db->tags);

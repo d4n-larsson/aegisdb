@@ -23,10 +23,12 @@
 static int default_io_threads(void) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     long want = (n > 0) ? n * 2 : 8;
-    if (want < 8)
+    if (want < 8) {
         want = 8;
-    if (want > 64)
+    }
+    if (want > 64) {
         want = 64;
+    }
     return (int)want;
 }
 
@@ -68,8 +70,9 @@ void config_defaults(Config *cfg) {
     const char *env = getenv("AEGISDB_LOG_LEVEL");
     if (env && *env) {
         AegisLogLevel lvl;
-        if (aegis_log_level_from_string(env, &lvl) == 0)
+        if (aegis_log_level_from_string(env, &lvl) == 0) {
             cfg->log_level = lvl;
+        }
     }
 }
 
@@ -87,16 +90,18 @@ const char *aegis_durability_name(int mode) {
 }
 
 int aegis_durability_from_string(const char *s, int *out) {
-    if (!s)
+    if (!s) {
         return -1;
-    if (strcmp(s, "sync") == 0)
+    }
+    if (strcmp(s, "sync") == 0) {
         *out = AEGIS_DURABILITY_SYNC;
-    else if (strcmp(s, "batch") == 0)
+    } else if (strcmp(s, "batch") == 0) {
         *out = AEGIS_DURABILITY_BATCH;
-    else if (strcmp(s, "interval") == 0)
+    } else if (strcmp(s, "interval") == 0) {
         *out = AEGIS_DURABILITY_INTERVAL;
-    else
+    } else {
         return -1;
+    }
     return 0;
 }
 
@@ -114,11 +119,14 @@ size_t config_effective_fsync_batch(const Config *cfg) {
 /* Decode `n` hex chars from `s` into `out`. Returns 0 on success, -1 on a
  * non-hex digit or odd length. */
 static int hex_decode(const char *s, uint8_t *out, size_t n) {
-    if (n % 2)
+    if (n % 2) {
         return -1;
+    }
     for (size_t i = 0; i < n; i += 2) {
-        int hi = -1, lo = -1;
-        char a = s[i], b = s[i + 1];
+        int hi = -1;
+        int lo = -1;
+        char a = s[i];
+        char b = s[i + 1];
         hi = (a >= '0' && a <= '9')   ? a - '0'
              : (a >= 'a' && a <= 'f') ? a - 'a' + 10
              : (a >= 'A' && a <= 'F') ? a - 'A' + 10
@@ -127,8 +135,9 @@ static int hex_decode(const char *s, uint8_t *out, size_t n) {
              : (b >= 'a' && b <= 'f') ? b - 'a' + 10
              : (b >= 'A' && b <= 'F') ? b - 'A' + 10
                                       : -1;
-        if (hi < 0 || lo < 0)
+        if (hi < 0 || lo < 0) {
             return -1;
+        }
         out[i / 2] = (uint8_t)((hi << 4) | lo);
     }
     return 0;
@@ -139,17 +148,20 @@ static int hex_decode(const char *s, uint8_t *out, size_t n) {
  * unreadable file or a malformed key. Never logs the key. */
 static int load_key_file(const char *path, uint8_t out[AEAD_KEY_LEN]) {
     FILE *f = fopen(path, "re");
-    if (!f)
+    if (!f) {
         return -1;
+    }
     char line[256];
     char *got = fgets(line, sizeof line, f);
     fclose(f);
-    if (!got)
+    if (!got) {
         return -1;
+    }
     size_t n = strlen(line);
     while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r' ||
-                     line[n - 1] == ' ' || line[n - 1] == '\t'))
+                     line[n - 1] == ' ' || line[n - 1] == '\t')) {
         line[--n] = '\0';
+    }
     if (n != 2 * AEAD_KEY_LEN) {
         explicit_bzero(line, sizeof(line));
         return -1;
@@ -167,8 +179,9 @@ static int append_token(Config *cfg, const char *tok, const char *ns,
                         int scope) {
     AuthToken *grown = realloc(cfg->auth_tokens,
                                (cfg->auth_token_count + 1) * sizeof(AuthToken));
-    if (!grown)
+    if (!grown) {
         return -1;
+    }
     cfg->auth_tokens = grown;
     AuthToken *t = &cfg->auth_tokens[cfg->auth_token_count];
     t->token = NULL;
@@ -178,13 +191,15 @@ static int append_token(Config *cfg, const char *tok, const char *ns,
 
     if (strncmp(tok, "sha256$", 7) == 0) {
         const char *hex = tok + 7;
-        if (strlen(hex) != 64 || hex_decode(hex, t->hash, 64) != 0)
+        if (strlen(hex) != 64 || hex_decode(hex, t->hash, 64) != 0) {
             return -1;
+        }
         t->hashed = 1;
     } else {
         t->token = strdup(tok);
-        if (!t->token)
+        if (!t->token) {
             return -1;
+        }
     }
     if (ns) {
         t->namespace = strdup(ns);
@@ -201,13 +216,16 @@ static int append_token(Config *cfg, const char *tok, const char *ns,
 /* Advance past the current whitespace-delimited field, NUL-terminating it, and
  * return a pointer to the next field (or NULL if none). */
 static char *next_field(char *s) {
-    while (*s && *s != ' ' && *s != '\t')
+    while (*s && *s != ' ' && *s != '\t') {
         s++;
-    if (!*s)
+    }
+    if (!*s) {
         return NULL;
+    }
     *s++ = '\0';
-    while (*s == ' ' || *s == '\t')
+    while (*s == ' ' || *s == '\t') {
         s++;
+    }
     return *s ? s : NULL;
 }
 
@@ -220,23 +238,26 @@ static char *next_field(char *s) {
 static int parse_token_line(Config *cfg, char *s) {
     char *tok = s;
     char *ns = next_field(s);
-    if (!ns)
+    if (!ns) {
         return append_token(cfg, tok, NULL, AEGIS_SCOPE_ADMIN);
+    }
 
     char *scope_s = next_field(ns);
-    if (strcmp(ns, "admin") == 0 && !scope_s)
+    if (strcmp(ns, "admin") == 0 && !scope_s) {
         return append_token(cfg, tok, NULL, AEGIS_SCOPE_ADMIN);
+    }
 
     int scope = AEGIS_SCOPE_RW;
     if (scope_s) {
-        if (strcmp(scope_s, "ro") == 0)
+        if (strcmp(scope_s, "ro") == 0) {
             scope = AEGIS_SCOPE_RO;
-        else if (strcmp(scope_s, "rw") == 0)
+        } else if (strcmp(scope_s, "rw") == 0) {
             scope = AEGIS_SCOPE_RW;
-        else if (strcmp(scope_s, "admin") == 0)
+        } else if (strcmp(scope_s, "admin") == 0) {
             return append_token(cfg, tok, NULL, AEGIS_SCOPE_ADMIN);
-        else
+        } else {
             return -1; /* unknown scope */
+        }
     }
     return append_token(cfg, tok, ns, scope);
 }
@@ -245,20 +266,24 @@ static int parse_token_line(Config *cfg, char *s) {
  * and trimming surrounding whitespace. Returns 0 on success. */
 static int load_token_file(Config *cfg, const char *path) {
     FILE *f = fopen(path, "re");
-    if (!f)
+    if (!f) {
         return -1;
+    }
     char line[1024];
     int rv = 0;
     while (fgets(line, sizeof(line), f)) {
         char *s = line;
-        while (*s == ' ' || *s == '\t')
+        while (*s == ' ' || *s == '\t') {
             s++; /* skip leading ws */
+        }
         char *end = s + strlen(s);
         while (end > s && (end[-1] == '\n' || end[-1] == '\r' ||
-                           end[-1] == ' ' || end[-1] == '\t'))
+                           end[-1] == ' ' || end[-1] == '\t')) {
             *--end = '\0'; /* trim trailing ws */
-        if (*s == '\0' || *s == '#')
+        }
+        if (*s == '\0' || *s == '#') {
             continue; /* blank / comment */
+        }
         if (parse_token_line(cfg, s) != 0) {
             rv = -1;
             break;
@@ -269,15 +294,18 @@ static int load_token_file(Config *cfg, const char *path) {
 }
 
 static int parse_size(const char *s, size_t *out) {
-    while (*s == ' ' || *s == '\t')
+    while (*s == ' ' || *s == '\t') {
         s++; /* strtoull skips these; reject a sign next */
-    if (*s == '-')
+    }
+    if (*s == '-') {
         return -1; /* strtoull silently wraps "-1" to SIZE_MAX, no ERANGE */
+    }
     char *end = NULL;
     errno = 0;
     unsigned long long v = strtoull(s, &end, 10);
-    if (end == s || *end != '\0' || errno == ERANGE)
+    if (end == s || *end != '\0' || errno == ERANGE) {
         return -1;
+    }
     *out = (size_t)v;
     return 0;
 }
@@ -287,8 +315,9 @@ static int parse_int(const char *s, int *out) {
     errno = 0;
     long v = strtol(s, &end, 10);
     if (end == s || *end != '\0' || errno == ERANGE || v < INT_MIN ||
-        v > INT_MAX)
+        v > INT_MAX) {
         return -1;
+    }
     *out = (int)v;
     return 0;
 }
@@ -446,7 +475,8 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
         if (strcmp(a, "--help") == 0 || strcmp(a, "-h") == 0) {
             usage(prog);
             return 1;
-        } else if (strcmp(a, "--health-check") == 0) {
+        }
+        if (strcmp(a, "--health-check") == 0) {
             cfg->run_health_check = 1;
         } else if (strcmp(a, "--hash-token") == 0) {
             NEXT("--hash-token");
@@ -514,8 +544,9 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
                 return -1;
             }
             size_t hlen = (size_t)(colon - val);
-            if (hlen >= sizeof(cfg->replicate_from_host))
+            if (hlen >= sizeof(cfg->replicate_from_host)) {
                 hlen = sizeof(cfg->replicate_from_host) - 1;
+            }
             memcpy(cfg->replicate_from_host, val, hlen);
             cfg->replicate_from_host[hlen] = '\0';
             if (parse_int(colon + 1, &cfg->replicate_from_port) ||
@@ -613,8 +644,9 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
 }
 
 void config_free(Config *cfg) {
-    if (!cfg || !cfg->auth_tokens)
+    if (!cfg || !cfg->auth_tokens) {
         return;
+    }
     for (size_t i = 0; i < cfg->auth_token_count; i++) {
         free(cfg->auth_tokens[i].token);
         free(cfg->auth_tokens[i].namespace);
@@ -636,10 +668,11 @@ int config_add_token(Config *cfg, const char *tok, const char *ns, int scope) {
  * and the docs direct operators to `openssl rand -hex 32`). A low-entropy token
  * would be vulnerable to precomputation; salting is not a substitute for entropy. */
 static void token_digest(const AuthToken *t, uint8_t out[32]) {
-    if (t->hashed)
+    if (t->hashed) {
         memcpy(out, t->hash, 32);
-    else
+    } else {
         sha256((const uint8_t *)t->token, strlen(t->token), out);
+    }
 }
 
 void config_token_fingerprint(const AuthToken *t, char out[13]) {
@@ -685,8 +718,9 @@ int config_write_token_file(const Config *cfg, const char *path) {
     char *content = NULL;
     size_t clen = 0;
     FILE *f = open_memstream(&content, &clen);
-    if (!f)
+    if (!f) {
         return -1;
+    }
     int ok = 1;
     for (size_t i = 0; i < cfg->auth_token_count && ok; i++) {
         const AuthToken *t = &cfg->auth_tokens[i];
@@ -698,13 +732,16 @@ int config_write_token_file(const Config *cfg, const char *path) {
                     ? fprintf(f, "sha256$%s %s %s\n", hex, t->namespace,
                               scope_name(t->scope))
                     : fprintf(f, "sha256$%s\n", hex); /* global admin */
-        if (n < 0)
+        if (n < 0) {
             ok = 0;
+        }
     }
-    if (fclose(f) != 0)
+    if (fclose(f) != 0) {
         ok = 0; /* flushes into content/clen */
-    if (ok)
+    }
+    if (ok) {
         ok = (fs_write_atomic(path, content, clen, 0600) == 0);
+    }
     free(content);
     return ok ? 0 : -1;
 }
