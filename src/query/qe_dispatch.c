@@ -916,6 +916,23 @@ static cJSON *handle_token_list(AegisDB *db, const cJSON *req, const AuthCtx *ct
     return o;
 }
 
+/* A token-file namespace is written into a space- and newline-delimited line
+ * (config_write_token_file: "sha256$<hex> <ns> <scope>"), so it must contain no
+ * whitespace or control characters. Otherwise a crafted namespace could inject
+ * additional token-file lines — e.g. an embedded newline followed by a bare
+ * token, which parses as a global-admin token — that survive a reload. Stricter
+ * than valid_agent_id (which permits spaces) because of the delimited format. */
+static int token_namespace_ok(const char *ns) {
+    if (!ns) return 0;
+    size_t n = strlen(ns);
+    if (n < 1 || n > MAX_AGENT_ID) return 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)ns[i];
+        if (c <= 0x20 || c == 0x7f) return 0; /* printable, no whitespace/control */
+    }
+    return 1;
+}
+
 /* token_add: add a token (generating a secret if none supplied) and persist to
  * the token file. Returns its fingerprint (and the plaintext, once, if minted). */
 static cJSON *handle_token_add(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
@@ -929,7 +946,7 @@ static cJSON *handle_token_add(AegisDB *db, const cJSON *req, const AuthCtx *ctx
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     /* admin scope is global (no namespace); a namespaced token is ro/rw. */
     if (scope == AEGIS_SCOPE_ADMIN) ns = NULL;
-    else if (!ns) return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    else if (!token_namespace_ok(ns)) return json_error_status(AEGIS_ERR_INVALID_REQUEST);
 
     char generated[65];
     int minted = 0;
@@ -1084,15 +1101,30 @@ static const OpDef *find_op(const char *op) {
     return NULL;
 }
 
+/* Copy `op` into `dst` for safe logging: printable ASCII only (anything else
+ * becomes '?'), truncated to fit. The operation string is unauthenticated
+ * client input and is logged before auth, so logging it raw would let a client
+ * inject newlines / terminal escapes into an operator's console. */
+static void sanitize_for_log(char *dst, size_t dstsz, const char *op) {
+    size_t i = 0;
+    for (; op[i] && i + 1 < dstsz; i++) {
+        unsigned char c = (unsigned char)op[i];
+        dst[i] = (c >= 0x20 && c < 0x7f) ? (char)c : '?';
+    }
+    dst[i] = '\0';
+}
+
 static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
     const char *op = jr_str(req, "operation", NULL);
     if (!op) {
         LOG_DEBUG("dispatch: request with no \"operation\" field");
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     }
+    char opsafe[64];
+    sanitize_for_log(opsafe, sizeof opsafe, op); /* op is untrusted; log this */
     const OpDef *d = find_op(op);
     if (!d) {
-        LOG_WARN("dispatch: unknown operation \"%s\"", op);
+        LOG_WARN("dispatch: unknown operation \"%s\"", opsafe);
         return json_error("INVALID_REQUEST", "unknown operation");
     }
 
@@ -1102,17 +1134,17 @@ static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
     AuthCtx ctx;
     aegis_status_t ast = resolve_identity(db, req, &ctx);
     if (ast != AEGIS_OK) {
-        LOG_WARN("dispatch: unauthorized \"%s\" request rejected", op);
+        LOG_WARN("dispatch: unauthorized \"%s\" request rejected", opsafe);
         return json_error_status(ast);
     }
     if ((d->flags & OP_WRITE) && !ctx.can_write) {
-        LOG_WARN("dispatch: read-only token attempted \"%s\"", op);
+        LOG_WARN("dispatch: read-only token attempted \"%s\"", opsafe);
         return json_error_status(AEGIS_ERR_FORBIDDEN);
     }
     /* A read-only replica serves reads from its followed copy but never accepts
      * writes — direct those at the primary. */
     if (db->config.read_only && (d->flags & OP_WRITE)) {
-        LOG_DEBUG("dispatch: write \"%s\" refused on read-only replica", op);
+        LOG_DEBUG("dispatch: write \"%s\" refused on read-only replica", opsafe);
         return json_error_status(AEGIS_ERR_READ_ONLY);
     }
 
@@ -1122,7 +1154,7 @@ static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
     if (ctx.ns && db->config.tenant_rate_qps > 0 &&
         !tenant_rate_allow(db->tenants, ctx.ns, db->config.tenant_rate_qps,
                            db->config.tenant_rate_qps, monotonic_micros())) {
-        LOG_WARN("dispatch: rate limit hit for ns=%s on \"%s\"", ctx.ns, op);
+        LOG_WARN("dispatch: rate limit hit for ns=%s on \"%s\"", ctx.ns, opsafe);
         return json_error_status(AEGIS_ERR_RATE_LIMITED);
     }
 
@@ -1133,7 +1165,7 @@ static cJSON *dispatch_inner(AegisDB *db, const cJSON *req) {
     if ((d->flags & OP_WRITE_TOK) && !ctx.can_write)
         return json_error_status(AEGIS_ERR_FORBIDDEN);
 
-    LOG_DEBUG("dispatch: operation \"%s\" (ns=%s)", op, ctx.ns ? ctx.ns : "*");
+    LOG_DEBUG("dispatch: operation \"%s\" (ns=%s)", opsafe, ctx.ns ? ctx.ns : "*");
     return d->fn(db, req, &ctx);
 }
 
