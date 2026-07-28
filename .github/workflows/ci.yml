@@ -3,7 +3,9 @@ name: CI
 # Builds and tests the C server on every push/PR: the plain build under gcc and
 # clang, an AddressSanitizer/UBSan build (unit + wire-protocol contract, incl.
 # leak detection), and a ThreadSanitizer run of the contract suite against a
-# live server (the concurrency lives in the server, not the unit tests).
+# live server (the concurrency lives in the server, not the unit tests). Also
+# runs the Python suites that ship alongside it (the Prometheus exporter and the
+# Claude Code integration).
 on:
   push:
     branches: [main]
@@ -14,6 +16,7 @@ on:
       - 'tests/**'
       - 'third_party/**'
       - 'integrations/prometheus-exporter/**'
+      - 'integrations/claude-code/**'
       - 'Makefile'
       - 'CMakeLists.txt'
       - '.clang-format'
@@ -182,3 +185,30 @@ jobs:
         run: |
           python -m unittest discover -s tests/unit -p 'test_*.py'
           python -m unittest discover -s tests/integration -p 'test_*.py'
+
+  claude-code:
+    name: Claude Code integration (python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # Both ends of the package's declared `requires-python = ">=3.10"`. The
+      # floor was previously an untested claim — the same shape of bug as the
+      # unbounded `mcp>=1.0` that broke every fresh install in v0.5.4.
+      matrix:
+        python: ['3.10', '3.x']
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # The contract and integration tests launch the server binary from
+      # ../../build and skip themselves when it is absent, so it must exist or
+      # two thirds of the suite would quietly not run and the job would still be
+      # green. `test -x` pins that assumption to a failure instead.
+      - name: Build server (the contract + integration tests launch it)
+        run: make && test -x build/aegisdb
+      # Stdlib unittest throughout — no pytest, no install, and the MCP SDK is
+      # not needed (only server.py imports it, and nothing here imports that).
+      - name: Run unit + contract + integration tests
+        working-directory: integrations/claude-code
+        run: make test
