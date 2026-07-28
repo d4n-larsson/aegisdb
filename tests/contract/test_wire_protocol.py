@@ -1330,6 +1330,20 @@ def test_token_admin(binary, port):
         check(r.get("ok") is False and r["error"]["code"] == "FORBIDDEN",
               "namespaced token cannot add tokens -> FORBIDDEN")
 
+        # a namespace with a newline/space must be refused: the token file is a
+        # space/newline-delimited format, so an embedded newline could inject a
+        # bare-token (= global admin) line that survives a reload.
+        for bad in ("evil rw\nsha256$deadbeef", "has space", "tab\there"):
+            r = srv.req({"operation": "token_add", "namespace": bad,
+                         "scope": "rw", **admin})
+            check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+                  "token_add rejects a namespace with whitespace/newline")
+        # the injection attempt left exactly the admin + acme tokens (no extra
+        # line snuck into the token set)
+        r = srv.req({"operation": "token_list", **admin})
+        check(len(r.get("tokens", [])) == 2,
+              "rejected token_add did not add any token")
+
         # revoke it -> it stops authenticating immediately (no restart)
         r = srv.req({"operation": "token_revoke", "id": acme_id, **admin})
         check(r.get("ok") is True and r.get("revoked") is True,

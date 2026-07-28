@@ -1,6 +1,7 @@
 /* JSON request parsing and the per-connection request entry point (T015). */
 #include "aegisdb/json_request.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -26,7 +27,10 @@ int jr_u64(const cJSON *o, const char *key, uint64_t *out) {
 
 int jr_f64(const cJSON *o, const char *key, double *out) {
     const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, key);
-    if (!cJSON_IsNumber(v)) return -1;
+    /* Reject NaN/Inf (reachable via an overflowing literal like 1e400): a
+     * non-finite threshold or weight poisons ranking/similarity math, where
+     * every NaN comparison is false. Callers treat -1 as "absent" -> default. */
+    if (!cJSON_IsNumber(v) || !isfinite(v->valuedouble)) return -1;
     *out = v->valuedouble;
     return 0;
 }
@@ -72,7 +76,14 @@ int jr_float_array(const cJSON *o, const char *key, float **out, size_t *out_n,
     size_t cnt = 0;
     const cJSON *it;
     cJSON_ArrayForEach(it, arr) {
-        if (cJSON_IsNumber(it)) vals[cnt++] = (float)it->valuedouble;
+        /* Reject a non-numeric or non-finite element outright rather than
+         * silently dropping it (which would change the reported length and let
+         * a malformed embedding through). NaN/Inf would poison distance math. */
+        if (!cJSON_IsNumber(it) || !isfinite(it->valuedouble)) {
+            free(vals);
+            return -1;
+        }
+        vals[cnt++] = (float)it->valuedouble;
     }
     *out = vals;
     *out_n = cnt;

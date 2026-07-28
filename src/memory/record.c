@@ -1,6 +1,7 @@
 /* MemoryRecord lifecycle and binary log codec (T010, extended T036/T046). */
 #include "aegisdb/record.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -139,9 +140,14 @@ typedef struct {
 
 static void buf_reserve(Buf *b, size_t extra) {
     if (b->err) return;
+    if (b->len + extra < b->len) { b->err = 1; return; } /* size_t overflow */
     if (b->len + extra <= b->cap) return;
     size_t cap = b->cap ? b->cap * 2 : 128;
-    while (cap < b->len + extra) cap *= 2;
+    while (cap < b->len + extra) {
+        size_t next = cap * 2;
+        if (next < cap) { b->err = 1; return; } /* doubling overflowed to 0/wrap */
+        cap = next;
+    }
     uint8_t *np = realloc(b->p, cap);
     if (!np) { b->err = 1; return; }
     b->p = np;
@@ -300,6 +306,16 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
     out->updated = get_u64(&c);
     out->importance = get_f32(&c);
     out->confidence = get_f32(&c);
+    /* Insert validates importance/confidence into [0,1], but a corrupt log or a
+     * malicious replication peer could carry a non-finite / out-of-range weight
+     * that would poison ranking math (NaN comparisons are all false). Clamp back
+     * to the defaults so decode is self-defending. */
+    if (!isfinite(out->importance) || out->importance < 0.0f ||
+        out->importance > 1.0f)
+        out->importance = 0.0f;
+    if (!isfinite(out->confidence) || out->confidence < 0.0f ||
+        out->confidence > 1.0f)
+        out->confidence = 1.0f;
     out->deleted = get_u8(&c);
     out->expires_at = get_u64(&c);
 
