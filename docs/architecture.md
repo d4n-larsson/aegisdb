@@ -1,6 +1,6 @@
 # AegisDB Architecture
 
-How AegisDB is built, as it actually exists today (version 0.1.0). This describes
+How AegisDB is built, as it actually exists today. This describes
 the implementation — for the request/response contract see
 [wire-protocol.md](wire-protocol.md), and to get running see
 [quickstart.md](quickstart.md).
@@ -110,7 +110,9 @@ rather than by the total size of the database.
 <data-dir>/
 ├── memory.log     # append-only, magic + CRC framed record log (source of truth)
 ├── memory.index   # index checkpoint: id → log location + covered offset + next_id
-└── metadata.db    # persisted counters (e.g. next id)
+├── memory.sem     # HNSW graph checkpoint (skips the semantic rebuild on startup)
+├── metadata.db    # persisted counters (e.g. next id)
+└── snapshots/     # online backups written by the `snapshot` operation
 ```
 
 ## Indexes
