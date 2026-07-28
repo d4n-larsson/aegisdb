@@ -20,28 +20,36 @@
 /* predicate helpers for search */
 static int rec_has_tag(const MemoryRecord *r, const char *tag) {
     for (size_t i = 0; i < r->tag_count; i++)
-        if (strcmp(r->tags[i], tag) == 0) return 1;
+        if (strcmp(r->tags[i], tag) == 0)
+            return 1;
     return 0;
 }
 
 static int passes_filters(const MemoryRecord *r, const SearchParams *p) {
-    if (r->deleted) return 0;
-    if (p->has_type && r->type != p->type) return 0;
-    if (p->has_max_importance && r->importance > p->max_importance) return 0;
-    if (p->agent_id &&
-        (!r->agent_id || strcmp(r->agent_id, p->agent_id) != 0))
+    if (r->deleted)
+        return 0;
+    if (p->has_type && r->type != p->type)
+        return 0;
+    if (p->has_max_importance && r->importance > p->max_importance)
+        return 0;
+    if (p->agent_id && (!r->agent_id || strcmp(r->agent_id, p->agent_id) != 0))
         return 0;
     if (p->has_time && (r->created < p->start_time || r->created > p->end_time))
         return 0;
     if (p->tag_count) {
         if (p->match_all) {
             for (size_t i = 0; i < p->tag_count; i++)
-                if (!rec_has_tag(r, p->tags[i])) return 0;
+                if (!rec_has_tag(r, p->tags[i]))
+                    return 0;
         } else {
             int any = 0;
             for (size_t i = 0; i < p->tag_count; i++)
-                if (rec_has_tag(r, p->tags[i])) { any = 1; break; }
-            if (!any) return 0;
+                if (rec_has_tag(r, p->tags[i])) {
+                    any = 1;
+                    break;
+                }
+            if (!any)
+                return 0;
         }
     }
     return 1;
@@ -56,14 +64,19 @@ typedef struct {
 
 static int cmp_score_desc(const void *a, const void *b) {
     float x = ((const Cand *)a)->score, y = ((const Cand *)b)->score;
-    if (x < y) return 1;
-    if (x > y) return -1;
+    if (x < y)
+        return 1;
+    if (x > y)
+        return -1;
     return 0;
 }
 static int cmp_created_asc(const void *a, const void *b) {
-    uint64_t x = ((const Cand *)a)->rec.created, y = ((const Cand *)b)->rec.created;
-    if (x < y) return -1;
-    if (x > y) return 1;
+    uint64_t x = ((const Cand *)a)->rec.created,
+             y = ((const Cand *)b)->rec.created;
+    if (x < y)
+        return -1;
+    if (x > y)
+        return 1;
     return 0;
 }
 
@@ -75,9 +88,12 @@ static void idx_sift_down(size_t *h, size_t n, size_t i, const Cand *c,
                           int (*cmp)(const void *, const void *)) {
     for (;;) {
         size_t l = 2 * i + 1, r = 2 * i + 2, worst = i;
-        if (l < n && cmp(&c[h[l]], &c[h[worst]]) > 0) worst = l;
-        if (r < n && cmp(&c[h[r]], &c[h[worst]]) > 0) worst = r;
-        if (worst == i) break;
+        if (l < n && cmp(&c[h[l]], &c[h[worst]]) > 0)
+            worst = l;
+        if (r < n && cmp(&c[h[r]], &c[h[worst]]) > 0)
+            worst = r;
+        if (worst == i)
+            break;
         size_t t = h[i];
         h[i] = h[worst];
         h[worst] = t;
@@ -91,7 +107,8 @@ static void idx_sift_up(size_t *h, size_t i, const Cand *c,
                         int (*cmp)(const void *, const void *)) {
     while (i > 0) {
         size_t pa = (i - 1) / 2;
-        if (cmp(&c[h[i]], &c[h[pa]]) <= 0) break;
+        if (cmp(&c[h[i]], &c[h[pa]]) <= 0)
+            break;
         size_t t = h[i];
         h[i] = h[pa];
         h[pa] = t;
@@ -117,7 +134,8 @@ static Cand *select_top(Cand *cands, size_t m, size_t sel_n,
     char *sel = calloc(m, 1);
     Cand *top = malloc(sel_n * sizeof(Cand));
     if (!heap || !sel || !top) {
-        for (size_t i = 0; i < m; i++) record_free(&cands[i].rec);
+        for (size_t i = 0; i < m; i++)
+            record_free(&cands[i].rec);
         free(cands);
         free(heap);
         free(sel);
@@ -141,7 +159,8 @@ static Cand *select_top(Cand *cands, size_t m, size_t sel_n,
     }
     qsort(top, sel_n, sizeof(Cand), cmp);
     for (size_t i = 0; i < m; i++)
-        if (!sel[i]) record_free(&cands[i].rec);
+        if (!sel[i])
+            record_free(&cands[i].rec);
     free(heap);
     free(sel);
     free(cands);
@@ -169,12 +188,13 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
 
     pthread_rwlock_rdlock(&db->index_lock);
     if (semantic) {
-        if (semantic_index_search(db->sem, p->embedding, p->embedding_dim, fetch,
-                                  &ids, &scores, &nids) != 0) {
+        if (semantic_index_search(db->sem, p->embedding, p->embedding_dim,
+                                  fetch, &ids, &scores, &nids) != 0) {
             pthread_rwlock_unlock(&db->index_lock);
             return AEGIS_ERR_INTERNAL;
         }
-        *exhausted = (nids < fetch); /* fewer returned than asked -> saw them all */
+        *exhausted =
+            (nids < fetch); /* fewer returned than asked -> saw them all */
     } else if (p->has_time) {
         /* A wide-open time range is effectively a full scan, so bound it to
          * `load_cap` (0 = unlimited); *exhausted stays set only if nothing was
@@ -182,19 +202,20 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
          * never hidden; `oldest_first` keeps the OLDEST instead (candidate
          * selection wants the aging tail, not the recent one). */
         int trunc = 0;
-        int rc = p->oldest_first
-            ? time_index_range(db->time, p->start_time, p->end_time,
-                               load_cap, &ids, &nids)
-            : time_index_range_recent(db->time, p->start_time, p->end_time,
-                                      load_cap, &ids, &nids, &trunc);
+        int rc =
+            p->oldest_first
+                ? time_index_range(db->time, p->start_time, p->end_time,
+                                   load_cap, &ids, &nids)
+                : time_index_range_recent(db->time, p->start_time, p->end_time,
+                                          load_cap, &ids, &nids, &trunc);
         if (rc != 0) {
             pthread_rwlock_unlock(&db->index_lock);
             return AEGIS_ERR_INTERNAL;
         }
         /* time_index_range caps to the oldest `load_cap` and returns nids==cap
          * when it truncates; treat a full load as "possibly more". */
-        *exhausted = p->oldest_first ? (load_cap == 0 || nids < load_cap)
-                                     : !trunc;
+        *exhausted =
+            p->oldest_first ? (load_cap == 0 || nids < load_cap) : !trunc;
     } else if (p->tag_count) {
         if (tag_index_query(db->tags, p->tags, p->tag_count, p->match_all, &ids,
                             &nids) != 0) {
@@ -226,12 +247,14 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
     size_t sn = 0;
     for (size_t i = 0; i < nids; i++) {
         const HashEntry *e = hash_index_get(db->hash, ids[i]);
-        if (!e) continue;
+        if (!e)
+            continue;
         snap[sn].off = e->offset;
         snap[sn].score = semantic ? scores[i] : 0.0f;
         sn++;
     }
-    pthread_rwlock_rdlock(&db->log_lock); /* pin the log before dropping index */
+    pthread_rwlock_rdlock(
+        &db->log_lock); /* pin the log before dropping index */
     pthread_rwlock_unlock(&db->index_lock);
     free(ids);
     free(scores);
@@ -254,11 +277,13 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
             continue;
         uint8_t *buf = NULL;
         size_t len = 0;
-        if (log_read(&db->log, snap[i].off, &buf, &len) != 0) continue;
+        if (log_read(&db->log, snap[i].off, &buf, &len) != 0)
+            continue;
         MemoryRecord r;
         int dec = record_decode(buf, len, &r);
         free(buf);
-        if (dec != 0) continue;
+        if (dec != 0)
+            continue;
         if (record_expired(&r, now) || !passes_filters(&r, p)) {
             record_free(&r);
             continue;
@@ -305,9 +330,9 @@ aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
                             MemoryRecord **out_records,
                             SearchExplain **out_explain, size_t *out_n) {
     aegis_status_t st = require_phase(db, p->embedding_dim ? 3 : 2);
-    if (st != AEGIS_OK) return st;
-    if (p->embedding_dim &&
-        p->embedding_dim != db->config.embedding_dimensions)
+    if (st != AEGIS_OK)
+        return st;
+    if (p->embedding_dim && p->embedding_dim != db->config.embedding_dimensions)
         return AEGIS_ERR_INVALID_REQUEST;
 
     size_t top_k = p->top_k ? p->top_k : 10;
@@ -325,13 +350,17 @@ aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
          * namespace) can drop them all. Re-query with a growing fetch until
          * enough survive, the index is exhausted, or the cap is hit. */
         size_t fetch = want * 4 + 32;
-        if (fetch > SEARCH_FETCH_CAP) fetch = SEARCH_FETCH_CAP;
+        if (fetch > SEARCH_FETCH_CAP)
+            fetch = SEARCH_FETCH_CAP;
         for (;;) {
             int exhausted = 0;
             st = gather_candidates(db, p, fetch, 1, 0, &cands, &m, &exhausted);
-            if (st != AEGIS_OK) return st;
-            if (m >= want || exhausted || fetch >= SEARCH_FETCH_CAP) break;
-            for (size_t i = 0; i < m; i++) record_free(&cands[i].rec);
+            if (st != AEGIS_OK)
+                return st;
+            if (m >= want || exhausted || fetch >= SEARCH_FETCH_CAP)
+                break;
+            for (size_t i = 0; i < m; i++)
+                record_free(&cands[i].rec);
             free(cands);
             cands = NULL;
             m = 0;
@@ -341,7 +370,8 @@ aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
         int exhausted = 0;
         st = gather_candidates(db, p, 0, 0, db->config.query_scan_cap, &cands,
                                &m, &exhausted);
-        if (st != AEGIS_OK) return st;
+        if (st != AEGIS_OK)
+            return st;
     }
 
     /* Rank the best `sel_n` (= offset + top_k, capped at m) into `ranked`
@@ -353,7 +383,8 @@ aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
     /* Rank the best `sel_n` into `ranked` (best-first); it owns .rec for
      * [0, sel_n). NULL is OOM only when sel_n > 0 (sel_n == 0 == no candidates). */
     Cand *ranked = select_top(cands, m, sel_n, cmp);
-    if (sel_n > 0 && !ranked) return AEGIS_ERR_INTERNAL;
+    if (sel_n > 0 && !ranked)
+        return AEGIS_ERR_INTERNAL;
 
     /* page: keep [offset, sel_n), free the skipped head */
     size_t start = offset < sel_n ? offset : sel_n;
@@ -364,18 +395,21 @@ aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
         exp = malloc((rn ? rn : 1) * sizeof(SearchExplain));
         if (!exp) {
             free(res);
-            for (size_t i = 0; i < sel_n; i++) record_free(&ranked[i].rec);
+            for (size_t i = 0; i < sel_n; i++)
+                record_free(&ranked[i].rec);
             free(ranked);
             return AEGIS_ERR_INTERNAL;
         }
     }
     if (!res) {
         free(exp);
-        for (size_t i = 0; i < sel_n; i++) record_free(&ranked[i].rec);
+        for (size_t i = 0; i < sel_n; i++)
+            record_free(&ranked[i].rec);
         free(ranked);
         return AEGIS_ERR_INTERNAL;
     }
-    for (size_t i = 0; i < start; i++) record_free(&ranked[i].rec);
+    for (size_t i = 0; i < start; i++)
+        record_free(&ranked[i].rec);
     for (size_t i = start; i < sel_n; i++) {
         res[i - start] = ranked[i].rec;
         if (exp) {
@@ -392,7 +426,8 @@ aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
     }
     free(ranked);
     *out_records = res;
-    if (out_explain) *out_explain = exp;
+    if (out_explain)
+        *out_explain = exp;
     *out_n = rn;
     return AEGIS_OK;
 }
@@ -402,19 +437,23 @@ aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
 aegis_status_t qe_count(AegisDB *db, const SearchParams *p, size_t *out_count,
                         int *out_capped) {
     aegis_status_t st = require_phase(db, 2);
-    if (st != AEGIS_OK) return st;
+    if (st != AEGIS_OK)
+        return st;
     Cand *cands = NULL;
     size_t m = 0;
     int exhausted = 0;
     st = gather_candidates(db, p, 0, 0, db->config.query_scan_cap, &cands, &m,
                            &exhausted);
-    if (st != AEGIS_OK) return st;
-    for (size_t i = 0; i < m; i++) record_free(&cands[i].rec);
+    if (st != AEGIS_OK)
+        return st;
+    for (size_t i = 0; i < m; i++)
+        record_free(&cands[i].rec);
     free(cands);
     *out_count = m;
     /* When the broad-scan cap truncated the candidate set the count is a floor,
      * not exact — tell the caller so it isn't reported as authoritative. */
-    if (out_capped) *out_capped = !exhausted;
+    if (out_capped)
+        *out_capped = !exhausted;
     return AEGIS_OK;
 }
 
@@ -424,7 +463,8 @@ aegis_status_t qe_count(AegisDB *db, const SearchParams *p, size_t *out_count,
 aegis_status_t qe_delete_by_query(AegisDB *db, const SearchParams *p,
                                   const char *ns, size_t *out_deleted) {
     aegis_status_t st = require_phase(db, 1);
-    if (st != AEGIS_OK) return st;
+    if (st != AEGIS_OK)
+        return st;
     if (!p->has_type && !p->tag_count && !p->has_time)
         return AEGIS_ERR_INVALID_REQUEST; /* refuse an unfiltered bulk delete */
 
@@ -435,14 +475,16 @@ aegis_status_t qe_delete_by_query(AegisDB *db, const SearchParams *p,
     size_t m = 0;
     int exhausted = 0;
     st = gather_candidates(db, p, 0, 0, 0, &cands, &m, &exhausted);
-    if (st != AEGIS_OK) return st;
+    if (st != AEGIS_OK)
+        return st;
 
     /* snapshot the matching ids, then release the loaded records — qe_delete
      * re-loads and re-validates each under the write lock (namespace included),
      * so a racing change just yields NOT_FOUND for that id and is skipped. */
     uint64_t *ids = malloc((m ? m : 1) * sizeof(uint64_t));
     if (!ids) {
-        for (size_t i = 0; i < m; i++) record_free(&cands[i].rec);
+        for (size_t i = 0; i < m; i++)
+            record_free(&cands[i].rec);
         free(cands);
         return AEGIS_ERR_INTERNAL;
     }
@@ -454,9 +496,9 @@ aegis_status_t qe_delete_by_query(AegisDB *db, const SearchParams *p,
 
     size_t deleted = 0;
     for (size_t i = 0; i < m; i++)
-        if (qe_delete(db, ids[i], ns) == AEGIS_OK) deleted++;
+        if (qe_delete(db, ids[i], ns) == AEGIS_OK)
+            deleted++;
     free(ids);
     *out_deleted = deleted;
     return AEGIS_OK;
 }
-

@@ -65,8 +65,10 @@ static void test_working_ring_evicts_oldest(void) {
     MemoryRecord *gc = working_store_get(ws, "s", c, 2);
     TEST_ASSERT_NOT_NULL(gb);
     TEST_ASSERT_NOT_NULL(gc);
-    record_free(gb); free(gb);
-    record_free(gc); free(gc);
+    record_free(gb);
+    free(gb);
+    record_free(gc);
+    free(gc);
     TEST_ASSERT_EQUAL_size_t(2, working_store_count(ws));
     working_store_free(ws);
 }
@@ -78,8 +80,8 @@ static void test_working_ttl_saturates(void) {
     MemoryRecord in = mk("v", NULL);
     uint64_t id = 0;
     uint64_t now = 1000;
-    TEST_ASSERT_EQUAL_INT(0,
-        working_store_add(ws, "s", &in, now, UINT64_MAX, &id));
+    TEST_ASSERT_EQUAL_INT(
+        0, working_store_add(ws, "s", &in, now, UINT64_MAX, &id));
     /* Far in the future relative to `now` — a wrapped expiry would drop it. */
     MemoryRecord *g = working_store_get(ws, "s", id, now + 1000000000ULL);
     TEST_ASSERT_NOT_NULL(g);
@@ -110,10 +112,14 @@ static void *worker(void *arg) {
         MemoryRecord in = mk("payload", (i & 1) ? "ns" : NULL);
         uint64_t id = 0;
         /* short ttl so entries expire and both find_slot and sweep free them */
-        if (working_store_add(g_ws, s, &in, now, 8, &id) != 0) continue;
+        if (working_store_add(g_ws, s, &in, now, 8, &id) != 0)
+            continue;
 
         MemoryRecord *g = working_store_get(g_ws, s, id, now);
-        if (g) { record_free(g); free(g); }
+        if (g) {
+            record_free(g);
+            free(g);
+        }
 
         if ((i & 3) == 0) {
             MemoryRecord out;
@@ -135,9 +141,10 @@ static void test_working_concurrent_stress(void) {
 
     pthread_t th[NTHREADS];
     for (int i = 0; i < NTHREADS; i++)
-        TEST_ASSERT_EQUAL_INT(0,
-            pthread_create(&th[i], NULL, worker, (void *)(intptr_t)i));
-    for (int i = 0; i < NTHREADS; i++) pthread_join(th[i], NULL);
+        TEST_ASSERT_EQUAL_INT(
+            0, pthread_create(&th[i], NULL, worker, (void *)(intptr_t)i));
+    for (int i = 0; i < NTHREADS; i++)
+        pthread_join(th[i], NULL);
 
     /* Sweep far in the future: every remaining entry has expired, so the store
      * must drain to zero — a consistent count proves no slots were lost/leaked

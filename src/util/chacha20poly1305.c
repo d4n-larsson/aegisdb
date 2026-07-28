@@ -10,8 +10,8 @@
  * are given external linkage — not for general use (the public API is
  * aead_seal/aead_open in aead.h), but so the unit test can check each against
  * its published known-answer vector, not only the end-to-end AEAD vector. */
-#include "aegisdb/aead.h"
 #include "aegisdb/chacha20poly1305.h"
+#include "aegisdb/aead.h"
 
 #include <string.h>
 
@@ -27,16 +27,25 @@ static void u32to8le(uint8_t *p, uint32_t v) {
     p[3] = (uint8_t)(v >> 24);
 }
 static void u64to8le(uint8_t *p, uint64_t v) {
-    for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i));
+    for (int i = 0; i < 8; i++)
+        p[i] = (uint8_t)(v >> (8 * i));
 }
 
 /* ----------------------------------------------------------------- ChaCha20 - */
 #define ROTL32(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
-#define QR(a, b, c, d)              \
-    a += b; d ^= a; d = ROTL32(d, 16); \
-    c += d; b ^= c; b = ROTL32(b, 12); \
-    a += b; d ^= a; d = ROTL32(d, 8);  \
-    c += d; b ^= c; b = ROTL32(b, 7)
+#define QR(a, b, c, d)                                                         \
+    a += b;                                                                    \
+    d ^= a;                                                                    \
+    d = ROTL32(d, 16);                                                         \
+    c += d;                                                                    \
+    b ^= c;                                                                    \
+    b = ROTL32(b, 12);                                                         \
+    a += b;                                                                    \
+    d ^= a;                                                                    \
+    d = ROTL32(d, 8);                                                          \
+    c += d;                                                                    \
+    b ^= c;                                                                    \
+    b = ROTL32(b, 7)
 
 /* 20 rounds (10 column+diagonal double-rounds) in place. */
 static void chacha20_rounds(uint32_t x[16]) {
@@ -58,7 +67,8 @@ static void chacha20_state(uint32_t s[16], const uint8_t key[32],
     s[1] = 0x3320646e;
     s[2] = 0x79622d32;
     s[3] = 0x6b206574;
-    for (int i = 0; i < 8; i++) s[4 + i] = u8to32le(key + 4 * i);
+    for (int i = 0; i < 8; i++)
+        s[4 + i] = u8to32le(key + 4 * i);
     s[12] = counter;
     s[13] = u8to32le(nonce + 0);
     s[14] = u8to32le(nonce + 4);
@@ -72,7 +82,8 @@ void aegis_chacha20_block(const uint8_t key[32], uint32_t counter,
     chacha20_state(s, key, counter, nonce);
     memcpy(x, s, sizeof x);
     chacha20_rounds(x);
-    for (int i = 0; i < 16; i++) u32to8le(out + 4 * i, x[i] + s[i]);
+    for (int i = 0; i < 16; i++)
+        u32to8le(out + 4 * i, x[i] + s[i]);
 }
 
 /* XOR `len` bytes of `in` with the keystream starting at `counter`. in==out ok. */
@@ -84,7 +95,8 @@ static void chacha20_xor(const uint8_t key[32], uint32_t counter,
     while (off < len) {
         aegis_chacha20_block(key, counter, nonce, block);
         size_t n = len - off < 64 ? len - off : 64;
-        for (size_t i = 0; i < n; i++) out[off + i] = in[off + i] ^ block[i];
+        for (size_t i = 0; i < n; i++)
+            out[off + i] = in[off + i] ^ block[i];
         off += n;
         counter++;
     }
@@ -99,11 +111,15 @@ void aegis_hchacha20(const uint8_t key[32], const uint8_t nonce16[16],
     x[1] = 0x3320646e;
     x[2] = 0x79622d32;
     x[3] = 0x6b206574;
-    for (int i = 0; i < 8; i++) x[4 + i] = u8to32le(key + 4 * i);
-    for (int i = 0; i < 4; i++) x[12 + i] = u8to32le(nonce16 + 4 * i);
+    for (int i = 0; i < 8; i++)
+        x[4 + i] = u8to32le(key + 4 * i);
+    for (int i = 0; i < 4; i++)
+        x[12 + i] = u8to32le(nonce16 + 4 * i);
     chacha20_rounds(x);
-    for (int i = 0; i < 4; i++) u32to8le(out + 4 * i, x[i]);
-    for (int i = 0; i < 4; i++) u32to8le(out + 16 + 4 * i, x[12 + i]);
+    for (int i = 0; i < 4; i++)
+        u32to8le(out + 4 * i, x[i]);
+    for (int i = 0; i < 4; i++)
+        u32to8le(out + 16 + 4 * i, x[12 + i]);
 }
 
 /* ------------------------------------------------------------------ Poly1305 - */
@@ -124,7 +140,8 @@ static void poly1305_init(poly1305_ctx *st, const uint8_t key[32]) {
     st->r[2] = (u8to32le(&key[6]) >> 4) & 0x3ffc0ff;
     st->r[3] = (u8to32le(&key[9]) >> 6) & 0x3f03fff;
     st->r[4] = (u8to32le(&key[12]) >> 8) & 0x00fffff;
-    for (int i = 0; i < 5; i++) st->h[i] = 0;
+    for (int i = 0; i < 5; i++)
+        st->h[i] = 0;
     st->pad[0] = u8to32le(&key[16]);
     st->pad[1] = u8to32le(&key[20]);
     st->pad[2] = u8to32le(&key[24]);
@@ -162,28 +179,45 @@ static void poly1305_blocks(poly1305_ctx *st, const uint8_t *m, size_t bytes) {
         d4 = (uint64_t)h0 * r4 + (uint64_t)h1 * r3 + (uint64_t)h2 * r2 +
              (uint64_t)h3 * r1 + (uint64_t)h4 * r0;
         /* (partial) h %= p */
-        c = (uint32_t)(d0 >> 26); h0 = (uint32_t)d0 & 0x3ffffff;
-        d1 += c; c = (uint32_t)(d1 >> 26); h1 = (uint32_t)d1 & 0x3ffffff;
-        d2 += c; c = (uint32_t)(d2 >> 26); h2 = (uint32_t)d2 & 0x3ffffff;
-        d3 += c; c = (uint32_t)(d3 >> 26); h3 = (uint32_t)d3 & 0x3ffffff;
-        d4 += c; c = (uint32_t)(d4 >> 26); h4 = (uint32_t)d4 & 0x3ffffff;
-        h0 += c * 5; c = (h0 >> 26); h0 &= 0x3ffffff;
+        c = (uint32_t)(d0 >> 26);
+        h0 = (uint32_t)d0 & 0x3ffffff;
+        d1 += c;
+        c = (uint32_t)(d1 >> 26);
+        h1 = (uint32_t)d1 & 0x3ffffff;
+        d2 += c;
+        c = (uint32_t)(d2 >> 26);
+        h2 = (uint32_t)d2 & 0x3ffffff;
+        d3 += c;
+        c = (uint32_t)(d3 >> 26);
+        h3 = (uint32_t)d3 & 0x3ffffff;
+        d4 += c;
+        c = (uint32_t)(d4 >> 26);
+        h4 = (uint32_t)d4 & 0x3ffffff;
+        h0 += c * 5;
+        c = (h0 >> 26);
+        h0 &= 0x3ffffff;
         h1 += c;
         m += 16;
         bytes -= 16;
     }
-    st->h[0] = h0; st->h[1] = h1; st->h[2] = h2; st->h[3] = h3; st->h[4] = h4;
+    st->h[0] = h0;
+    st->h[1] = h1;
+    st->h[2] = h2;
+    st->h[3] = h3;
+    st->h[4] = h4;
 }
 
 static void poly1305_update(poly1305_ctx *st, const uint8_t *m, size_t bytes) {
     if (st->leftover) {
         size_t want = 16 - st->leftover;
-        if (want > bytes) want = bytes;
+        if (want > bytes)
+            want = bytes;
         memcpy(st->buffer + st->leftover, m, want);
         bytes -= want;
         m += want;
         st->leftover += want;
-        if (st->leftover < 16) return;
+        if (st->leftover < 16)
+            return;
         poly1305_blocks(st, st->buffer, 16);
         st->leftover = 0;
     }
@@ -208,28 +242,54 @@ static void poly1305_finish(poly1305_ctx *st, uint8_t mac[16]) {
     if (st->leftover) {
         size_t i = st->leftover;
         st->buffer[i++] = 1;
-        for (; i < 16; i++) st->buffer[i] = 0;
+        for (; i < 16; i++)
+            st->buffer[i] = 0;
         st->final = 1;
         poly1305_blocks(st, st->buffer, 16);
     }
 
-    h0 = st->h[0]; h1 = st->h[1]; h2 = st->h[2]; h3 = st->h[3]; h4 = st->h[4];
-    c = h1 >> 26; h1 &= 0x3ffffff;
-    h2 += c; c = h2 >> 26; h2 &= 0x3ffffff;
-    h3 += c; c = h3 >> 26; h3 &= 0x3ffffff;
-    h4 += c; c = h4 >> 26; h4 &= 0x3ffffff;
-    h0 += c * 5; c = h0 >> 26; h0 &= 0x3ffffff;
+    h0 = st->h[0];
+    h1 = st->h[1];
+    h2 = st->h[2];
+    h3 = st->h[3];
+    h4 = st->h[4];
+    c = h1 >> 26;
+    h1 &= 0x3ffffff;
+    h2 += c;
+    c = h2 >> 26;
+    h2 &= 0x3ffffff;
+    h3 += c;
+    c = h3 >> 26;
+    h3 &= 0x3ffffff;
+    h4 += c;
+    c = h4 >> 26;
+    h4 &= 0x3ffffff;
+    h0 += c * 5;
+    c = h0 >> 26;
+    h0 &= 0x3ffffff;
     h1 += c;
 
-    g0 = h0 + 5; c = g0 >> 26; g0 &= 0x3ffffff;
-    g1 = h1 + c; c = g1 >> 26; g1 &= 0x3ffffff;
-    g2 = h2 + c; c = g2 >> 26; g2 &= 0x3ffffff;
-    g3 = h3 + c; c = g3 >> 26; g3 &= 0x3ffffff;
+    g0 = h0 + 5;
+    c = g0 >> 26;
+    g0 &= 0x3ffffff;
+    g1 = h1 + c;
+    c = g1 >> 26;
+    g1 &= 0x3ffffff;
+    g2 = h2 + c;
+    c = g2 >> 26;
+    g2 &= 0x3ffffff;
+    g3 = h3 + c;
+    c = g3 >> 26;
+    g3 &= 0x3ffffff;
     g4 = h4 + c - (1u << 26);
 
     /* select h if h < p, else h + -p (constant-time) */
     mask = (g4 >> 31) - 1;
-    g0 &= mask; g1 &= mask; g2 &= mask; g3 &= mask; g4 &= mask;
+    g0 &= mask;
+    g1 &= mask;
+    g2 &= mask;
+    g3 &= mask;
+    g4 &= mask;
     mask = ~mask;
     h0 = (h0 & mask) | g0;
     h1 = (h1 & mask) | g1;
@@ -243,10 +303,14 @@ static void poly1305_finish(poly1305_ctx *st, uint8_t mac[16]) {
     h2 = (h2 >> 12) | (h3 << 14);
     h3 = (h3 >> 18) | (h4 << 8);
 
-    f = (uint64_t)h0 + st->pad[0]; h0 = (uint32_t)f;
-    f = (uint64_t)h1 + st->pad[1] + (f >> 32); h1 = (uint32_t)f;
-    f = (uint64_t)h2 + st->pad[2] + (f >> 32); h2 = (uint32_t)f;
-    f = (uint64_t)h3 + st->pad[3] + (f >> 32); h3 = (uint32_t)f;
+    f = (uint64_t)h0 + st->pad[0];
+    h0 = (uint32_t)f;
+    f = (uint64_t)h1 + st->pad[1] + (f >> 32);
+    h1 = (uint32_t)f;
+    f = (uint64_t)h2 + st->pad[2] + (f >> 32);
+    h2 = (uint32_t)f;
+    f = (uint64_t)h3 + st->pad[3] + (f >> 32);
+    h3 = (uint32_t)f;
 
     u32to8le(mac + 0, h0);
     u32to8le(mac + 4, h1);
@@ -267,14 +331,16 @@ void aegis_poly1305(uint8_t mac[16], const uint8_t *m, size_t len,
 static void poly_pad16(poly1305_ctx *st, size_t len) {
     static const uint8_t zero[16] = {0};
     size_t rem = len & 15u;
-    if (rem) poly1305_update(st, zero, 16 - rem);
+    if (rem)
+        poly1305_update(st, zero, 16 - rem);
 }
 
 /* Derive the XChaCha20 subkey + 96-bit ChaCha20 nonce from a 192-bit nonce, and
  * compute the Poly1305 one-time key (block 0). Shared by seal and open. */
 static void xchacha_setup(const uint8_t key[AEAD_KEY_LEN],
-                          const uint8_t nonce[AEAD_NONCE_LEN], uint8_t subkey[32],
-                          uint8_t cc_nonce[12], uint8_t polykey[32]) {
+                          const uint8_t nonce[AEAD_NONCE_LEN],
+                          uint8_t subkey[32], uint8_t cc_nonce[12],
+                          uint8_t polykey[32]) {
     aegis_hchacha20(key, nonce, subkey);
     memset(cc_nonce, 0, 4);
     memcpy(cc_nonce + 4, nonce + 16, 8);
@@ -289,9 +355,11 @@ static void aead_mac(const uint8_t polykey[32], const uint8_t *aad,
                      uint8_t tag[AEAD_TAG_LEN]) {
     poly1305_ctx st;
     poly1305_init(&st, polykey);
-    if (aad_len) poly1305_update(&st, aad, aad_len);
+    if (aad_len)
+        poly1305_update(&st, aad, aad_len);
     poly_pad16(&st, aad_len);
-    if (ct_len) poly1305_update(&st, ct, ct_len);
+    if (ct_len)
+        poly1305_update(&st, ct, ct_len);
     poly_pad16(&st, ct_len);
     uint8_t lens[16];
     u64to8le(lens + 0, aad_len);
@@ -314,7 +382,8 @@ void aead_seal(const uint8_t key[AEAD_KEY_LEN],
 /* Constant-time 16-byte compare. */
 static int ct_eq16(const uint8_t *a, const uint8_t *b) {
     uint8_t diff = 0;
-    for (int i = 0; i < 16; i++) diff |= (uint8_t)(a[i] ^ b[i]);
+    for (int i = 0; i < 16; i++)
+        diff |= (uint8_t)(a[i] ^ b[i]);
     return diff == 0;
 }
 

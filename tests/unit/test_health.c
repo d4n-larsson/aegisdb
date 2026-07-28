@@ -23,7 +23,8 @@ typedef struct {
 /* Bind a loopback socket on an ephemeral port and report it back. */
 static int stub_listen(StubServer *s) {
     s->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (s->listen_fd < 0) return -1;
+    if (s->listen_fd < 0)
+        return -1;
     int one = 1;
     setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 
@@ -50,7 +51,8 @@ static void *stub_serve(void *arg) {
     if (c >= 0) {
         char buf[64];
         (void)recv(c, buf, sizeof(buf), 0); /* drain the ping request */
-        if (s->reply) (void)send(c, s->reply, strlen(s->reply), 0);
+        if (s->reply)
+            (void)send(c, s->reply, strlen(s->reply), 0);
         close(c);
     }
     close(s->listen_fd);
@@ -59,7 +61,8 @@ static void *stub_serve(void *arg) {
 
 /* A server that answers with a valid ok response is healthy. */
 void test_health_check_ok(void) {
-    StubServer s = {.reply = "{\"ok\":true,\"version\":\"0.1.0\",\"phase\":4}\n"};
+    StubServer s = {.reply =
+                        "{\"ok\":true,\"version\":\"0.1.0\",\"phase\":4}\n"};
     TEST_ASSERT_EQUAL_INT(0, stub_listen(&s));
     pthread_t t;
     pthread_create(&t, NULL, stub_serve, &s);

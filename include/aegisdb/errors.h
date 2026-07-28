@@ -8,18 +8,18 @@
 
 typedef enum {
     AEGIS_OK = 0,
-    AEGIS_ERR_INVALID_REQUEST,   /* malformed / missing fields  -> INVALID_REQUEST */
-    AEGIS_ERR_NOT_FOUND,         /* unknown id                  -> NOT_FOUND */
+    AEGIS_ERR_INVALID_REQUEST, /* malformed / missing fields  -> INVALID_REQUEST */
+    AEGIS_ERR_NOT_FOUND,       /* unknown id                  -> NOT_FOUND */
     AEGIS_ERR_PAYLOAD_TOO_LARGE, /* data exceeds limit          -> PAYLOAD_TOO_LARGE */
     AEGIS_ERR_IMMUTABLE,         /* update on episodic record   -> IMMUTABLE */
     AEGIS_ERR_NOT_READY,         /* phase-gated feature off     -> NOT_READY */
-    AEGIS_ERR_UNAUTHORIZED,      /* missing/invalid auth token  -> UNAUTHORIZED */
-    AEGIS_ERR_FORBIDDEN,         /* authenticated but not allowed -> FORBIDDEN */
-    AEGIS_ERR_QUOTA_EXCEEDED,    /* tenant storage quota reached -> QUOTA_EXCEEDED */
-    AEGIS_ERR_RATE_LIMITED,      /* tenant request rate exceeded -> RATE_LIMITED */
-    AEGIS_ERR_READ_ONLY,         /* write attempted on a read-only replica -> READ_ONLY */
-    AEGIS_ERR_MEMORY_LIMIT,      /* server index-memory cap reached -> MEMORY_LIMIT */
-    AEGIS_ERR_INTERNAL           /* unexpected failure          -> INTERNAL */
+    AEGIS_ERR_UNAUTHORIZED,   /* missing/invalid auth token  -> UNAUTHORIZED */
+    AEGIS_ERR_FORBIDDEN,      /* authenticated but not allowed -> FORBIDDEN */
+    AEGIS_ERR_QUOTA_EXCEEDED, /* tenant storage quota reached -> QUOTA_EXCEEDED */
+    AEGIS_ERR_RATE_LIMITED,   /* tenant request rate exceeded -> RATE_LIMITED */
+    AEGIS_ERR_READ_ONLY, /* write attempted on a read-only replica -> READ_ONLY */
+    AEGIS_ERR_MEMORY_LIMIT, /* server index-memory cap reached -> MEMORY_LIMIT */
+    AEGIS_ERR_INTERNAL      /* unexpected failure          -> INTERNAL */
 } aegis_status_t;
 /* Note: the snake_case_t spelling is deliberate — this is the result type of the
  * public C result-code API (aegis_status_code/_message), styled like the C

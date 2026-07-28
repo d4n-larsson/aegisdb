@@ -19,7 +19,8 @@
 
 static void on_signal(int sig) {
     (void)sig;
-    int saved = errno; /* a handler must not clobber the interrupted code's errno */
+    int saved =
+        errno; /* a handler must not clobber the interrupted code's errno */
     tcp_server_request_stop();
     errno = saved;
 }
@@ -36,7 +37,10 @@ int main(int argc, char **argv) {
     Config cfg;
     config_defaults(&cfg);
     int pr = config_parse_args(&cfg, argc, argv);
-    if (pr != 0) { config_free(&cfg); return pr < 0 ? 1 : 0; } /* -1 err, 1 help */
+    if (pr != 0) {
+        config_free(&cfg);
+        return pr < 0 ? 1 : 0;
+    } /* -1 err, 1 help */
     aegis_log_set_level((AegisLogLevel)cfg.log_level);
 
     /* One-shot: print the hashed form of a token for the token file, then exit. */
@@ -87,10 +91,11 @@ int main(int argc, char **argv) {
 
     LOG_INFO("durability: %s", aegis_durability_name(cfg.durability));
     if (cfg.durability == AEGIS_DURABILITY_BATCH && cfg.fsync_batch_size > 1)
-        LOG_WARN("durability=batch: up to %zu acknowledged write(s) may be lost "
-                 "on crash, and an idle server may leave them unflushed "
-                 "indefinitely; use --durability sync or interval to bound this",
-                 cfg.fsync_batch_size);
+        LOG_WARN(
+            "durability=batch: up to %zu acknowledged write(s) may be lost "
+            "on crash, and an idle server may leave them unflushed "
+            "indefinitely; use --durability sync or interval to bound this",
+            cfg.fsync_batch_size);
     else if (cfg.durability == AEGIS_DURABILITY_INTERVAL)
         LOG_INFO("durability=interval: log flushed every ~%llu ms; "
                  "acknowledged writes within that window may be lost on crash",
@@ -100,7 +105,8 @@ int main(int argc, char **argv) {
         char fp[13];
         config_key_fingerprint(cfg.encryption_key, fp);
         LOG_INFO("encryption at rest: ENABLED (log + checkpoints sealed with "
-                 "XChaCha20-Poly1305; key fingerprint %s)", fp);
+                 "XChaCha20-Poly1305; key fingerprint %s)",
+                 fp);
     }
     if (cfg.checkpoint_sec)
         LOG_INFO("index checkpoint every %us (recovery replays only the tail "
@@ -110,8 +116,10 @@ int main(int argc, char **argv) {
         LOG_WARN("index checkpoints disabled; recovery will full-scan the log");
 
     if (cfg.max_index_bytes)
-        LOG_INFO("index-memory cap: %zu bytes (inserts return MEMORY_LIMIT past "
-                 "it; sampled periodically)", cfg.max_index_bytes);
+        LOG_INFO(
+            "index-memory cap: %zu bytes (inserts return MEMORY_LIMIT past "
+            "it; sampled periodically)",
+            cfg.max_index_bytes);
 
     AegisDB db;
     if (db_open(&db, &cfg) != 0) {
@@ -133,13 +141,15 @@ int main(int argc, char **argv) {
     Compactor *maint = compaction_start(&db, 30, cfg.compact_sec);
     if (maint)
         LOG_DEBUG("maintenance thread started (working-memory sweep every 30s, "
-                  "compaction check every %us)", cfg.compact_sec);
+                  "compaction check every %us)",
+                  cfg.compact_sec);
     else {
         LOG_WARN("could not start maintenance thread; "
                  "expired working memory will not be swept");
         if (cfg.durability == AEGIS_DURABILITY_INTERVAL)
-            LOG_WARN("durability=interval needs the maintenance thread; the log "
-                     "will only be flushed on shutdown");
+            LOG_WARN(
+                "durability=interval needs the maintenance thread; the log "
+                "will only be flushed on shutdown");
     }
 
     /* Replication (Phase 1 read replicas). Primary: serve the log stream if a
@@ -156,14 +166,16 @@ int main(int argc, char **argv) {
         db.repl_source = replication_source_start(&db, cfg.replication_port,
                                                   cfg.replication_token);
         if (!db.repl_source)
-            LOG_WARN("replication: source failed to start; no replicas can follow");
+            LOG_WARN(
+                "replication: source failed to start; no replicas can follow");
     }
     if (cfg.replicate_from_host[0] != '\0') {
         db.repl_follower = replication_follower_start(
             &db, cfg.replicate_from_host, cfg.replicate_from_port,
             cfg.replication_token);
         if (!db.repl_follower)
-            LOG_WARN("replication: follower failed to start; replica will not sync");
+            LOG_WARN(
+                "replication: follower failed to start; replica will not sync");
         LOG_INFO("read-only replica of %s:%d", cfg.replicate_from_host,
                  cfg.replicate_from_port);
     }

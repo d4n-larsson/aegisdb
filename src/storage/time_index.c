@@ -10,7 +10,8 @@ TimeIndex *time_index_create(void) {
 }
 
 void time_index_free(TimeIndex *t) {
-    if (!t) return;
+    if (!t)
+        return;
     free(t->e);
     free(t);
 }
@@ -20,10 +21,14 @@ size_t time_index_bytes(const TimeIndex *t) {
 }
 
 static int cmp_key(uint64_t ca, uint64_t ia, uint64_t cb, uint64_t ib) {
-    if (ca < cb) return -1;
-    if (ca > cb) return 1;
-    if (ia < ib) return -1;
-    if (ia > ib) return 1;
+    if (ca < cb)
+        return -1;
+    if (ca > cb)
+        return 1;
+    if (ia < ib)
+        return -1;
+    if (ia > ib)
+        return 1;
     return 0;
 }
 
@@ -44,7 +49,8 @@ int time_index_add(TimeIndex *t, uint64_t created, uint64_t id) {
     if (t->n == t->cap) {
         size_t cap = t->cap ? t->cap * 2 : 256;
         TimeEntry *ne = realloc(t->e, cap * sizeof(TimeEntry));
-        if (!ne) return -1;
+        if (!ne)
+            return -1;
         t->e = ne;
         t->cap = cap;
     }
@@ -71,10 +77,13 @@ int time_index_range(const TimeIndex *t, uint64_t start, uint64_t end,
     size_t pos = lower_bound(t, start, 0);
     size_t cap = 16, n = 0;
     uint64_t *ids = malloc(cap * sizeof(uint64_t));
-    if (!ids) return -1;
+    if (!ids)
+        return -1;
     for (size_t i = pos; i < t->n; i++) {
-        if (t->e[i].created > end) break;
-        if (max && n >= max) break;
+        if (t->e[i].created > end)
+            break;
+        if (max && n >= max)
+            break;
         if (n == cap) {
             cap *= 2;
             uint64_t *ni = realloc(ids, cap * sizeof(uint64_t));
@@ -94,15 +103,18 @@ int time_index_range(const TimeIndex *t, uint64_t start, uint64_t end,
 int time_index_range_recent(const TimeIndex *t, uint64_t start, uint64_t end,
                             size_t max, uint64_t **out_ids, size_t *out_n,
                             int *truncated) {
-    if (truncated) *truncated = 0;
+    if (truncated)
+        *truncated = 0;
     size_t lo = lower_bound(t, start, 0);
     /* hi = first index in [lo, n) whose created exceeds `end` (binary search on
      * the sorted-by-created array); [lo, hi) is the in-range span. */
     size_t a = lo, b = t->n;
     while (a < b) {
         size_t mid = a + (b - a) / 2;
-        if (t->e[mid].created > end) b = mid;
-        else a = mid + 1;
+        if (t->e[mid].created > end)
+            b = mid;
+        else
+            a = mid + 1;
     }
     size_t hi = a;
     size_t total = hi - lo;
@@ -110,11 +122,14 @@ int time_index_range_recent(const TimeIndex *t, uint64_t start, uint64_t end,
     if (max && total > max) {
         take = max;
         lo = hi - max; /* drop the oldest, keep the most-recent `max` */
-        if (truncated) *truncated = 1;
+        if (truncated)
+            *truncated = 1;
     }
     uint64_t *ids = malloc((take ? take : 1) * sizeof(uint64_t));
-    if (!ids) return -1;
-    for (size_t i = 0; i < take; i++) ids[i] = t->e[lo + i].id;
+    if (!ids)
+        return -1;
+    for (size_t i = 0; i < take; i++)
+        ids[i] = t->e[lo + i].id;
     *out_ids = ids;
     *out_n = take;
     return 0;

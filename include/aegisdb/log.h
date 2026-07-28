@@ -37,27 +37,28 @@
 #include "aegisdb/aead.h"
 #include "aegisdb/types.h"
 
-#define LOG_FRAME_HEADER 16 /* v2: magic(4) + len(4) + payload_crc(4) + hdr_crc(4) */
+#define LOG_FRAME_HEADER                                                       \
+    16 /* v2: magic(4) + len(4) + payload_crc(4) + hdr_crc(4) */
 
 typedef struct {
     int fd;
     char path[AEGIS_PATH_MAX];
-    off_t size;             /* current valid end offset (bytes) */
-    pthread_mutex_t wlock;  /* serializes appends */
+    off_t size;            /* current valid end offset (bytes) */
+    pthread_mutex_t wlock; /* serializes appends */
     /* atomic: mutated under wlock, but log_flush_pending reads it lock-free. */
     _Atomic size_t since_fsync;
-    size_t fsync_batch;     /* fsync after this many appends (0 = every append) */
-    int encrypted;          /* 1: frames are v3 AEAD frames sealed with `key` */
+    size_t fsync_batch; /* fsync after this many appends (0 = every append) */
+    int encrypted;      /* 1: frames are v3 AEAD frames sealed with `key` */
     uint8_t key[AEAD_KEY_LEN]; /* frame-encryption key; valid iff encrypted */
 } LogFile;
 
 /* Reason a log failed to open, for a clear operator message (log_open logs it). */
 typedef enum {
     LOG_OPEN_OK = 0,
-    LOG_OPEN_ERR_IO,            /* filesystem / migration failure */
-    LOG_OPEN_ERR_KEY_ON_PLAIN,  /* key supplied but the log is plaintext */
-    LOG_OPEN_ERR_PLAIN_ON_ENC,  /* encrypted log but no key supplied */
-    LOG_OPEN_ERR_WRONG_KEY,     /* key supplied does not decrypt the log */
+    LOG_OPEN_ERR_IO,           /* filesystem / migration failure */
+    LOG_OPEN_ERR_KEY_ON_PLAIN, /* key supplied but the log is plaintext */
+    LOG_OPEN_ERR_PLAIN_ON_ENC, /* encrypted log but no key supplied */
+    LOG_OPEN_ERR_WRONG_KEY,    /* key supplied does not decrypt the log */
 } LogOpenStatus;
 
 /* Open (creating if needed) the log at `path`. `key` (AEAD_KEY_LEN bytes) enables

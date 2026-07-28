@@ -33,10 +33,12 @@ aegis_status_t require_phase(const AegisDB *db, int needed) {
 
 static int valid_tag(const char *t) {
     size_t n = strlen(t);
-    if (n < 1 || n > 64) return 0;
+    if (n < 1 || n > 64)
+        return 0;
     for (size_t i = 0; i < n; i++) {
         char c = t[i];
-        if (!(isalnum((unsigned char)c) || c == '_' || c == '-')) return 0;
+        if (!(isalnum((unsigned char)c) || c == '_' || c == '-'))
+            return 0;
     }
     return 1;
 }
@@ -47,10 +49,12 @@ static int valid_tag(const char *t) {
  * otherwise permissive, since operator-defined namespaces vary. 1..128 bytes. */
 static int valid_agent_id(const char *a) {
     size_t n = strlen(a);
-    if (n < 1 || n > MAX_AGENT_ID) return 0;
+    if (n < 1 || n > MAX_AGENT_ID)
+        return 0;
     for (size_t i = 0; i < n; i++) {
         unsigned char c = (unsigned char)a[i];
-        if (c < 0x20 || c == 0x7f) return 0; /* no control chars */
+        if (c < 0x20 || c == 0x7f)
+            return 0; /* no control chars */
     }
     return 1;
 }
@@ -62,13 +66,14 @@ static aegis_status_t validate_common(AegisDB *db, const MemoryRecord *r) {
         return AEGIS_ERR_INVALID_REQUEST;
     if (r->confidence < 0.0f || r->confidence > 1.0f)
         return AEGIS_ERR_INVALID_REQUEST;
-    if (r->tag_count > MAX_TAGS) return AEGIS_ERR_INVALID_REQUEST;
+    if (r->tag_count > MAX_TAGS)
+        return AEGIS_ERR_INVALID_REQUEST;
     for (size_t i = 0; i < r->tag_count; i++)
-        if (!valid_tag(r->tags[i])) return AEGIS_ERR_INVALID_REQUEST;
+        if (!valid_tag(r->tags[i]))
+            return AEGIS_ERR_INVALID_REQUEST;
     if (r->agent_id && !valid_agent_id(r->agent_id))
         return AEGIS_ERR_INVALID_REQUEST;
-    if (r->embedding_dim &&
-        r->embedding_dim != db->config.embedding_dimensions)
+    if (r->embedding_dim && r->embedding_dim != db->config.embedding_dimensions)
         return AEGIS_ERR_INVALID_REQUEST;
     return AEGIS_OK;
 }
@@ -78,7 +83,8 @@ static aegis_status_t validate_common(AegisDB *db, const MemoryRecord *r) {
 static aegis_status_t append_and_hash(AegisDB *db, const MemoryRecord *rec) {
     uint8_t *buf = NULL;
     size_t len = 0;
-    if (record_encode(rec, &buf, &len) != 0) return AEGIS_ERR_INTERNAL;
+    if (record_encode(rec, &buf, &len) != 0)
+        return AEGIS_ERR_INTERNAL;
 
     /* Per-tenant accounting (this is the sole live-set mutation point, so it is
      * also the sole accounting point). Only under auth — with no namespaces
@@ -116,9 +122,11 @@ static aegis_status_t append_and_hash(AegisDB *db, const MemoryRecord *rec) {
     uint64_t off = 0;
     int rv = log_append(&db->log, buf, len, &off);
     free(buf);
-    if (rv != 0) return AEGIS_ERR_INTERNAL;
-    if (hash_index_put(db->hash, rec->id, off, (uint32_t)len, (uint8_t)rec->type,
-                       (uint8_t)(rec->deleted ? 1 : 0), rec->expires_at) != 0)
+    if (rv != 0)
+        return AEGIS_ERR_INTERNAL;
+    if (hash_index_put(db->hash, rec->id, off, (uint32_t)len,
+                       (uint8_t)rec->type, (uint8_t)(rec->deleted ? 1 : 0),
+                       rec->expires_at) != 0)
         return AEGIS_ERR_INTERNAL;
     if (ns && (d_records || d_bytes))
         tenant_usage_adjust(db->tenants, ns, d_records, d_bytes);
@@ -128,7 +136,8 @@ static aegis_status_t append_and_hash(AegisDB *db, const MemoryRecord *rec) {
 /* Read + decode a live persisted record (caller holds at least a read lock). */
 static aegis_status_t load_record(AegisDB *db, uint64_t id, MemoryRecord *out) {
     const HashEntry *e = hash_index_get(db->hash, id);
-    if (!e) return AEGIS_ERR_NOT_FOUND;
+    if (!e)
+        return AEGIS_ERR_NOT_FOUND;
     uint8_t *buf = NULL;
     size_t len = 0;
     if (log_read(&db->log, e->offset, &buf, &len) != 0)
@@ -158,7 +167,8 @@ static aegis_status_t load_record_ro(AegisDB *db, uint64_t id,
     size_t len = 0;
     int rv = log_read(&db->log, off, &buf, &len);
     pthread_rwlock_unlock(&db->log_lock);
-    if (rv != 0) return AEGIS_ERR_INTERNAL;
+    if (rv != 0)
+        return AEGIS_ERR_INTERNAL;
     rv = record_decode(buf, len, out);
     free(buf);
     return rv == 0 ? AEGIS_OK : AEGIS_ERR_INTERNAL;
@@ -197,20 +207,26 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
                          const char *session_id, uint64_t ttl_ms,
                          MemoryRecord *out) {
     aegis_status_t st = validate_common(db, in);
-    if (st != AEGIS_OK) return st;
-    if (in->data_len == 0) return AEGIS_ERR_INVALID_REQUEST;
+    if (st != AEGIS_OK)
+        return st;
+    if (in->data_len == 0)
+        return AEGIS_ERR_INVALID_REQUEST;
 
     if (in->type == MEM_WORKING) {
         st = require_phase(db, 4);
-        if (st != AEGIS_OK) return st;
-        if (!session_id) return AEGIS_ERR_INVALID_REQUEST;
+        if (st != AEGIS_OK)
+            return st;
+        if (!session_id)
+            return AEGIS_ERR_INVALID_REQUEST;
         uint64_t now = db_now_ms();
         uint64_t wid = 0;
         if (working_store_add(db->working, session_id, in, now, ttl_ms, &wid) !=
             0)
             return AEGIS_ERR_INTERNAL;
-        MemoryRecord *got = working_store_get(db->working, session_id, wid, now);
-        if (!got) return AEGIS_ERR_INTERNAL;
+        MemoryRecord *got =
+            working_store_get(db->working, session_id, wid, now);
+        if (!got)
+            return AEGIS_ERR_INTERNAL;
         *out = *got;
         free(got);
         return AEGIS_OK;
@@ -223,7 +239,8 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
     } else {
         return AEGIS_ERR_INVALID_REQUEST;
     }
-    if (st != AEGIS_OK) return st;
+    if (st != AEGIS_OK)
+        return st;
 
     /* Backpressure: refuse a persisted insert once index RAM reaches the cap, so
      * a growing dataset returns MEMORY_LIMIT instead of getting OOM-killed. The
@@ -236,7 +253,8 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
         return AEGIS_ERR_MEMORY_LIMIT;
 
     MemoryRecord *rec = record_clone(in);
-    if (!rec) return AEGIS_ERR_INTERNAL;
+    if (!rec)
+        return AEGIS_ERR_INTERNAL;
     uint64_t now = db_now_ms();
     rec->id = db_next_id(db);
     rec->created = now;
@@ -277,13 +295,14 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
 aegis_status_t qe_get(AegisDB *db, uint64_t id, const char *agent_filter,
                       MemoryRecord *out) {
     aegis_status_t st = load_record_ro(db, id, out);
-    if (st != AEGIS_OK) return st;
+    if (st != AEGIS_OK)
+        return st;
     if (out->deleted || record_expired(out, db_now_ms())) {
         record_free(out);
         return AEGIS_ERR_NOT_FOUND;
     }
-    if (agent_filter && (!out->agent_id ||
-                         strcmp(out->agent_id, agent_filter) != 0)) {
+    if (agent_filter &&
+        (!out->agent_id || strcmp(out->agent_id, agent_filter) != 0)) {
         record_free(out);
         return AEGIS_ERR_NOT_FOUND;
     }
@@ -293,7 +312,8 @@ aegis_status_t qe_get(AegisDB *db, uint64_t id, const char *agent_filter,
 aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
                          const char *ns, MemoryRecord *out) {
     aegis_status_t st = require_phase(db, 2);
-    if (st != AEGIS_OK) return st;
+    if (st != AEGIS_OK)
+        return st;
 
     pthread_rwlock_wrlock(&db->index_lock);
     MemoryRecord cur;
@@ -331,8 +351,10 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
         cur.data = nd;
         cur.data_len = patch->data_len;
     }
-    if (patch->has_importance) cur.importance = patch->importance;
-    if (patch->has_confidence) cur.confidence = patch->confidence;
+    if (patch->has_importance)
+        cur.importance = patch->importance;
+    if (patch->has_confidence)
+        cur.confidence = patch->confidence;
 
     /* Stage the new tags on the record, but defer the shared tag-index mutation
      * until validate_common + append_and_hash both succeed. The old ordering
@@ -358,7 +380,8 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
 
     cur.updated = db_now_ms();
     st = validate_common(db, &cur);
-    if (st == AEGIS_OK) st = append_and_hash(db, &cur);
+    if (st == AEGIS_OK)
+        st = append_and_hash(db, &cur);
     if (st == AEGIS_OK && patch->has_tags) {
         /* Committed: now it's safe to swing the tag index from old to new. */
         for (size_t i = 0; i < old_tag_count; i++)
@@ -370,7 +393,8 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
     if (st == AEGIS_OK && durably_flush(db) != 0)
         st = AEGIS_ERR_INTERNAL; /* not durable: do not acknowledge the write */
 
-    for (size_t i = 0; i < old_tag_count; i++) free(old_tags[i]);
+    for (size_t i = 0; i < old_tag_count; i++)
+        free(old_tags[i]);
     free(old_tags);
 
     if (st != AEGIS_OK) {
@@ -383,7 +407,8 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
 
 aegis_status_t qe_delete(AegisDB *db, uint64_t id, const char *ns) {
     aegis_status_t st = require_phase(db, 1);
-    if (st != AEGIS_OK) return st;
+    if (st != AEGIS_OK)
+        return st;
 
     pthread_rwlock_wrlock(&db->index_lock);
     MemoryRecord cur;
@@ -420,8 +445,10 @@ aegis_status_t qe_promote(AegisDB *db, const char *session_id,
                           uint64_t working_id, MemoryType to_type,
                           const char *ns, MemoryRecord *out) {
     aegis_status_t st = require_phase(db, 4);
-    if (st != AEGIS_OK) return st;
-    if (!session_id) return AEGIS_ERR_INVALID_REQUEST;
+    if (st != AEGIS_OK)
+        return st;
+    if (!session_id)
+        return AEGIS_ERR_INVALID_REQUEST;
     if (to_type != MEM_EPISODIC && to_type != MEM_SEMANTIC)
         return AEGIS_ERR_INVALID_REQUEST;
 
@@ -449,23 +476,28 @@ aegis_status_t qe_promote(AegisDB *db, const char *session_id,
 /* Two relationships are the same edge when they point at the same target with
  * the same kind (kind may be NULL). */
 static int rel_same(const Relationship *e, uint64_t to_id, const char *kind) {
-    if (e->to_id != to_id) return 0;
-    if (!e->kind || !kind) return e->kind == kind; /* both NULL == equal */
+    if (e->to_id != to_id)
+        return 0;
+    if (!e->kind || !kind)
+        return e->kind == kind; /* both NULL == equal */
     return strcmp(e->kind, kind) == 0;
 }
 
 aegis_status_t qe_relate(AegisDB *db, uint64_t from_id, uint64_t to_id,
                          const char *kind, const char *ns) {
     aegis_status_t st = require_phase(db, 4);
-    if (st != AEGIS_OK) return st;
+    if (st != AEGIS_OK)
+        return st;
     /* A self-edge carries no graph information and would still consume a slot. */
-    if (from_id == to_id) return AEGIS_ERR_INVALID_REQUEST;
+    if (from_id == to_id)
+        return AEGIS_ERR_INVALID_REQUEST;
 
     pthread_rwlock_wrlock(&db->index_lock);
     MemoryRecord from;
     st = load_record(db, from_id, &from);
     if (st != AEGIS_OK || from.deleted || ns_denies(ns, &from)) {
-        if (st == AEGIS_OK) record_free(&from);
+        if (st == AEGIS_OK)
+            record_free(&from);
         pthread_rwlock_unlock(&db->index_lock);
         return st == AEGIS_OK ? AEGIS_ERR_NOT_FOUND : st;
     }
@@ -476,7 +508,8 @@ aegis_status_t qe_relate(AegisDB *db, uint64_t from_id, uint64_t to_id,
         MemoryRecord to_rec;
         aegis_status_t tst = load_record(db, to_id, &to_rec);
         if (tst != AEGIS_OK || to_rec.deleted || ns_denies(ns, &to_rec)) {
-            if (tst == AEGIS_OK) record_free(&to_rec);
+            if (tst == AEGIS_OK)
+                record_free(&to_rec);
             record_free(&from);
             pthread_rwlock_unlock(&db->index_lock);
             return AEGIS_ERR_NOT_FOUND;
@@ -520,16 +553,20 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
                            const char *agent_filter, MemoryRecord **out,
                            size_t *out_n) {
     aegis_status_t st = require_phase(db, 4);
-    if (st != AEGIS_OK) return st;
-    if (depth < 0) depth = 0;
-    uint64_t now = db_now_ms(); /* for expiry, sampled once for the whole walk */
+    if (st != AEGIS_OK)
+        return st;
+    if (depth < 0)
+        depth = 0;
+    uint64_t now =
+        db_now_ms(); /* for expiry, sampled once for the whole walk */
 
     /* BFS over relationship edges */
     uint64_t *seen = NULL;
     size_t seen_n = 0, seen_cap = 0;
     uint64_t *frontier = malloc(sizeof(uint64_t));
     size_t front_n = 0;
-    if (!frontier) return AEGIS_ERR_INTERNAL;
+    if (!frontier)
+        return AEGIS_ERR_INTERNAL;
     frontier[front_n++] = start_id;
 
     Cand *acc = NULL;
@@ -543,7 +580,8 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
         /* Resolve this level's not-yet-seen ids to log offsets under the index
          * lock, then read+decode them off it (disk I/O under log_lock only). */
         uint64_t *offs = malloc(front_n * sizeof(uint64_t));
-        if (!offs) break; /* frontier freed after the loop; return what we have */
+        if (!offs)
+            break; /* frontier freed after the loop; return what we have */
         size_t off_n = 0;
 
         pthread_rwlock_rdlock(&db->index_lock);
@@ -551,18 +589,26 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
             uint64_t id = frontier[i];
             int dup = 0;
             for (size_t s = 0; s < seen_n; s++)
-                if (seen[s] == id) { dup = 1; break; }
-            if (dup) continue;
+                if (seen[s] == id) {
+                    dup = 1;
+                    break;
+                }
+            if (dup)
+                continue;
             if (seen_n == seen_cap) {
                 size_t nc = seen_cap ? seen_cap * 2 : 8;
                 uint64_t *tmp = realloc(seen, nc * sizeof(uint64_t));
-                if (!tmp) { oom = 1; break; }
+                if (!tmp) {
+                    oom = 1;
+                    break;
+                }
                 seen = tmp;
                 seen_cap = nc;
             }
             seen[seen_n++] = id;
             const HashEntry *e = hash_index_get(db->hash, id);
-            if (!e) continue;
+            if (!e)
+                continue;
             offs[off_n++] = e->offset;
         }
         pthread_rwlock_rdlock(&db->log_lock);
@@ -575,14 +621,16 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
         for (size_t i = 0; i < off_n && !oom; i++) {
             uint8_t *buf = NULL;
             size_t len = 0;
-            if (log_read(&db->log, offs[i], &buf, &len) != 0) continue;
+            if (log_read(&db->log, offs[i], &buf, &len) != 0)
+                continue;
             MemoryRecord r;
             int dec = record_decode(buf, len, &r);
             free(buf);
-            if (dec != 0) continue;
+            if (dec != 0)
+                continue;
             if (r.deleted || record_expired(&r, now) ||
-                (agent_filter && (!r.agent_id ||
-                                  strcmp(r.agent_id, agent_filter) != 0))) {
+                (agent_filter &&
+                 (!r.agent_id || strcmp(r.agent_id, agent_filter) != 0))) {
                 /* a filtered/expired node is skipped entirely, edges and all */
                 record_free(&r);
                 continue;
@@ -591,7 +639,11 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
             if (acc_n == acc_cap) {
                 size_t nc = acc_cap ? acc_cap * 2 : 8;
                 Cand *tmp = realloc(acc, nc * sizeof(Cand));
-                if (!tmp) { record_free(&r); oom = 1; break; }
+                if (!tmp) {
+                    record_free(&r);
+                    oom = 1;
+                    break;
+                }
                 acc = tmp;
                 acc_cap = nc;
             }
@@ -603,7 +655,10 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
                 if (next_n == next_cap) {
                     size_t nc = next_cap ? next_cap * 2 : 8;
                     uint64_t *tmp = realloc(next, nc * sizeof(uint64_t));
-                    if (!tmp) { oom = 1; break; }
+                    if (!tmp) {
+                        oom = 1;
+                        break;
+                    }
                     next = tmp;
                     next_cap = nc;
                 }
@@ -621,11 +676,13 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
 
     MemoryRecord *res = malloc((acc_n ? acc_n : 1) * sizeof(MemoryRecord));
     if (!res) {
-        for (size_t i = 0; i < acc_n; i++) record_free(&acc[i].rec);
+        for (size_t i = 0; i < acc_n; i++)
+            record_free(&acc[i].rec);
         free(acc);
         return AEGIS_ERR_INTERNAL;
     }
-    for (size_t i = 0; i < acc_n; i++) res[i] = acc[i].rec;
+    for (size_t i = 0; i < acc_n; i++)
+        res[i] = acc[i].rec;
     free(acc);
     *out = res;
     *out_n = acc_n;

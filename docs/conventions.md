@@ -51,7 +51,22 @@ Two idioms, split by layer — this is intentional, not drift:
 
 ## Tooling
 
-No `.clang-format` / `.clang-tidy` is enforced: formatting is already
-hand-consistent (4-space indent, no tabs, `/* */` comments), and a preset would
-produce a large churn diff for little gain. Match the surrounding style. A
-formatter/linter may be adopted later purely as a ratchet against future drift.
+Formatting is enforced with **clang-format** (`.clang-format`: LLVM base,
+4-space indent, no tabs, 80-column, comment reflow off). CI fails a build whose
+tree is not formatted. Run it before committing:
+
+```sh
+make format         # rewrite in place
+make format-check   # verify only (what CI runs)
+```
+
+clang-format output drifts between major versions, so pin the tool to the CI
+version to avoid spurious diffs:
+
+```sh
+python3 -m venv .venv && .venv/bin/pip install clang-format==22.1.8
+make format CLANG_FORMAT=.venv/bin/clang-format
+```
+
+The naming/idiom conventions above are beyond what clang-format checks; a
+clang-tidy configuration to enforce them is being added separately.

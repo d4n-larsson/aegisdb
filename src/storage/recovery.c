@@ -25,7 +25,8 @@ static int scan_cb(uint64_t offset, const uint8_t *payload, size_t len,
     MemoryRecord r;
     if (record_decode(payload, len, &r) != 0)
         return 0; /* skip undecodable frame, keep scanning */
-    if (r.id > sc->max_id) sc->max_id = r.id;
+    if (r.id > sc->max_id)
+        sc->max_id = r.id;
     hash_index_put(sc->db->hash, r.id, offset, (uint32_t)len, (uint8_t)r.type,
                    (uint8_t)(r.deleted ? 1 : 0), r.expires_at);
     record_free(&r);
@@ -45,18 +46,20 @@ long recovery_run(AegisDB *db) {
                         ckey) == 0) {
         if (covered <= (uint64_t)db->log.size) {
             have_checkpoint = 1;
-            LOG_DEBUG("recovery: loaded checkpoint (%zu entries, covers %llu of "
-                      "%llu bytes)",
-                      db->hash->count, (unsigned long long)covered,
-                      (unsigned long long)db->log.size);
+            LOG_DEBUG(
+                "recovery: loaded checkpoint (%zu entries, covers %llu of "
+                "%llu bytes)",
+                db->hash->count, (unsigned long long)covered,
+                (unsigned long long)db->log.size);
         } else {
-            LOG_WARN("recovery: checkpoint covers %llu bytes but log holds only "
-                     "%llu; ignoring it and rebuilding from the log",
-                     (unsigned long long)covered,
-                     (unsigned long long)db->log.size);
+            LOG_WARN(
+                "recovery: checkpoint covers %llu bytes but log holds only "
+                "%llu; ignoring it and rebuilding from the log",
+                (unsigned long long)covered, (unsigned long long)db->log.size);
             hash_index_free(db->hash);
             db->hash = hash_index_create();
-            if (!db->hash) return -1;
+            if (!db->hash)
+                return -1;
         }
     }
 
@@ -113,10 +116,10 @@ long recovery_run(AegisDB *db) {
     if (semantic_index_load(db->sem, db->path_sem, &sem_covered, ckey) == 0) {
         if (sem_covered <= (uint64_t)db->log.size) {
             sem_loaded = 1;
-            LOG_DEBUG("recovery: loaded semantic checkpoint (%zu vectors, covers "
-                      "%llu bytes)",
-                      semantic_index_count(db->sem),
-                      (unsigned long long)sem_covered);
+            LOG_DEBUG(
+                "recovery: loaded semantic checkpoint (%zu vectors, covers "
+                "%llu bytes)",
+                semantic_index_count(db->sem), (unsigned long long)sem_covered);
         } else {
             LOG_WARN("recovery: semantic checkpoint covers %llu bytes but log "
                      "holds only %llu; ignoring it",
@@ -133,10 +136,12 @@ long recovery_run(AegisDB *db) {
     HashIndex *h = db->hash;
     for (size_t i = 0; i < h->cap; i++) {
         const HashEntry *e = &h->buckets[i];
-        if (!e->used || e->deleted) continue;
+        if (!e->used || e->deleted)
+            continue;
         uint8_t *buf = NULL;
         size_t blen = 0;
-        if (log_read(&db->log, e->offset, &buf, &blen) != 0) continue;
+        if (log_read(&db->log, e->offset, &buf, &blen) != 0)
+            continue;
         MemoryRecord r;
         if (record_decode(buf, blen, &r) == 0) {
             time_index_add(db->time, r.created, r.id);
@@ -162,7 +167,8 @@ long recovery_run(AegisDB *db) {
     /* The loaded graph reflects the checkpoint's covered prefix and cannot see
      * records deleted in the tail (pass 2 skips deleted hash entries), so evict
      * any semantic id the final hash no longer reports live. */
-    if (sem_loaded) semantic_index_reconcile(db->sem, recover_keep, db->hash);
+    if (sem_loaded)
+        semantic_index_reconcile(db->sem, recover_keep, db->hash);
 
     LOG_DEBUG("recovery: secondary indexes populated from %ld live record(s)",
               live);

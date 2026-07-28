@@ -62,13 +62,13 @@ typedef struct {
     MemoryType type;
     const char *agent_id;
     size_t top_k;
-    size_t offset;      /* skip this many top-ranked results (pagination) */
-    int has_min_score;  /* semantic only: drop matches below min_score */
-    float min_score;    /* cosine-similarity floor in [-1, 1] */
+    size_t offset;         /* skip this many top-ranked results (pagination) */
+    int has_min_score;     /* semantic only: drop matches below min_score */
+    float min_score;       /* cosine-similarity floor in [-1, 1] */
     uint64_t half_life_ms; /* semantic only: recency half-life; 0 = no decay */
     int has_max_importance; /* filter: keep only records with importance <= max */
     float max_importance;
-    int oldest_first;   /* non-semantic: when a bounded time scan truncates, keep
+    int oldest_first; /* non-semantic: when a bounded time scan truncates, keep
                          * the OLDEST rather than the most recent (candidate
                          * selection for summarization). Ignored for semantic. */
 } SearchParams;
@@ -78,13 +78,14 @@ typedef struct {
  *   score = weight * similarity * recency_factor   (semantic queries)
  * so a client/operator can see the contribution of each factor. */
 typedef struct {
-    int semantic;         /* 1 if ranked by semantic similarity, 0 otherwise */
-    float similarity;     /* raw cosine similarity [-1,1]; 0 for non-semantic */
-    float importance;     /* record importance */
-    float confidence;     /* record confidence */
-    float weight;         /* importance*confidence applied (1.0 if that was <=0) */
-    float recency_factor; /* recency-decay multiplier in (0,1]; 1.0 if no half-life */
-    float score;          /* final rank score */
+    int semantic;     /* 1 if ranked by semantic similarity, 0 otherwise */
+    float similarity; /* raw cosine similarity [-1,1]; 0 for non-semantic */
+    float importance; /* record importance */
+    float confidence; /* record confidence */
+    float weight;     /* importance*confidence applied (1.0 if that was <=0) */
+    float
+        recency_factor; /* recency-decay multiplier in (0,1]; 1.0 if no half-life */
+    float score;        /* final rank score */
 } SearchExplain;
 
 /* Search. Allocates *out_records (array of MemoryRecord; record_free each then
@@ -115,8 +116,8 @@ aegis_status_t qe_count(AegisDB *db, const SearchParams *p, size_t *out_count,
  * then free the array); *out_has_more (may be NULL) signals another page. Used
  * for compliance "export what you store about me". */
 aegis_status_t qe_export(AegisDB *db, const char *ns, uint64_t after_id,
-                         size_t limit, MemoryRecord **out_records, size_t *out_n,
-                         int *out_has_more);
+                         size_t limit, MemoryRecord **out_records,
+                         size_t *out_n, int *out_has_more);
 
 /* Right-to-be-forgotten (ROADMAP 3.2): tombstone every record owned by `ns`
  * (which must be non-empty — a global purge is refused). The caller then runs
@@ -159,8 +160,8 @@ aegis_status_t qe_consolidate(AegisDB *db, const char *ns, float min_similarity,
  * `dry_run` counts what would be forgotten without deleting; `max_forget` (0 =
  * unbounded) caps deletions. Reports *out_scanned (examined) and *out_forgotten. */
 aegis_status_t qe_forget(AegisDB *db, const char *ns, MemoryType type,
-                         uint64_t half_life_ms, float min_retention, int dry_run,
-                         size_t max_forget, size_t *out_scanned,
+                         uint64_t half_life_ms, float min_retention,
+                         int dry_run, size_t max_forget, size_t *out_scanned,
                          size_t *out_forgotten);
 
 /* Promote a working record to a persisted one. When `ns` is non-NULL the new

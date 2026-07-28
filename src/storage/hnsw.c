@@ -26,7 +26,8 @@
 #include "aegisdb/vecmath.h"
 
 #define HNSW_FORMAT_MAGIC "AHNS"
-#define HNSW_FORMAT_VERSION 2u /* v2 adds the quantized flag + int8 vector layout */
+#define HNSW_FORMAT_VERSION                                                    \
+    2u /* v2 adds the quantized flag + int8 vector layout */
 
 #define NPOS UINT32_MAX
 
@@ -43,12 +44,12 @@ static uint64_t xorshift(uint64_t *s) {
 /* ----------------------------------------------------------------- nodes -- */
 typedef struct {
     uint64_t id;
-    float *vec;       /* float mode: dim floats; quant mode: NULL */
-    int8_t *qvec;     /* quant mode: dim int8 (v[i] ~= qvec[i]*scale); else NULL */
-    float scale;      /* quant mode: dequant scale */
-    float norm;       /* precomputed L2 norm (of the stored representation) */
-    int deleted;      /* tombstone: excluded from results, kept for connectivity */
-    int top_layer;    /* highest layer this node belongs to */
+    float *vec;    /* float mode: dim floats; quant mode: NULL */
+    int8_t *qvec;  /* quant mode: dim int8 (v[i] ~= qvec[i]*scale); else NULL */
+    float scale;   /* quant mode: dequant scale */
+    float norm;    /* precomputed L2 norm (of the stored representation) */
+    int deleted;   /* tombstone: excluded from results, kept for connectivity */
+    int top_layer; /* highest layer this node belongs to */
     uint32_t **links; /* links[l] = neighbour node indices at layer l */
     uint32_t *link_cnt;
 } Node;
@@ -66,17 +67,17 @@ typedef struct {
 
 struct Hnsw {
     size_t dim, M, M0, ef_construction, ef_search;
-    int quantized;   /* store vectors as int8 (see #75) */
-    double mL;       /* level-generation normalization = 1/ln(M) */
+    int quantized; /* store vectors as int8 (see #75) */
+    double mL;     /* level-generation normalization = 1/ln(M) */
     uint64_t rng;
 
     Node *nodes;
-    size_t n, cap;   /* total nodes incl. tombstoned */
-    size_t live;     /* non-tombstoned */
-    uint32_t entry;  /* entry-point node, or NPOS when empty */
+    size_t n, cap;  /* total nodes incl. tombstoned */
+    size_t live;    /* non-tombstoned */
+    uint32_t entry; /* entry-point node, or NPOS when empty */
     int max_layer;
 
-    MapSlot *map;    /* id -> node index; power-of-two capacity */
+    MapSlot *map; /* id -> node index; power-of-two capacity */
     size_t mcap;
 
     /* reusable scratch for neighbour pruning (insert is single-threaded under
@@ -88,18 +89,22 @@ struct Hnsw {
 /* ------------------------------------------------------------- id -> node -- */
 static size_t map_probe(const MapSlot *m, size_t mcap, uint64_t id) {
     size_t mask = mcap - 1, i = (size_t)mix64(id) & mask;
-    while (m[i].used && m[i].id != id) i = (i + 1) & mask;
+    while (m[i].used && m[i].id != id)
+        i = (i + 1) & mask;
     return i;
 }
 
 static int map_grow(Hnsw *h, size_t newcap) {
     MapSlot *nm = calloc(newcap, sizeof(MapSlot));
-    if (!nm) return -1;
+    if (!nm)
+        return -1;
     size_t mask = newcap - 1;
     for (size_t i = 0; i < h->mcap; i++) {
-        if (!h->map[i].used) continue;
+        if (!h->map[i].used)
+            continue;
         size_t j = (size_t)mix64(h->map[i].id) & mask;
-        while (nm[j].used) j = (j + 1) & mask;
+        while (nm[j].used)
+            j = (j + 1) & mask;
         nm[j] = h->map[i];
     }
     free(h->map);
@@ -109,18 +114,21 @@ static int map_grow(Hnsw *h, size_t newcap) {
 }
 
 static uint32_t map_get(const Hnsw *h, uint64_t id) {
-    if (h->mcap == 0) return NPOS;
+    if (h->mcap == 0)
+        return NPOS;
     size_t i = map_probe(h->map, h->mcap, id);
     return h->map[i].used ? h->map[i].node : NPOS;
 }
 
 static int map_put(Hnsw *h, uint64_t id, uint32_t node) {
-    if (h->mcap == 0 && map_grow(h, 64) != 0) return -1;
+    if (h->mcap == 0 && map_grow(h, 64) != 0)
+        return -1;
     size_t i = map_probe(h->map, h->mcap, id);
     if (!h->map[i].used) {
         /* count live map entries against the load factor */
         if ((h->live + 1) * 10 > h->mcap * 7) {
-            if (map_grow(h, h->mcap * 2) != 0) return -1;
+            if (map_grow(h, h->mcap * 2) != 0)
+                return -1;
             i = map_probe(h->map, h->mcap, id);
         }
         h->map[i].used = 1;
@@ -131,17 +139,21 @@ static int map_put(Hnsw *h, uint64_t id, uint32_t node) {
 }
 
 static void map_del(Hnsw *h, uint64_t id) {
-    if (h->mcap == 0) return;
+    if (h->mcap == 0)
+        return;
     size_t mask = h->mcap - 1;
     size_t i = map_probe(h->map, h->mcap, id);
-    if (!h->map[i].used) return;
+    if (!h->map[i].used)
+        return;
     h->map[i].used = 0;
     size_t j = i;
     for (;;) {
         j = (j + 1) & mask;
-        if (!h->map[j].used) break;
+        if (!h->map[j].used)
+            break;
         size_t k = (size_t)mix64(h->map[j].id) & mask;
-        if (i <= j ? (i < k && k <= j) : (i < k || k <= j)) continue;
+        if (i <= j ? (i < k && k <= j) : (i < k || k <= j))
+            continue;
         h->map[i] = h->map[j];
         h->map[j].used = 0;
         i = j;
@@ -155,7 +167,8 @@ static double node_dot_query(const Hnsw *h, const float *q, const Node *nd) {
     double dot = 0;
     if (h->quantized) {
         const int8_t *v = nd->qvec;
-        for (size_t i = 0; i < h->dim; i++) dot += (double)q[i] * v[i];
+        for (size_t i = 0; i < h->dim; i++)
+            dot += (double)q[i] * v[i];
         return dot * nd->scale;
     }
     return dot_f32(q, nd->vec, h->dim);
@@ -166,7 +179,8 @@ static double node_dot_node(const Hnsw *h, const Node *a, const Node *b) {
     if (h->quantized) {
         const int8_t *va = a->qvec, *vb = b->qvec;
         long acc = 0;
-        for (size_t i = 0; i < h->dim; i++) acc += (long)va[i] * vb[i];
+        for (size_t i = 0; i < h->dim; i++)
+            acc += (long)va[i] * vb[i];
         return (double)acc * a->scale * b->scale;
     }
     return dot_f32(a->vec, b->vec, h->dim);
@@ -187,11 +201,14 @@ typedef struct {
 } Heap;
 
 static int heap_reserve(Heap *h, size_t want) {
-    if (want <= h->cap) return 0;
+    if (want <= h->cap)
+        return 0;
     size_t nc = h->cap ? h->cap * 2 : 16;
-    while (nc < want) nc *= 2;
+    while (nc < want)
+        nc *= 2;
     Cand *na = realloc(h->a, nc * sizeof(Cand));
-    if (!na) return -1;
+    if (!na)
+        return -1;
     h->a = na;
     h->cap = nc;
     return 0;
@@ -202,7 +219,8 @@ static void heap_up(Cand *a, size_t i, int maxh) {
     while (i) {
         size_t p = (i - 1) / 2;
         int up = maxh ? (a[i].d > a[p].d) : (a[i].d < a[p].d);
-        if (!up) break;
+        if (!up)
+            break;
         Cand t = a[i];
         a[i] = a[p];
         a[p] = t;
@@ -212,9 +230,12 @@ static void heap_up(Cand *a, size_t i, int maxh) {
 static void heap_down(Cand *a, size_t n, size_t i, int maxh) {
     for (;;) {
         size_t l = 2 * i + 1, r = 2 * i + 2, b = i;
-        if (l < n && (maxh ? a[l].d > a[b].d : a[l].d < a[b].d)) b = l;
-        if (r < n && (maxh ? a[r].d > a[b].d : a[r].d < a[b].d)) b = r;
-        if (b == i) break;
+        if (l < n && (maxh ? a[l].d > a[b].d : a[l].d < a[b].d))
+            b = l;
+        if (r < n && (maxh ? a[r].d > a[b].d : a[r].d < a[b].d))
+            b = r;
+        if (b == i)
+            break;
         Cand t = a[i];
         a[i] = a[b];
         a[b] = t;
@@ -222,7 +243,8 @@ static void heap_down(Cand *a, size_t n, size_t i, int maxh) {
     }
 }
 static int heap_push(Heap *h, Cand v, int maxh) {
-    if (heap_reserve(h, h->n + 1) != 0) return -1;
+    if (heap_reserve(h, h->n + 1) != 0)
+        return -1;
     h->a[h->n] = v;
     heap_up(h->a, h->n, maxh);
     h->n++;
@@ -248,9 +270,11 @@ typedef struct {
 
 static int vset_init(VSet *v, size_t hint) {
     size_t cap = 64;
-    while (cap < hint * 2) cap *= 2;
+    while (cap < hint * 2)
+        cap *= 2;
     v->slots = malloc(cap * sizeof(uint32_t));
-    if (!v->slots) return -1;
+    if (!v->slots)
+        return -1;
     memset(v->slots, 0xFF, cap * sizeof(uint32_t)); /* NPOS = empty */
     v->cap = cap;
     v->mask = cap - 1;
@@ -262,14 +286,17 @@ static void vset_free(VSet *v) { free(v->slots); }
 static int vset_regrow(VSet *v) {
     size_t ncap = v->cap * 2;
     uint32_t *ns = malloc(ncap * sizeof(uint32_t));
-    if (!ns) return -1;
+    if (!ns)
+        return -1;
     memset(ns, 0xFF, ncap * sizeof(uint32_t));
     size_t nmask = ncap - 1;
     for (size_t i = 0; i < v->cap; i++) {
         uint32_t e = v->slots[i];
-        if (e == NPOS) continue;
+        if (e == NPOS)
+            continue;
         size_t j = mix64(e) & nmask;
-        while (ns[j] != NPOS) j = (j + 1) & nmask;
+        while (ns[j] != NPOS)
+            j = (j + 1) & nmask;
         ns[j] = e;
     }
     free(v->slots);
@@ -281,10 +308,12 @@ static int vset_regrow(VSet *v) {
 
 /* Returns 1 if newly added, 0 if already present, -1 on OOM. */
 static int vset_add(VSet *v, uint32_t node) {
-    if ((v->n + 1) * 10 > v->cap * 7 && vset_regrow(v) != 0) return -1;
+    if ((v->n + 1) * 10 > v->cap * 7 && vset_regrow(v) != 0)
+        return -1;
     size_t i = mix64(node) & v->mask;
     while (v->slots[i] != NPOS) {
-        if (v->slots[i] == node) return 0;
+        if (v->slots[i] == node)
+            return 0;
         i = (i + 1) & v->mask;
     }
     v->slots[i] = node;
@@ -302,7 +331,8 @@ static uint32_t greedy_descend(const Hnsw *h, const float *q, float qn,
     for (;;) {
         int improved = 0;
         const Node *nd = &h->nodes[cur];
-        if (layer > nd->top_layer) break;
+        if (layer > nd->top_layer)
+            break;
         uint32_t cnt = nd->link_cnt[layer];
         const uint32_t *nb = nd->links[layer];
         for (uint32_t i = 0; i < cnt; i++) {
@@ -313,7 +343,8 @@ static uint32_t greedy_descend(const Hnsw *h, const float *q, float qn,
                 improved = 1;
             }
         }
-        if (!improved) break;
+        if (!improved)
+            break;
     }
     return cur;
 }
@@ -325,40 +356,61 @@ static int search_layer(const Hnsw *h, const float *q, float qn,
                         const uint32_t *seeds, size_t nseed, size_t ef,
                         int layer, Heap *W) {
     VSet vis;
-    if (vset_init(&vis, ef * 8 + 64) != 0) return -1;
+    if (vset_init(&vis, ef * 8 + 64) != 0)
+        return -1;
     Heap C = {0}; /* candidate min-heap (root = nearest) */
     int rc = 0;
     W->n = 0;
 
     for (size_t i = 0; i < nseed; i++) {
         uint32_t s = seeds[i];
-        if (vset_add(&vis, s) != 1) continue;
+        if (vset_add(&vis, s) != 1)
+            continue;
         float d = dist_q(h, q, qn, s);
         Cand c = {d, s};
-        if (heap_push(&C, c, 0) != 0) { rc = -1; goto done; }
-        if (!h->nodes[s].deleted && heap_push(W, c, 1) != 0) { rc = -1; goto done; }
+        if (heap_push(&C, c, 0) != 0) {
+            rc = -1;
+            goto done;
+        }
+        if (!h->nodes[s].deleted && heap_push(W, c, 1) != 0) {
+            rc = -1;
+            goto done;
+        }
     }
 
     while (C.n > 0) {
-        Cand c = heap_pop(&C, 0);          /* nearest unexpanded */
-        if (W->n >= ef && c.d > W->a[0].d) /* nothing closer than the beam's worst */
+        Cand c = heap_pop(&C, 0); /* nearest unexpanded */
+        if (W->n >= ef &&
+            c.d > W->a[0].d) /* nothing closer than the beam's worst */
             break;
         const Node *nd = &h->nodes[c.node];
-        if (layer > nd->top_layer) continue;
+        if (layer > nd->top_layer)
+            continue;
         uint32_t cnt = nd->link_cnt[layer];
         const uint32_t *nb = nd->links[layer];
         for (uint32_t i = 0; i < cnt; i++) {
             uint32_t e = nb[i];
             int added = vset_add(&vis, e);
-            if (added < 0) { rc = -1; goto done; }
-            if (!added) continue;
+            if (added < 0) {
+                rc = -1;
+                goto done;
+            }
+            if (!added)
+                continue;
             float de = dist_q(h, q, qn, e);
             if (W->n < ef || de < W->a[0].d) {
                 Cand ce = {de, e};
-                if (heap_push(&C, ce, 0) != 0) { rc = -1; goto done; }
+                if (heap_push(&C, ce, 0) != 0) {
+                    rc = -1;
+                    goto done;
+                }
                 if (!h->nodes[e].deleted) {
-                    if (heap_push(W, ce, 1) != 0) { rc = -1; goto done; }
-                    if (W->n > ef) heap_pop(W, 1); /* drop the farthest */
+                    if (heap_push(W, ce, 1) != 0) {
+                        rc = -1;
+                        goto done;
+                    }
+                    if (W->n > ef)
+                        heap_pop(W, 1); /* drop the farthest */
                 }
             }
         }
@@ -396,14 +448,22 @@ static size_t select_heuristic(const Hnsw *h, Cand *cand, size_t nc, size_t M,
     for (size_t i = 0; i < nc && r < M; i++) {
         int good = 1;
         for (size_t j = 0; j < r; j++)
-            if (dist_nn(h, cand[i].node, out[j]) < cand[i].d) { good = 0; break; }
-        if (good) out[r++] = cand[i].node;
+            if (dist_nn(h, cand[i].node, out[j]) < cand[i].d) {
+                good = 0;
+                break;
+            }
+        if (good)
+            out[r++] = cand[i].node;
     }
     for (size_t i = 0; i < nc && r < M; i++) {
         int in = 0;
         for (size_t j = 0; j < r; j++)
-            if (out[j] == cand[i].node) { in = 1; break; }
-        if (!in) out[r++] = cand[i].node;
+            if (out[j] == cand[i].node) {
+                in = 1;
+                break;
+            }
+        if (!in)
+            out[r++] = cand[i].node;
     }
     return r;
 }
@@ -429,7 +489,8 @@ static void connect(Hnsw *h, uint32_t a, uint32_t b, int layer) {
     cand[nc].d = dist_nn(h, a, b);
     nc++;
     size_t ns = select_heuristic(h, cand, nc, cap, h->scratch_sel);
-    for (size_t i = 0; i < ns; i++) na->links[layer][i] = h->scratch_sel[i];
+    for (size_t i = 0; i < ns; i++)
+        na->links[layer][i] = h->scratch_sel[i];
     na->link_cnt[layer] = (uint32_t)ns;
 }
 
@@ -445,7 +506,8 @@ static int rand_level(Hnsw *h) {
 static int store_vector(const Hnsw *h, Node *nd, const float *vec) {
     if (!h->quantized) {
         float *f = malloc(h->dim * sizeof(float));
-        if (!f) return -1;
+        if (!f)
+            return -1;
         memcpy(f, vec, h->dim * sizeof(float));
         nd->vec = f;
         nd->qvec = NULL;
@@ -453,18 +515,23 @@ static int store_vector(const Hnsw *h, Node *nd, const float *vec) {
         return 0;
     }
     int8_t *q = malloc(h->dim ? h->dim : 1);
-    if (!q) return -1;
+    if (!q)
+        return -1;
     float maxa = 0;
     for (size_t i = 0; i < h->dim; i++) {
         float a = fabsf(vec[i]);
-        if (a > maxa) maxa = a;
+        if (a > maxa)
+            maxa = a;
     }
-    float scale = maxa > 0 ? maxa / 127.0f : 1.0f; /* zero vector -> all-zero q */
+    float scale =
+        maxa > 0 ? maxa / 127.0f : 1.0f; /* zero vector -> all-zero q */
     double sq = 0;
     for (size_t i = 0; i < h->dim; i++) {
         long r = lroundf(vec[i] / scale);
-        if (r > 127) r = 127;
-        else if (r < -127) r = -127;
+        if (r > 127)
+            r = 127;
+        else if (r < -127)
+            r = -127;
         q[i] = (int8_t)r;
         sq += (double)r * r;
     }
@@ -481,14 +548,16 @@ static int node_create(Hnsw *h, uint64_t id, const float *vec, int level,
     if (h->n == h->cap) {
         size_t nc = h->cap ? h->cap * 2 : 64;
         Node *nn = realloc(h->nodes, nc * sizeof(Node));
-        if (!nn) return -1;
+        if (!nn)
+            return -1;
         h->nodes = nn;
         h->cap = nc;
     }
     Node *nd = &h->nodes[h->n];
     memset(nd, 0, sizeof(*nd));
     nd->id = id;
-    if (store_vector(h, nd, vec) != 0) return -1;
+    if (store_vector(h, nd, vec) != 0)
+        return -1;
     nd->top_layer = level;
     nd->links = calloc((size_t)level + 1, sizeof(uint32_t *));
     nd->link_cnt = calloc((size_t)level + 1, sizeof(uint32_t));
@@ -503,7 +572,8 @@ static int node_create(Hnsw *h, uint64_t id, const float *vec, int level,
         size_t cap = (size_t)node_layer_cap(h, l);
         nd->links[l] = malloc(cap * sizeof(uint32_t));
         if (!nd->links[l]) {
-            for (int k = 0; k < l; k++) free(nd->links[k]);
+            for (int k = 0; k < l; k++)
+                free(nd->links[k]);
             free(nd->vec);
             free(nd->qvec);
             free(nd->links);
@@ -526,10 +596,12 @@ static void hnsw_free_contents(Hnsw *h);
  * through dead nodes. Amortized O(log n) per delete/replace. Best-effort: on
  * allocation failure the original (un-compacted) graph is kept. */
 static int maybe_rebuild(Hnsw *h) {
-    if (h->n < HNSW_REBUILD_MIN || h->live == 0 || h->n < 2 * h->live) return 0;
+    if (h->n < HNSW_REBUILD_MIN || h->live == 0 || h->n < 2 * h->live)
+        return 0;
     Hnsw *t = hnsw_alloc(h->dim, h->M, h->ef_construction, h->ef_search, h->rng,
                          h->quantized);
-    if (!t) return -1;
+    if (!t)
+        return -1;
     /* A quantized node keeps only qvec (nd->vec is NULL), so we must dequantize
      * into a scratch float vector before re-inserting; hnsw_add re-quantizes it
      * on the target. Float nodes pass their stored vec through directly. */
@@ -542,7 +614,8 @@ static int maybe_rebuild(Hnsw *h) {
         }
     }
     for (size_t i = 0; i < h->n; i++) {
-        if (h->nodes[i].deleted) continue;
+        if (h->nodes[i].deleted)
+            continue;
         const float *vec;
         if (h->quantized) {
             const Node *nd = &h->nodes[i];
@@ -560,13 +633,14 @@ static int maybe_rebuild(Hnsw *h) {
     }
     free(tmp);
     hnsw_free_contents(h);
-    *h = *t;  /* adopt the compacted graph's storage */
-    free(t);  /* free only the temporary shell */
+    *h = *t; /* adopt the compacted graph's storage */
+    free(t); /* free only the temporary shell */
     return 0;
 }
 
 int hnsw_add(Hnsw *h, uint64_t id, const float *vec, size_t dim) {
-    if (dim != h->dim) return -1;
+    if (dim != h->dim)
+        return -1;
 
     /* replace: tombstone any existing node for this id */
     uint32_t prev = map_get(h, id);
@@ -577,7 +651,8 @@ int hnsw_add(Hnsw *h, uint64_t id, const float *vec, size_t dim) {
 
     int level = rand_level(h);
     uint32_t cur;
-    if (node_create(h, id, vec, level, &cur) != 0) return -1;
+    if (node_create(h, id, vec, level, &cur) != 0)
+        return -1;
     if (map_put(h, id, cur) != 0) {
         /* Node is allocated and counted in h->n but unreachable via the map;
          * tombstone it so it's excluded from search and serialised as a valid
@@ -612,7 +687,8 @@ int hnsw_add(Hnsw *h, uint64_t id, const float *vec, size_t dim) {
             rc = -1;
             break;
         }
-        if (W.n == 0) continue; /* only tombstoned around: leave unlinked here */
+        if (W.n == 0)
+            continue; /* only tombstoned around: leave unlinked here */
         size_t cap = (size_t)node_layer_cap(h, lc);
         /* pick this node's neighbours from W with the diversity heuristic. Copy
          * them out first: connect() reuses h->scratch_sel for its own pruning. */
@@ -626,19 +702,22 @@ int hnsw_add(Hnsw *h, uint64_t id, const float *vec, size_t dim) {
         ep = W.a[0].node; /* select_heuristic sorted W.a asc -> nearest first */
     }
     free(W.a);
-    if (rc != 0) return -1;
+    if (rc != 0)
+        return -1;
 
     if (level > h->max_layer) {
         h->max_layer = level;
         h->entry = cur;
     }
-    (void)maybe_rebuild(h); /* compact if a replace pushed tombstones over half */
+    (void)maybe_rebuild(
+        h); /* compact if a replace pushed tombstones over half */
     return 0;
 }
 
 void hnsw_remove(Hnsw *h, uint64_t id) {
     uint32_t node = map_get(h, id);
-    if (node == NPOS || h->nodes[node].deleted) return;
+    if (node == NPOS || h->nodes[node].deleted)
+        return;
     h->nodes[node].deleted = 1;
     h->live--;
     map_del(h, id);
@@ -648,9 +727,12 @@ void hnsw_remove(Hnsw *h, uint64_t id) {
 int hnsw_search(const Hnsw *h, const float *query, size_t dim, size_t top_k,
                 size_t ef_search, uint64_t **out_ids, float **out_scores,
                 size_t *out_n) {
-    if (dim != h->dim) return -1;
-    if (ef_search == 0) ef_search = h->ef_search;
-    if (ef_search < top_k) ef_search = top_k;
+    if (dim != h->dim)
+        return -1;
+    if (ef_search == 0)
+        ef_search = h->ef_search;
+    if (ef_search < top_k)
+        ef_search = top_k;
 
     *out_ids = NULL;
     *out_scores = NULL;
@@ -709,14 +791,17 @@ int hnsw_is_quantized(const Hnsw *h) { return h ? h->quantized : 0; }
  * vector (float or int8), and its per-layer link arrays. Excludes allocator
  * overhead. O(nodes) — fine for the infrequent stats path. */
 size_t hnsw_bytes(const Hnsw *h) {
-    if (!h) return 0;
-    size_t total = sizeof(*h) + h->cap * sizeof(Node) + h->mcap * sizeof(MapSlot);
+    if (!h)
+        return 0;
+    size_t total =
+        sizeof(*h) + h->cap * sizeof(Node) + h->mcap * sizeof(MapSlot);
     size_t vsz = h->quantized ? h->dim : h->dim * sizeof(float);
     for (size_t i = 0; i < h->n; i++) {
         const Node *nd = &h->nodes[i];
         total += vsz; /* vec (float mode) or qvec (quant mode) */
         size_t layers = (size_t)nd->top_layer + 1;
-        total += layers * (sizeof(uint32_t *) + sizeof(uint32_t)); /* links + link_cnt arrays */
+        total += layers * (sizeof(uint32_t *) +
+                           sizeof(uint32_t)); /* links + link_cnt arrays */
         if (nd->link_cnt)
             for (size_t l = 0; l < layers; l++)
                 total += (size_t)nd->link_cnt[l] * sizeof(uint32_t);
@@ -732,22 +817,26 @@ int hnsw_foreach_live(const Hnsw *h,
     float *tmp = NULL;
     if (h->quantized) {
         tmp = malloc((h->dim ? h->dim : 1) * sizeof(float));
-        if (!tmp) return -1;
+        if (!tmp)
+            return -1;
     }
     int rc = 0;
     for (size_t i = 0; i < h->n; i++) {
-        if (h->nodes[i].deleted) continue;
+        if (h->nodes[i].deleted)
+            continue;
         const float *v;
         if (h->quantized) {
             const int8_t *q = h->nodes[i].qvec;
             float s = h->nodes[i].scale;
-            for (size_t d = 0; d < h->dim; d++) tmp[d] = (float)q[d] * s;
+            for (size_t d = 0; d < h->dim; d++)
+                tmp[d] = (float)q[d] * s;
             v = tmp;
         } else {
             v = h->nodes[i].vec;
         }
         rc = cb(h->nodes[i].id, v, ctx);
-        if (rc) break;
+        if (rc)
+            break;
     }
     free(tmp);
     return rc;
@@ -758,7 +847,8 @@ int hnsw_foreach_live(const Hnsw *h,
 static Hnsw *hnsw_alloc(size_t dim, size_t M, size_t ef_construction,
                         size_t ef_search, uint64_t rng, int quantize) {
     Hnsw *h = calloc(1, sizeof(*h));
-    if (!h) return NULL;
+    if (!h)
+        return NULL;
     h->dim = dim;
     h->M = M < 2 ? 2 : M;
     h->M0 = h->M * 2;
@@ -782,9 +872,11 @@ static Hnsw *hnsw_alloc(size_t dim, size_t M, size_t ef_construction,
 
 Hnsw *hnsw_create(size_t dim, const HnswParams *params) {
     size_t M = (params && params->M) ? params->M : 16;
-    size_t efc = (params && params->ef_construction) ? params->ef_construction : 200;
+    size_t efc =
+        (params && params->ef_construction) ? params->ef_construction : 200;
     size_t efs = (params && params->ef_search) ? params->ef_search : 50;
-    uint64_t seed = (params && params->seed) ? params->seed : 0x9E3779B97F4A7C15ULL;
+    uint64_t seed =
+        (params && params->seed) ? params->seed : 0x9E3779B97F4A7C15ULL;
     int quantize = params ? params->quantize : 0;
     return hnsw_alloc(dim, M, efc, efs, seed, quantize);
 }
@@ -794,7 +886,8 @@ static void hnsw_free_contents(Hnsw *h) {
         Node *nd = &h->nodes[i];
         free(nd->vec);
         free(nd->qvec);
-        for (int l = 0; l <= nd->top_layer; l++) free(nd->links[l]);
+        for (int l = 0; l <= nd->top_layer; l++)
+            free(nd->links[l]);
         free(nd->links);
         free(nd->link_cnt);
     }
@@ -805,7 +898,8 @@ static void hnsw_free_contents(Hnsw *h) {
 }
 
 void hnsw_free(Hnsw *h) {
-    if (!h) return;
+    if (!h)
+        return;
     hnsw_free_contents(h);
     free(h);
 }
@@ -820,15 +914,24 @@ size_t hnsw_total_nodes(const Hnsw *h) { return h ? h->n : 0; }
  * checkpoints load unchanged. Raw blobs (quantized/float vectors) are copied
  * verbatim. */
 
-typedef struct { uint8_t *p; size_t n, cap; int err; } Buf;
+typedef struct {
+    uint8_t *p;
+    size_t n, cap;
+    int err;
+} Buf;
 
 static void buf_put(Buf *b, const void *src, size_t len) {
-    if (b->err) return;
+    if (b->err)
+        return;
     if (b->n + len > b->cap) {
         size_t nc = b->cap ? b->cap * 2 : 4096;
-        while (nc < b->n + len) nc *= 2;
+        while (nc < b->n + len)
+            nc *= 2;
         uint8_t *np = realloc(b->p, nc);
-        if (!np) { b->err = 1; return; }
+        if (!np) {
+            b->err = 1;
+            return;
+        }
         b->p = np;
         b->cap = nc;
     }
@@ -846,10 +949,17 @@ static void buf_u64(Buf *b, uint64_t v) {
     buf_put(b, t, sizeof t);
 }
 
-typedef struct { const uint8_t *p; size_t n, off; int err; } Rd;
+typedef struct {
+    const uint8_t *p;
+    size_t n, off;
+    int err;
+} Rd;
 
 static void rd_get(Rd *r, void *dst, size_t len) {
-    if (r->err || r->off + len > r->n) { r->err = 1; return; }
+    if (r->err || r->off + len > r->n) {
+        r->err = 1;
+        return;
+    }
     memcpy(dst, r->p + r->off, len);
     r->off += len;
 }
@@ -874,7 +984,8 @@ int hnsw_save(const Hnsw *h, const char *path, uint64_t covered_log_size,
     buf_u32(&b, (uint32_t)h->ef_construction);
     buf_u32(&b, (uint32_t)h->ef_search);
     buf_u32(&b, (uint32_t)(h->quantized ? 1 : 0));
-    buf_u64(&b, h->rng); /* live PRNG state: future inserts continue the stream */
+    buf_u64(&b,
+            h->rng); /* live PRNG state: future inserts continue the stream */
     buf_u64(&b, (uint64_t)h->n);
     buf_u64(&b, (uint64_t)h->live);
     buf_u32(&b, h->entry);
@@ -898,9 +1009,16 @@ int hnsw_save(const Hnsw *h, const char *path, uint64_t covered_log_size,
             buf_put(&b, nd->links[l], nd->link_cnt[l] * sizeof(uint32_t));
         }
     }
-    if (b.err) { free(b.p); return -1; }
-    buf_u32(&b, crc32_compute(b.p, b.n)); /* trailing CRC over everything above */
-    if (b.err) { free(b.p); return -1; }
+    if (b.err) {
+        free(b.p);
+        return -1;
+    }
+    buf_u32(&b,
+            crc32_compute(b.p, b.n)); /* trailing CRC over everything above */
+    if (b.err) {
+        free(b.p);
+        return -1;
+    }
 
     int rv = ckpt_write(path, key, b.p, b.n);
     free(b.p);
@@ -913,21 +1031,37 @@ Hnsw *hnsw_load(const char *path, size_t expected_dim,
      * so recovery rebuilds the graph from the log. */
     uint8_t *buf = NULL;
     size_t size = 0;
-    if (ckpt_read(path, key, &buf, &size) != 0) return NULL;
-    if (size < 4 + 4) { free(buf); return NULL; }
+    if (ckpt_read(path, key, &buf, &size) != 0)
+        return NULL;
+    if (size < 4 + 4) {
+        free(buf);
+        return NULL;
+    }
 
     size_t body = (size_t)size - 4; /* trailing CRC */
     uint32_t want;
     memcpy(&want, buf + body, 4);
-    if (crc32_compute(buf, body) != want) { free(buf); return NULL; }
+    if (crc32_compute(buf, body) != want) {
+        free(buf);
+        return NULL;
+    }
 
     Rd r = {buf, body, 0, 0};
     char magic[4];
     rd_get(&r, magic, 4);
-    if (r.err || memcmp(magic, HNSW_FORMAT_MAGIC, 4) != 0) { free(buf); return NULL; }
-    if (rd_u32(&r) != HNSW_FORMAT_VERSION) { free(buf); return NULL; }
+    if (r.err || memcmp(magic, HNSW_FORMAT_MAGIC, 4) != 0) {
+        free(buf);
+        return NULL;
+    }
+    if (rd_u32(&r) != HNSW_FORMAT_VERSION) {
+        free(buf);
+        return NULL;
+    }
     size_t dim = rd_u32(&r);
-    if (dim != expected_dim) { free(buf); return NULL; }
+    if (dim != expected_dim) {
+        free(buf);
+        return NULL;
+    }
     size_t M = rd_u32(&r);
     size_t efc = rd_u32(&r);
     size_t efs = rd_u32(&r);
@@ -938,13 +1072,23 @@ Hnsw *hnsw_load(const char *path, size_t expected_dim,
     uint32_t entry = rd_u32(&r);
     int max_layer = (int)rd_u32(&r);
     uint64_t covered = rd_u64(&r);
-    if (r.err) { free(buf); return NULL; }
+    if (r.err) {
+        free(buf);
+        return NULL;
+    }
 
     Hnsw *h = hnsw_alloc(dim, M, efc, efs, rng, quantized);
-    if (!h) { free(buf); return NULL; }
+    if (!h) {
+        free(buf);
+        return NULL;
+    }
     if (ncount > 0) {
         h->nodes = calloc((size_t)ncount, sizeof(Node));
-        if (!h->nodes) { hnsw_free(h); free(buf); return NULL; }
+        if (!h->nodes) {
+            hnsw_free(h);
+            free(buf);
+            return NULL;
+        }
         h->cap = (size_t)ncount;
     }
 
@@ -957,16 +1101,20 @@ Hnsw *hnsw_load(const char *path, size_t expected_dim,
         nd->id = rd_u64(&r);
         nd->deleted = (int)rd_u32(&r);
         nd->top_layer = (int)rd_u32(&r);
-        if (r.err || nd->top_layer < 0) goto bad;
+        if (r.err || nd->top_layer < 0)
+            goto bad;
         nd->links = calloc((size_t)nd->top_layer + 1, sizeof(uint32_t *));
         nd->link_cnt = calloc((size_t)nd->top_layer + 1, sizeof(uint32_t));
-        if (!nd->links || !nd->link_cnt) goto bad;
+        if (!nd->links || !nd->link_cnt)
+            goto bad;
         if (h->quantized) {
             nd->qvec = malloc(dim ? dim : 1);
-            if (!nd->qvec) goto bad;
+            if (!nd->qvec)
+                goto bad;
         } else {
             nd->vec = malloc(dim * sizeof(float));
-            if (!nd->vec) goto bad;
+            if (!nd->vec)
+                goto bad;
         }
         rd_get(&r, &nd->norm, sizeof(float));
         if (h->quantized) {
@@ -978,14 +1126,17 @@ Hnsw *hnsw_load(const char *path, size_t expected_dim,
         for (int l = 0; l <= nd->top_layer; l++) {
             uint32_t cnt = rd_u32(&r);
             size_t cap = (size_t)node_layer_cap(h, l);
-            if (r.err || cnt > cap) goto bad;
+            if (r.err || cnt > cap)
+                goto bad;
             nd->links[l] = malloc(cap * sizeof(uint32_t));
-            if (!nd->links[l]) goto bad;
+            if (!nd->links[l])
+                goto bad;
             nd->link_cnt[l] = cnt;
             rd_get(&r, nd->links[l], cnt * sizeof(uint32_t));
         }
     }
-    if (r.err || r.off != body) goto bad; /* trailing garbage or short read */
+    if (r.err || r.off != body)
+        goto bad; /* trailing garbage or short read */
 
     h->live = live;
     h->entry = entry;
@@ -994,13 +1145,17 @@ Hnsw *hnsw_load(const char *path, size_t expected_dim,
      * map_put grows against h->live, so a tiny initial map would otherwise
      * overflow (and spin) under a bulk load. Keep the load factor < 0.7. */
     size_t mcap = 64;
-    while (mcap * 7 < (live + 1) * 10) mcap *= 2;
-    if (map_grow(h, mcap) != 0) goto bad;
+    while (mcap * 7 < (live + 1) * 10)
+        mcap *= 2;
+    if (map_grow(h, mcap) != 0)
+        goto bad;
     for (size_t i = 0; i < h->n; i++)
-        if (!h->nodes[i].deleted && map_put(h, h->nodes[i].id, (uint32_t)i) != 0)
+        if (!h->nodes[i].deleted &&
+            map_put(h, h->nodes[i].id, (uint32_t)i) != 0)
             goto bad;
     free(buf);
-    if (out_covered_log_size) *out_covered_log_size = covered;
+    if (out_covered_log_size)
+        *out_covered_log_size = covered;
     return h;
 bad:
     hnsw_free(h);

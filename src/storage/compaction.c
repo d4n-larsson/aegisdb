@@ -31,7 +31,8 @@ static int locs_push(NewLoc **locs, size_t *n, size_t *cap, NewLoc v) {
     if (*n == *cap) {
         size_t nc = *cap ? *cap * 2 : 16;
         NewLoc *g = realloc(*locs, nc * sizeof(NewLoc));
-        if (!g) return -1;
+        if (!g)
+            return -1;
         *locs = g;
         *cap = nc;
     }
@@ -42,7 +43,8 @@ static int locs_push(NewLoc **locs, size_t *n, size_t *cap, NewLoc v) {
 /* Phase 1 (brief read lock): snapshot the live entries and the byte offset up to
  * which they were captured. Returns a malloc'd array of `*out_n` locations
  * (caller frees) and sets `*out_end` to the captured log size, or NULL on OOM. */
-static NewLoc *compaction_snapshot(AegisDB *db, size_t *out_n, uint64_t *out_end) {
+static NewLoc *compaction_snapshot(AegisDB *db, size_t *out_n,
+                                   uint64_t *out_end) {
     pthread_rwlock_rdlock(&db->index_lock);
     HashIndex *h = db->hash;
     NewLoc *snap = malloc((h->count ? h->count : 1) * sizeof(NewLoc));
@@ -53,7 +55,8 @@ static NewLoc *compaction_snapshot(AegisDB *db, size_t *out_n, uint64_t *out_end
     size_t snap_n = 0;
     for (size_t i = 0; i < h->cap; i++) {
         const HashEntry *e = &h->buckets[i];
-        if (!e->used || e->deleted) continue;
+        if (!e->used || e->deleted)
+            continue;
         snap[snap_n++] =
             (NewLoc){e->id, e->offset, e->length, e->type, 0, e->expires_at};
     }
@@ -69,9 +72,9 @@ static NewLoc *compaction_snapshot(AegisDB *db, size_t *out_n, uint64_t *out_end
  * source frame and log_append re-seals it with a FRESH nonce. Appends one
  * location per copied frame to *locs. Returns 0, or -1 on an append/OOM failure
  * (an unreadable source frame is skipped, matching the original behaviour). */
-static int compaction_copy_live(AegisDB *db, LogFile *newlog, const NewLoc *snap,
-                                size_t snap_n, NewLoc **locs, size_t *nloc,
-                                size_t *locs_cap) {
+static int compaction_copy_live(AegisDB *db, LogFile *newlog,
+                                const NewLoc *snap, size_t snap_n,
+                                NewLoc **locs, size_t *nloc, size_t *locs_cap) {
     for (size_t i = 0; i < snap_n; i++) {
         uint8_t *buf = NULL;
         size_t len = 0;
@@ -109,7 +112,8 @@ static int compaction_copy_live(AegisDB *db, LogFile *newlog, const NewLoc *snap
 static int compaction_run_once_locked(AegisDB *db) {
     LOG_DEBUG("compaction: starting log rewrite");
     char newpath[AEGIS_PATH_MAX];
-    if (snprintf(newpath, sizeof(newpath), "%s.compaction", db->path_log) >= (int)sizeof(newpath)) {
+    if (snprintf(newpath, sizeof(newpath), "%s.compaction", db->path_log) >=
+        (int)sizeof(newpath)) {
         LOG_ERROR("compaction: log path too long");
         return -1;
     }
@@ -118,7 +122,8 @@ static int compaction_run_once_locked(AegisDB *db) {
     size_t snap_n = 0;
     uint64_t snap_end = 0;
     NewLoc *snap = compaction_snapshot(db, &snap_n, &snap_end);
-    if (!snap) return -1;
+    if (!snap)
+        return -1;
 
     const uint8_t *ckey =
         db->config.encryption_enabled ? db->config.encryption_key : NULL;
@@ -209,10 +214,13 @@ static int compaction_run_once_locked(AegisDB *db) {
          * with EBADF — the database is unusable, so surface it loudly rather
          * than pretend it is a routine compaction miss. */
         if (log_open(&db->log, db->path_log,
-                     config_effective_fsync_batch(&db->config), ckey, NULL) != 0)
-            LOG_ERROR("compaction: could not reopen original log %s after a "
-                      "failed swap; the database is now unusable and the server "
-                      "must be restarted", db->path_log);
+                     config_effective_fsync_batch(&db->config), ckey,
+                     NULL) != 0)
+            LOG_ERROR(
+                "compaction: could not reopen original log %s after a "
+                "failed swap; the database is now unusable and the server "
+                "must be restarted",
+                db->path_log);
         pthread_rwlock_unlock(&db->log_lock);
         free(locs);
         pthread_rwlock_unlock(&db->index_lock);
@@ -223,7 +231,8 @@ static int compaction_run_once_locked(AegisDB *db) {
      * pre-compaction log (harmless — same live data — but the swap is lost). */
     if (fs_fsync_parent(db->path_log) != 0)
         LOG_WARN("compaction: fsync of the log directory failed; the swap of "
-                 "%s may not survive a crash", db->path_log);
+                 "%s may not survive a crash",
+                 db->path_log);
     if (log_open(&db->log, db->path_log,
                  config_effective_fsync_batch(&db->config), ckey, NULL) != 0) {
         LOG_ERROR("compaction: cannot reopen compacted log %s", db->path_log);
@@ -264,11 +273,12 @@ static int compaction_run_once_locked(AegisDB *db) {
      * superseded by a tail frame) are not double-counted. */
     size_t live = 0;
     for (size_t i = 0; i < nh->cap; i++)
-        if (nh->buckets[i].used && !nh->buckets[i].deleted) live++;
+        if (nh->buckets[i].used && !nh->buckets[i].deleted)
+            live++;
 
     pthread_rwlock_unlock(&db->index_lock);
-    LOG_INFO("compaction complete: %zu live records (%zu frames retained)", live,
-             nloc);
+    LOG_INFO("compaction complete: %zu live records (%zu frames retained)",
+             live, nloc);
     return 0;
 }
 
@@ -294,7 +304,8 @@ struct Compactor {
     pthread_t thread;
     unsigned sweep_sec;
     unsigned compact_sec;
-    atomic_int stop; /* relaxed: pthread_join sets up the shutdown happens-before */
+    atomic_int
+        stop; /* relaxed: pthread_join sets up the shutdown happens-before */
 };
 
 /* Compaction rewrites the whole live log, so only run it once a meaningful
@@ -305,9 +316,12 @@ int compaction_worthwhile(AegisDB *db) {
     size_t live = 0, dead = 0;
     const HashIndex *h = db->hash;
     for (size_t i = 0; i < h->cap; i++) {
-        if (!h->buckets[i].used) continue;
-        if (h->buckets[i].deleted) dead++;
-        else live++;
+        if (!h->buckets[i].used)
+            continue;
+        if (h->buckets[i].deleted)
+            dead++;
+        else
+            live++;
     }
     pthread_rwlock_unlock(&db->index_lock);
     return dead > 0 && dead * 4 >= (live + dead);
@@ -319,7 +333,8 @@ static void *maint_loop(void *arg) {
     uint64_t last_fsync = db_now_ms();
     while (!atomic_load_explicit(&c->stop, memory_order_relaxed)) {
         sleep(1);
-        if (atomic_load_explicit(&c->stop, memory_order_relaxed)) break;
+        if (atomic_load_explicit(&c->stop, memory_order_relaxed))
+            break;
         elapsed++;
         /* INTERVAL durability: flush the log on a time cadence so an idle
          * server cannot leave acknowledged writes unflushed indefinitely.
@@ -378,8 +393,7 @@ static void *maint_loop(void *arg) {
          * Only when a cap is set (the walk is O(index size), so it is skipped
          * entirely by default), every MEM_SAMPLE_SEC so the write-path check
          * reads a recent value lock-free. */
-        if (c->db->config.max_index_bytes &&
-            (elapsed % MEM_SAMPLE_SEC) == 0)
+        if (c->db->config.max_index_bytes && (elapsed % MEM_SAMPLE_SEC) == 0)
             atomic_store_explicit(&c->db->index_bytes, db_index_bytes(c->db),
                                   memory_order_relaxed);
     }
@@ -389,7 +403,8 @@ static void *maint_loop(void *arg) {
 Compactor *compaction_start(AegisDB *db, unsigned sweep_sec,
                             unsigned compact_sec) {
     Compactor *c = calloc(1, sizeof(*c));
-    if (!c) return NULL;
+    if (!c)
+        return NULL;
     c->db = db;
     c->sweep_sec = sweep_sec;
     c->compact_sec = compact_sec;
@@ -401,7 +416,8 @@ Compactor *compaction_start(AegisDB *db, unsigned sweep_sec,
 }
 
 void compaction_stop(Compactor *c) {
-    if (!c) return;
+    if (!c)
+        return;
     atomic_store_explicit(&c->stop, 1, memory_order_relaxed);
     pthread_join(c->thread, NULL);
     free(c);

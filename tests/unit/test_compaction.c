@@ -164,8 +164,10 @@ static void test_compaction_concurrent_compactions(void) {
     pthread_t comp[4], wr;
     TEST_ASSERT_EQUAL_INT(0, pthread_create(&wr, NULL, writer, &g_db));
     for (int i = 0; i < 4; i++)
-        TEST_ASSERT_EQUAL_INT(0, pthread_create(&comp[i], NULL, compactor, &g_db));
-    for (int i = 0; i < 4; i++) pthread_join(comp[i], NULL);
+        TEST_ASSERT_EQUAL_INT(0,
+                              pthread_create(&comp[i], NULL, compactor, &g_db));
+    for (int i = 0; i < 4; i++)
+        pthread_join(comp[i], NULL);
     pthread_join(wr, NULL);
     /* Uncontended final pass folds in the tail; it succeeds. */
     TEST_ASSERT_EQUAL_INT(0, compaction_run_once(&g_db));
@@ -194,7 +196,8 @@ static void test_compaction_encrypted_concurrent(void) {
     config_defaults(&cfg);
     strncpy(cfg.data_dir, g_dir, sizeof(cfg.data_dir) - 1);
     cfg.encryption_enabled = 1;
-    for (int i = 0; i < AEAD_KEY_LEN; i++) cfg.encryption_key[i] = (uint8_t)(i + 1);
+    for (int i = 0; i < AEAD_KEY_LEN; i++)
+        cfg.encryption_key[i] = (uint8_t)(i + 1);
     TEST_ASSERT_EQUAL_INT(0, db_open(&g_db, &cfg));
     TEST_ASSERT_TRUE(g_db.log.encrypted);
 
@@ -231,7 +234,8 @@ static void test_compaction_gate_threshold(void) {
     TEST_ASSERT_FALSE(compaction_worthwhile(&g_db)); /* 2/12 dead (< 25%) */
 
     qe_delete(&g_db, ids[2], NULL);
-    TEST_ASSERT_TRUE(compaction_worthwhile(&g_db)); /* 3/12 == 25% -> worthwhile */
+    TEST_ASSERT_TRUE(
+        compaction_worthwhile(&g_db)); /* 3/12 == 25% -> worthwhile */
 }
 
 /* The scheduled maintenance path (compaction_start with a compact cadence)
@@ -242,7 +246,8 @@ static void test_compaction_scheduled_trigger(void) {
         char b[16];
         snprintf(b, sizeof(b), "s-%d", i);
         uint64_t id = insert_ep(&g_db, b);
-        if (i < 5) qe_delete(&g_db, id, NULL); /* 5/12 dead (> 25%) */
+        if (i < 5)
+            qe_delete(&g_db, id, NULL); /* 5/12 dead (> 25%) */
     }
     log_fsync(&g_db.log);
     uint64_t before = (uint64_t)g_db.log.size;
@@ -261,7 +266,8 @@ static void test_compaction_scheduled_trigger(void) {
         pthread_rwlock_unlock(&g_db.log_lock);
     }
     compaction_stop(c);
-    TEST_ASSERT_TRUE(after < before); /* scheduled compaction reclaimed the dead */
+    TEST_ASSERT_TRUE(after <
+                     before); /* scheduled compaction reclaimed the dead */
 }
 
 int main(void) {

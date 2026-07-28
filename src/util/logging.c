@@ -21,7 +21,8 @@ void aegis_log_set_level(AegisLogLevel level) { g_level = level; }
 AegisLogLevel aegis_log_get_level(void) { return g_level; }
 
 int aegis_log_level_from_string(const char *s, AegisLogLevel *out) {
-    if (!s) return -1;
+    if (!s)
+        return -1;
     if (strcasecmp(s, "error") == 0)
         *out = AEGIS_LOG_ERROR;
     else if (strcasecmp(s, "warn") == 0 || strcasecmp(s, "warning") == 0)
@@ -37,10 +38,14 @@ int aegis_log_level_from_string(const char *s, AegisLogLevel *out) {
 
 const char *aegis_log_level_name(AegisLogLevel level) {
     switch (level) {
-    case AEGIS_LOG_ERROR: return "error";
-    case AEGIS_LOG_WARN: return "warn";
-    case AEGIS_LOG_INFO: return "info";
-    case AEGIS_LOG_DEBUG: return "debug";
+    case AEGIS_LOG_ERROR:
+        return "error";
+    case AEGIS_LOG_WARN:
+        return "warn";
+    case AEGIS_LOG_INFO:
+        return "info";
+    case AEGIS_LOG_DEBUG:
+        return "debug";
     }
     return "?";
 }
@@ -48,16 +53,21 @@ const char *aegis_log_level_name(AegisLogLevel level) {
 /* Fixed-width upper-case tag so columns line up across records. */
 static const char *level_tag(AegisLogLevel level) {
     switch (level) {
-    case AEGIS_LOG_ERROR: return "ERROR";
-    case AEGIS_LOG_WARN: return "WARN ";
-    case AEGIS_LOG_INFO: return "INFO ";
-    case AEGIS_LOG_DEBUG: return "DEBUG";
+    case AEGIS_LOG_ERROR:
+        return "ERROR";
+    case AEGIS_LOG_WARN:
+        return "WARN ";
+    case AEGIS_LOG_INFO:
+        return "INFO ";
+    case AEGIS_LOG_DEBUG:
+        return "DEBUG";
     }
     return "?????";
 }
 
 void aegis_log_emit(AegisLogLevel level, const char *fmt, ...) {
-    if (level > g_level) return;
+    if (level > g_level)
+        return;
 
     /* Wall-clock timestamp with millisecond precision. */
     struct timeval tv;
@@ -81,11 +91,13 @@ void aegis_log_emit(AegisLogLevel level, const char *fmt, ...) {
     char line[2176];
     int len = snprintf(line, sizeof(line), "%s %s [aegisdb] %s\n", ts,
                        level_tag(level), msg);
-    if (len < 0) return;
+    if (len < 0)
+        return;
     /* On truncation snprintf returns the would-be length; the buffer holds only
      * sizeof-1 chars + NUL. Clamp to the actual char count so we never write the
      * trailing NUL or read one byte past the buffer. */
-    if (len >= (int)sizeof(line)) len = (int)sizeof(line) - 1;
+    if (len >= (int)sizeof(line))
+        len = (int)sizeof(line) - 1;
     fwrite(line, 1, (size_t)len, stderr);
     fflush(stderr);
 }

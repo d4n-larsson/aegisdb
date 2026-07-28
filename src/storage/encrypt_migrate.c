@@ -29,12 +29,12 @@ static int migrate_cb(uint64_t off, const uint8_t *payload, size_t len,
 
 int encrypt_migrate_run(const Config *cfg) {
     if (!cfg->encryption_enabled) {
-        fprintf(stderr,
-                "--encrypt-migrate requires --encryption-key-file\n");
+        fprintf(stderr, "--encrypt-migrate requires --encryption-key-file\n");
         return -1;
     }
 
-    char path_log[AEGIS_PATH_MAX], path_new[AEGIS_PATH_MAX], path_index[AEGIS_PATH_MAX], path_sem[AEGIS_PATH_MAX];
+    char path_log[AEGIS_PATH_MAX], path_new[AEGIS_PATH_MAX],
+        path_index[AEGIS_PATH_MAX], path_sem[AEGIS_PATH_MAX];
     snprintf(path_log, sizeof path_log, "%s/memory.log", cfg->data_dir);
     snprintf(path_new, sizeof path_new, "%s/memory.log.enc.tmp", cfg->data_dir);
     snprintf(path_index, sizeof path_index, "%s/memory.index", cfg->data_dir);

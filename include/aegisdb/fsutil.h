@@ -26,7 +26,8 @@ int fs_fsync_parent(const char *path);
  * renames it over `path`, then fsyncs the parent directory so the rename itself
  * survives a crash. A partial temp is unlinked on any failure. Returns 0 on
  * success, -1 on failure. */
-int fs_write_atomic(const char *path, const void *data, size_t len, mode_t mode);
+int fs_write_atomic(const char *path, const void *data, size_t len,
+                    mode_t mode);
 
 /* Copy the file at `src` to `dst`, byte for byte, then fsync `dst` and its
  * parent directory so the copy is durable. A partial `dst` is unlinked on

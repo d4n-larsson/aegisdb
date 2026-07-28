@@ -9,13 +9,13 @@
 
 typedef struct {
     uint64_t id;
-    uint64_t offset;      /* frame start offset in the log */
-    uint64_t expires_at;  /* epoch ms TTL horizon; 0 = never (kept here so the
+    uint64_t offset;     /* frame start offset in the log */
+    uint64_t expires_at; /* epoch ms TTL horizon; 0 = never (kept here so the
                            * expiry sweep is an in-memory scan, no record reads) */
-    uint32_t length;      /* payload length */
-    uint8_t type;         /* MemoryType */
-    uint8_t deleted;      /* tombstone */
-    uint8_t used;         /* slot occupied */
+    uint32_t length;     /* payload length */
+    uint8_t type;        /* MemoryType */
+    uint8_t deleted;     /* tombstone */
+    uint8_t used;        /* slot occupied */
 } HashEntry;
 
 typedef struct {

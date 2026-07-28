@@ -41,41 +41,46 @@ typedef enum {
  * is stored either as plaintext (`token`) or, when configured with a
  * `sha256$<hex>` entry, as the digest (`hash`); `hashed` selects which. */
 typedef struct {
-    char *token;                  /* plaintext secret, owned; NULL when hashed */
-    uint8_t hash[32];             /* sha256(token) when hashed */
-    int hashed;                   /* 1: compare against `hash`; 0: against `token` */
-    char *namespace;              /* tenant (agent_id); owned; NULL for ADMIN */
-    int scope;                    /* AegisScope */
+    char *token;      /* plaintext secret, owned; NULL when hashed */
+    uint8_t hash[32]; /* sha256(token) when hashed */
+    int hashed;       /* 1: compare against `hash`; 0: against `token` */
+    char *namespace;  /* tenant (agent_id); owned; NULL for ADMIN */
+    int scope;        /* AegisScope */
 } AuthToken;
 
 typedef struct {
-    int listen_port;            /* default 9470 */
+    int listen_port;                   /* default 9470 */
     char data_dir[AEGIS_DATA_DIR_MAX]; /* default "./data" */
-    size_t max_payload_bytes;   /* default 1 MiB */
-    size_t embedding_dimensions;/* default 384 */
-    size_t ann_threshold;       /* live-vector count above which semantic search switches to HNSW; 0 = built-in default */
-    size_t ann_ef_search;       /* HNSW query beam width once the semantic index is large; 0 = HNSW default. Recall/latency knob */
-    int ann_quantize;           /* 1: store HNSW vectors as int8 (~4x smaller, small recall cost); default 0 */
-    size_t ann_shard_target;    /* target vectors per HNSW shard; the graph splits into ~n/target shards (capped by CPUs) so the build parallelizes. 0 = built-in default */
+    size_t max_payload_bytes;          /* default 1 MiB */
+    size_t embedding_dimensions;       /* default 384 */
+    size_t
+        ann_threshold; /* live-vector count above which semantic search switches to HNSW; 0 = built-in default */
+    size_t
+        ann_ef_search; /* HNSW query beam width once the semantic index is large; 0 = HNSW default. Recall/latency knob */
+    int ann_quantize; /* 1: store HNSW vectors as int8 (~4x smaller, small recall cost); default 0 */
+    size_t
+        ann_shard_target; /* target vectors per HNSW shard; the graph splits into ~n/target shards (capped by CPUs) so the build parallelizes. 0 = built-in default */
     /* Per-tenant (namespace) limits for a shared multi-tenant server; enforced
      * only when auth is enabled. 0 = unlimited. */
-    size_t tenant_max_records;  /* max live records per namespace */
-    size_t tenant_max_bytes;    /* max live bytes (frame payloads) per namespace */
-    double tenant_rate_qps;     /* max sustained requests/sec per namespace (burst = 1s worth) */
+    size_t tenant_max_records; /* max live records per namespace */
+    size_t tenant_max_bytes; /* max live bytes (frame payloads) per namespace */
+    double
+        tenant_rate_qps; /* max sustained requests/sec per namespace (burst = 1s worth) */
     uint32_t working_capacity;  /* default 256 */
     uint64_t default_ttl_ms;    /* default 3600000 */
     size_t fsync_batch_size;    /* default 1000; used in BATCH mode */
     int durability;             /* AegisDurability; default INTERVAL */
     uint64_t fsync_interval_ms; /* INTERVAL flush cadence; default 1000 */
-    unsigned checkpoint_sec;    /* index checkpoint cadence; 0 disables; def 60 */
-    unsigned compact_sec;       /* compaction check cadence (runs only when >=25% dead); 0 disables; def 300 */
-    int io_threads;             /* poll() event-loop threads (dispatch parallelism, NOT a connection cap); default 2x CPUs (8-64) */
+    unsigned checkpoint_sec; /* index checkpoint cadence; 0 disables; def 60 */
+    unsigned
+        compact_sec; /* compaction check cadence (runs only when >=25% dead); 0 disables; def 300 */
+    int io_threads; /* poll() event-loop threads (dispatch parallelism, NOT a connection cap); default 2x CPUs (8-64) */
     /* DoS guards on the client port. idle_timeout_sec reaps a connection that
      * has moved no bytes for that long (defeats slow-loris / stalled sockets);
      * max_connections is a hard cap on concurrent client connections (total
      * across io-threads). 0 = disabled for each. */
-    unsigned idle_timeout_sec;  /* default 60; 0 disables idle reaping */
-    int max_connections;        /* default 0 (unlimited) */
+    unsigned idle_timeout_sec; /* default 60; 0 disables idle reaping */
+    int max_connections;       /* default 0 (unlimited) */
     /* Bounds a single broad (filterless / whole-time-range) search or count:
      * at most this many of the most-recent matching records are loaded into
      * memory, so an unfiltered query cannot pull the entire dataset into RAM
@@ -88,7 +93,7 @@ typedef struct {
      * periodically by the maintenance thread, so it is approximate (enforced
      * within the sample interval). 0 = unlimited (default). */
     size_t max_index_bytes;
-    int enabled_phase;          /* default 4: gate operations above this phase */
+    int enabled_phase; /* default 4: gate operations above this phase */
     /* Encryption at rest (see docs/encryption-at-rest-design.md). Set from
      * --encryption-key-file: when enabled, the log is sealed with `encryption_key`
      * (XChaCha20-Poly1305). 0 = plaintext (default). */
@@ -98,16 +103,19 @@ typedef struct {
      * on `replication_port` when a token is set; a replica sets
      * `replicate_from_host`/`_port` to follow one. `read_only` refuses client
      * writes (implied on a replica). See docs/read-replica-design.md. */
-    int replication_port;         /* >0: serve the replication stream on this port */
-    char replication_token[128];  /* required to subscribe / sent when subscribing */
-    char replicate_from_host[256];/* non-empty: this node is a read-only replica */
-    int replicate_from_port;      /* primary's replication port */
-    int read_only;                /* 1: refuse client writes (implied by replicate_from) */
-    int run_health_check;       /* 1 if --health-check: probe a server and exit */
-    const char *hash_token;     /* --hash-token <tok>: print sha256$<hex> & exit */
-    const char *restore_from;   /* --restore <dir>: install a snapshot into --data-dir & exit */
-    int encrypt_migrate;        /* --encrypt-migrate: rewrite the plaintext log encrypted & exit */
-    int log_level;              /* AegisLogLevel; default AEGIS_LOG_INFO (2) */
+    int replication_port; /* >0: serve the replication stream on this port */
+    char replication_token
+        [128]; /* required to subscribe / sent when subscribing */
+    char replicate_from_host
+        [256];               /* non-empty: this node is a read-only replica */
+    int replicate_from_port; /* primary's replication port */
+    int read_only; /* 1: refuse client writes (implied by replicate_from) */
+    int run_health_check;   /* 1 if --health-check: probe a server and exit */
+    const char *hash_token; /* --hash-token <tok>: print sha256$<hex> & exit */
+    const char *
+        restore_from; /* --restore <dir>: install a snapshot into --data-dir & exit */
+    int encrypt_migrate; /* --encrypt-migrate: rewrite the plaintext log encrypted & exit */
+    int log_level; /* AegisLogLevel; default AEGIS_LOG_INFO (2) */
 
     /* Accepted bearer tokens. When auth_token_count == 0 authentication is
      * disabled and every request is served with unrestricted access. Otherwise

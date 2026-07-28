@@ -17,9 +17,22 @@
 /* Per-operation index for the metrics counters. Order defines the JSON keys in
  * the stats `metrics.by_op` object (see query_engine.c). */
 typedef enum {
-    MOP_PING = 0, MOP_INSERT, MOP_GET, MOP_UPDATE, MOP_DELETE, MOP_SEARCH,
-    MOP_COUNT, MOP_PROMOTE, MOP_RELATE, MOP_TRAVERSE, MOP_STATS,
-    MOP_HISTORY, MOP_EXPORT, MOP_PURGE, MOP_CONSOLIDATE, MOP_FORGET,
+    MOP_PING = 0,
+    MOP_INSERT,
+    MOP_GET,
+    MOP_UPDATE,
+    MOP_DELETE,
+    MOP_SEARCH,
+    MOP_COUNT,
+    MOP_PROMOTE,
+    MOP_RELATE,
+    MOP_TRAVERSE,
+    MOP_STATS,
+    MOP_HISTORY,
+    MOP_EXPORT,
+    MOP_PURGE,
+    MOP_CONSOLIDATE,
+    MOP_FORGET,
     MOP_OTHER, /* unknown / missing operation, incl. admin (token_*, snapshot) */
     MOP__N
 } MetricOp;
@@ -27,15 +40,15 @@ typedef enum {
 /* Monotonic operational counters, incremented per request from the io-threads;
  * lock-free atomics. Exposed via the stats op for external scraping. */
 typedef struct {
-    atomic_uint_fast64_t requests;        /* all dispatched requests */
-    atomic_uint_fast64_t errors;          /* responses with ok:false */
-    atomic_uint_fast64_t unauthorized;    /* auth rejections (subset of errors) */
+    atomic_uint_fast64_t requests;     /* all dispatched requests */
+    atomic_uint_fast64_t errors;       /* responses with ok:false */
+    atomic_uint_fast64_t unauthorized; /* auth rejections (subset of errors) */
     atomic_uint_fast64_t dispatch_micros; /* cumulative in-dispatch time (µs) */
     atomic_uint_fast64_t by_op[MOP__N];   /* per-operation request count */
     /* Memory-quality outcomes (ROADMAP 3.3 observability): cumulative records
      * removed by each maintenance policy, so operators can watch dedup/decay/
      * erase activity — not just request counts. */
-    atomic_uint_fast64_t memories_merged;    /* records consolidate merged away */
+    atomic_uint_fast64_t memories_merged; /* records consolidate merged away */
     atomic_uint_fast64_t memories_forgotten; /* records forget aged out */
     atomic_uint_fast64_t memories_purged;    /* records purge erased (RTBF) */
 } Metrics;
@@ -44,19 +57,20 @@ typedef struct {
     Config config;
     LogFile log;
 
-    HashIndex *hash;     /* id -> log location (Phase 1) */
-    TimeIndex *time;     /* created -> ids (Phase 2) */
-    TagIndex *tags;      /* tag -> ids (Phase 2) */
-    SemanticIndex *sem;  /* embedding ANN (Phase 3) */
+    HashIndex *hash;       /* id -> log location (Phase 1) */
+    TimeIndex *time;       /* created -> ids (Phase 2) */
+    TagIndex *tags;        /* tag -> ids (Phase 2) */
+    SemanticIndex *sem;    /* embedding ANN (Phase 3) */
     WorkingStore *working; /* volatile sessions (Phase 4) */
-    TenantTable *tenants;  /* per-namespace usage + rate limiting (multi-tenant) */
+    TenantTable
+        *tenants; /* per-namespace usage + rate limiting (multi-tenant) */
     /* Replication handles (owned by main); NULL when not configured. Opaque here
      * to avoid an include cycle — see replication.h. */
-    struct ReplicationSource *repl_source;     /* primary: serves the log stream */
-    struct ReplicationFollower *repl_follower;  /* replica: follows a primary */
+    struct ReplicationSource *repl_source; /* primary: serves the log stream */
+    struct ReplicationFollower *repl_follower; /* replica: follows a primary */
 
-    uint64_t started_ms;     /* server start time (epoch ms) for uptime stats */
-    Metrics metrics;         /* operational counters (see stats op) */
+    uint64_t started_ms; /* server start time (epoch ms) for uptime stats */
+    Metrics metrics;     /* operational counters (see stats op) */
     /* Cached total in-RAM index bytes, sampled by the maintenance thread and
      * read lock-free on the write path to enforce --max-index-bytes. */
     atomic_uint_fast64_t index_bytes;
@@ -137,15 +151,15 @@ int db_reset_replica(AegisDB *db);
 
 /* Result of a successful db_snapshot(): where it landed and what it covers. */
 typedef struct {
-    char dir[AEGIS_PATH_MAX];        /* the snapshot directory that was written */
-    uint64_t log_size;     /* durable log bytes captured (the covered offset) */
-    uint64_t next_id;      /* id high-water at snapshot time (restore floor) */
-    uint64_t created_ms;   /* wall-clock time the snapshot was taken */
-    size_t record_count;   /* live (non-tombstone) records at snapshot time */
+    char dir[AEGIS_PATH_MAX]; /* the snapshot directory that was written */
+    uint64_t log_size;   /* durable log bytes captured (the covered offset) */
+    uint64_t next_id;    /* id high-water at snapshot time (restore floor) */
+    uint64_t created_ms; /* wall-clock time the snapshot was taken */
+    size_t record_count; /* live (non-tombstone) records at snapshot time */
 } DbSnapshotInfo;
 
-#define DB_SNAPSHOT_OK       0
-#define DB_SNAPSHOT_ERR     (-1) /* mkdir / copy / write failure */
+#define DB_SNAPSHOT_OK 0
+#define DB_SNAPSHOT_ERR (-1)     /* mkdir / copy / write failure */
 #define DB_SNAPSHOT_BADNAME (-2) /* name empty or contains a path separator */
 
 /* Write a consistent online snapshot under <data_dir>/snapshots/<name>/. The log

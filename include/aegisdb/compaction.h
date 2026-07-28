@@ -18,7 +18,8 @@ int compaction_worthwhile(AegisDB *db);
 
 /* Start a maintenance thread that sweeps expired working memory every
  * `sweep_sec` and compacts every `compact_sec` (0 disables compaction). */
-Compactor *compaction_start(AegisDB *db, unsigned sweep_sec, unsigned compact_sec);
+Compactor *compaction_start(AegisDB *db, unsigned sweep_sec,
+                            unsigned compact_sec);
 void compaction_stop(Compactor *c);
 
 #endif /* AEGISDB_COMPACTION_H */

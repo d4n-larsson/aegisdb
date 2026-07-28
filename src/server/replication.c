@@ -44,7 +44,8 @@
 /* Constant-time fixed-length byte compare (no early exit) — for secrets. */
 static int ct_eq_bytes(const uint8_t *a, const uint8_t *b, size_t n) {
     unsigned char diff = 0;
-    for (size_t i = 0; i < n; i++) diff |= (unsigned char)(a[i] ^ b[i]);
+    for (size_t i = 0; i < n; i++)
+        diff |= (unsigned char)(a[i] ^ b[i]);
     return diff == 0;
 }
 
@@ -60,7 +61,7 @@ static int ct_eq_bytes(const uint8_t *a, const uint8_t *b, size_t n) {
  * threads before proving the token. */
 #define MAX_PENDING 16
 #define HANDSHAKE_TIMEOUT_SEC 5 /* hard bound on the pre-auth handshake read */
-#define STREAM_TIMEOUT_SEC 30   /* post-auth recv/send timeout while streaming */
+#define STREAM_TIMEOUT_SEC 30 /* post-auth recv/send timeout while streaming */
 /* The registry holds every live connection fd (pending + established). */
 #define REPL_CONN_SLOTS (MAX_REPLICAS + MAX_PENDING)
 
@@ -70,8 +71,9 @@ struct ReplicationSource {
     uint8_t token_hash[SHA256_DIGEST_LEN]; /* sha256 of the subscribe token */
     pthread_t acceptor;
     atomic_int stop;
-    atomic_int replicas; /* authenticated, streaming (what replica_count reports) */
-    atomic_int pending;  /* accepted, not yet authenticated */
+    atomic_int
+        replicas; /* authenticated, streaming (what replica_count reports) */
+    atomic_int pending; /* accepted, not yet authenticated */
     /* Live connection sockets (pending + established), so stop() can wake them
      * (shutdown) and wait for them to exit before the source — and then the log
      * — is freed. */
@@ -84,7 +86,10 @@ struct ReplicationSource {
 static int src_track(ReplicationSource *s, int fd) {
     int ok = 0;
     pthread_mutex_lock(&s->lock);
-    if (s->conn_n < REPL_CONN_SLOTS) { s->conn_fds[s->conn_n++] = fd; ok = 1; }
+    if (s->conn_n < REPL_CONN_SLOTS) {
+        s->conn_fds[s->conn_n++] = fd;
+        ok = 1;
+    }
     pthread_mutex_unlock(&s->lock);
     return ok;
 }
@@ -116,13 +121,18 @@ static int send_msg(int fd, uint8_t type, uint64_t offset, const uint8_t *pay,
     h[4] = type;
     aegis_put_u64le(h + 5, offset);
     aegis_put_u32le(h + 13, len);
-    if (net_write_all(fd, h, MSG_HDR) != 0) return -1;
-    if (len && net_write_all(fd, pay, len) != 0) return -1;
+    if (net_write_all(fd, h, MSG_HDR) != 0)
+        return -1;
+    if (len && net_write_all(fd, pay, len) != 0)
+        return -1;
     return 0;
 }
 
 /* Per-connection streamer: handshake, then tail the log frame by frame. */
-struct stream_ctx { ReplicationSource *s; int fd; };
+struct stream_ctx {
+    ReplicationSource *s;
+    int fd;
+};
 
 static void *streamer(void *arg) {
     struct stream_ctx *c = arg;
@@ -142,10 +152,11 @@ static void *streamer(void *arg) {
 
     char line[512];
     if (net_read_line(fd, line, sizeof line,
-                           net_mono_ms() + HANDSHAKE_TIMEOUT_SEC * 1000ULL) < 0)
+                      net_mono_ms() + HANDSHAKE_TIMEOUT_SEC * 1000ULL) < 0)
         goto done;
     cJSON *req = cJSON_Parse(line);
-    if (!req) goto done;
+    if (!req)
+        goto done;
     const cJSON *jtok = cJSON_GetObjectItemCaseSensitive(req, "token");
     const cJSON *joff = cJSON_GetObjectItemCaseSensitive(req, "from_offset");
     const cJSON *jgen = cJSON_GetObjectItemCaseSensitive(req, "generation");
@@ -177,9 +188,11 @@ static void *streamer(void *arg) {
     if (db->config.encryption_enabled)
         config_key_fingerprint(db->config.encryption_key, own_fp);
     if (strcmp(req_fp, own_fp) != 0) {
-        (void)net_write_str(fd, "{\"ok\":false,\"error\":\"encryption key mismatch\"}\n");
+        (void)net_write_str(
+            fd, "{\"ok\":false,\"error\":\"encryption key mismatch\"}\n");
         cJSON_Delete(req);
-        LOG_WARN("replication: subscriber rejected (encryption key/mode mismatch)");
+        LOG_WARN(
+            "replication: subscriber rejected (encryption key/mode mismatch)");
         goto done;
     }
     cJSON_Delete(req);
@@ -199,7 +212,8 @@ static void *streamer(void *arg) {
      * the longer post-auth timeout rather than the tight handshake one. */
     net_set_timeouts(fd, STREAM_TIMEOUT_SEC);
 
-    uint64_t cur_gen = atomic_load_explicit(&db->log_generation, memory_order_relaxed);
+    uint64_t cur_gen =
+        atomic_load_explicit(&db->log_generation, memory_order_relaxed);
     uint64_t logsz = log_size_locked(db);
     int reset = (req_gen != cur_gen) || (from_off > logsz);
     uint64_t cursor = reset ? 0 : from_off;
@@ -208,7 +222,8 @@ static void *streamer(void *arg) {
     int rl = snprintf(resp, sizeof resp,
                       "{\"ok\":true,\"generation\":%llu,\"reset\":%s}\n",
                       (unsigned long long)cur_gen, reset ? "true" : "false");
-    if (net_write_all(fd, resp, (size_t)rl) != 0) goto done;
+    if (net_write_all(fd, resp, (size_t)rl) != 0)
+        goto done;
 
     LOG_INFO("replication: replica subscribed from offset %llu (reset=%d)",
              (unsigned long long)cursor, reset);
@@ -238,15 +253,16 @@ static void *streamer(void *arg) {
             /* log_lock excludes compaction's log swap; re-check the generation
              * under it so we never read a stale offset from a swapped log. */
             pthread_rwlock_rdlock(&db->log_lock);
-            if (atomic_load_explicit(&db->log_generation, memory_order_relaxed) !=
-                cur_gen) {
+            if (atomic_load_explicit(&db->log_generation,
+                                     memory_order_relaxed) != cur_gen) {
                 pthread_rwlock_unlock(&db->log_lock);
                 (void)send_msg(fd, MSG_RESET, 0, NULL, 0);
                 goto done;
             }
             int rc = log_read(&db->log, cursor, &payload, &plen);
             pthread_rwlock_unlock(&db->log_lock);
-            if (rc != 0) break; /* transient — retry next tick */
+            if (rc != 0)
+                break; /* transient — retry next tick */
             if (send_msg(fd, MSG_FRAME, cursor, payload, (uint32_t)plen) != 0) {
                 free(payload);
                 goto done;
@@ -259,16 +275,20 @@ static void *streamer(void *arg) {
         }
         /* Heartbeat carries the current log size so an idle replica can measure
          * lag and notice a dead primary. */
-        if (send_msg(fd, MSG_HEARTBEAT, size, NULL, 0) != 0) goto done;
-        if (!sent_any) usleep(POLL_MS * 1000);
+        if (send_msg(fd, MSG_HEARTBEAT, size, NULL, 0) != 0)
+            goto done;
+        if (!sent_any)
+            usleep(POLL_MS * 1000);
     }
 done:
     src_untrack(s, fd);
     close(fd);
     /* Release whichever counter still holds this thread; stop() waits on both
      * hitting 0. */
-    if (authed) atomic_fetch_sub(&s->replicas, 1);
-    else atomic_fetch_sub(&s->pending, 1);
+    if (authed)
+        atomic_fetch_sub(&s->replicas, 1);
+    else
+        atomic_fetch_sub(&s->pending, 1);
     LOG_INFO("replication: replica stream ended");
     return NULL;
 }
@@ -280,12 +300,12 @@ static void accept_backoff(int err) {
     static _Atomic uint64_t last_warn_ms;
     uint64_t now = net_mono_ms();
     uint64_t prev = atomic_load_explicit(&last_warn_ms, memory_order_relaxed);
-    if (now - prev >= 1000 &&
-        atomic_compare_exchange_strong_explicit(&last_warn_ms, &prev, now,
-                                                memory_order_relaxed,
-                                                memory_order_relaxed))
+    if (now - prev >= 1000 && atomic_compare_exchange_strong_explicit(
+                                  &last_warn_ms, &prev, now,
+                                  memory_order_relaxed, memory_order_relaxed))
         LOG_WARN("replication: cannot accept replica connections (%s); "
-                 "throttling until a file descriptor frees", strerror(err));
+                 "throttling until a file descriptor frees",
+                 strerror(err));
     nanosleep(&(struct timespec){.tv_sec = 0, .tv_nsec = 20 * 1000 * 1000L},
               NULL);
 }
@@ -297,17 +317,22 @@ static void *acceptor(void *arg) {
         if (fd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
                 continue; /* SO_RCVTIMEO wakeup to re-check stop */
-            if (atomic_load_explicit(&s->stop, memory_order_relaxed)) break;
+            if (atomic_load_explicit(&s->stop, memory_order_relaxed))
+                break;
             if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS ||
                 errno == ENOMEM)
                 accept_backoff(errno); /* fd exhaustion: nap so we don't spin */
             continue;
         }
-        if (atomic_load_explicit(&s->stop, memory_order_relaxed)) { close(fd); break; }
+        if (atomic_load_explicit(&s->stop, memory_order_relaxed)) {
+            close(fd);
+            break;
+        }
         /* Throttle un-authenticated connections: refuse a new one once
          * MAX_PENDING handshakes are already in flight, so a flood can't consume
          * replica slots or threads before proving the token. */
-        if (atomic_load_explicit(&s->pending, memory_order_relaxed) >= MAX_PENDING) {
+        if (atomic_load_explicit(&s->pending, memory_order_relaxed) >=
+            MAX_PENDING) {
             close(fd);
             continue;
         }
@@ -315,7 +340,11 @@ static void *acceptor(void *arg) {
         /* Count (as pending) + track before creating the thread so stop() (which
          * joins the acceptor first, then waits for the counts) never races a
          * starting streamer. The streamer flips pending->replicas on auth. */
-        if (!c || !src_track(s, fd)) { free(c); close(fd); continue; }
+        if (!c || !src_track(s, fd)) {
+            free(c);
+            close(fd);
+            continue;
+        }
         atomic_fetch_add(&s->pending, 1);
         c->s = s;
         c->fd = fd;
@@ -335,13 +364,18 @@ static void *acceptor(void *arg) {
 ReplicationSource *replication_source_start(AegisDB *db, int port,
                                             const char *token) {
     ReplicationSource *s = calloc(1, sizeof *s);
-    if (!s) return NULL;
+    if (!s)
+        return NULL;
     s->db = db;
     sha256(token ? token : "", token ? strlen(token) : 0, s->token_hash);
     pthread_mutex_init(&s->lock, NULL);
 
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) { pthread_mutex_destroy(&s->lock); free(s); return NULL; }
+    if (fd < 0) {
+        pthread_mutex_destroy(&s->lock);
+        free(s);
+        return NULL;
+    }
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     struct sockaddr_in addr = {0};
@@ -372,7 +406,8 @@ ReplicationSource *replication_source_start(AegisDB *db, int port,
 }
 
 void replication_source_stop(ReplicationSource *s) {
-    if (!s) return;
+    if (!s)
+        return;
     atomic_store(&s->stop, 1);
     /* Join the acceptor first: after this no new streamer is created, so the
      * replica count + fd set are stable. */
@@ -380,13 +415,15 @@ void replication_source_stop(ReplicationSource *s) {
     close(s->listen_fd);
     /* Wake every live streamer so its blocking send/recv returns promptly. */
     pthread_mutex_lock(&s->lock);
-    for (int i = 0; i < s->conn_n; i++) shutdown(s->conn_fds[i], SHUT_RDWR);
+    for (int i = 0; i < s->conn_n; i++)
+        shutdown(s->conn_fds[i], SHUT_RDWR);
     pthread_mutex_unlock(&s->lock);
     /* Wait for all connections — established replicas AND in-flight handshakes —
      * to finish before freeing the source (and, in the caller, before db_close
      * closes the log they read via pread). The shutdown() above wakes any thread
      * blocked in recv/send so this drains promptly. */
-    while (atomic_load(&s->replicas) + atomic_load(&s->pending) > 0) usleep(1000);
+    while (atomic_load(&s->replicas) + atomic_load(&s->pending) > 0)
+        usleep(1000);
     pthread_mutex_destroy(&s->lock);
     free(s);
 }
@@ -406,8 +443,10 @@ struct ReplicationFollower {
     atomic_int stop;
     atomic_int connected;
     atomic_uint_fast64_t primary_size;
-    atomic_uint_fast64_t applied; /* local applied offset (published for stats) */
-    uint64_t gen; /* last generation synced from the primary (follower-thread only) */
+    atomic_uint_fast64_t
+        applied; /* local applied offset (published for stats) */
+    uint64_t
+        gen; /* last generation synced from the primary (follower-thread only) */
 };
 
 /* Wipe the replica back to empty (primary compacted / desync). */
@@ -428,7 +467,8 @@ static void follow_session(ReplicationFollower *f) {
     char portstr[16];
     snprintf(portstr, sizeof portstr, "%d", f->port);
     int fd = net_dial(f->host, portstr);
-    if (fd < 0) return;
+    if (fd < 0)
+        return;
     /* Short read timeout so a dead primary doesn't stall shutdown for long (the
      * follower thread is joined on stop). Healthy streams send heartbeats every
      * poll cycle, so reads return well within this. */
@@ -442,17 +482,27 @@ static void follow_session(ReplicationFollower *f) {
     if (db->config.encryption_enabled)
         config_key_fingerprint(db->config.encryption_key, own_fp);
     char hs[320];
-    int hl = snprintf(hs, sizeof hs,
-                      "{\"from_offset\":%llu,\"generation\":%llu,\"token\":\"%s\","
-                      "\"key_fingerprint\":\"%s\"}\n",
-                      (unsigned long long)from_off, (unsigned long long)f->gen,
-                      f->token, own_fp);
-    if (net_write_all(fd, hs, (size_t)hl) != 0) { close(fd); return; }
+    int hl =
+        snprintf(hs, sizeof hs,
+                 "{\"from_offset\":%llu,\"generation\":%llu,\"token\":\"%s\","
+                 "\"key_fingerprint\":\"%s\"}\n",
+                 (unsigned long long)from_off, (unsigned long long)f->gen,
+                 f->token, own_fp);
+    if (net_write_all(fd, hs, (size_t)hl) != 0) {
+        close(fd);
+        return;
+    }
 
     char resp[256];
-    if (net_read_line(fd, resp, sizeof resp, 0) < 0) { close(fd); return; }
+    if (net_read_line(fd, resp, sizeof resp, 0) < 0) {
+        close(fd);
+        return;
+    }
     cJSON *r = cJSON_Parse(resp);
-    if (!r) { close(fd); return; }
+    if (!r) {
+        close(fd);
+        return;
+    }
     int ok = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "ok"));
     int reset = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "reset"));
     const cJSON *jg = cJSON_GetObjectItemCaseSensitive(r, "generation");
@@ -460,7 +510,8 @@ static void follow_session(ReplicationFollower *f) {
     char err[64] = "check token";
     if (cJSON_IsString(jerr))
         snprintf(err, sizeof err, "%s", jerr->valuestring);
-    if (cJSON_IsNumber(jg)) f->gen = (uint64_t)jg->valuedouble;
+    if (cJSON_IsNumber(jg))
+        f->gen = (uint64_t)jg->valuedouble;
     int rejected = !ok;
     cJSON_Delete(r);
     if (rejected) {
@@ -479,7 +530,8 @@ static void follow_session(ReplicationFollower *f) {
 
     uint8_t hdr[MSG_HDR];
     while (!atomic_load_explicit(&f->stop, memory_order_relaxed)) {
-        if (net_read_full(fd, hdr, MSG_HDR) != 0) break; /* timeout / drop */
+        if (net_read_full(fd, hdr, MSG_HDR) != 0)
+            break; /* timeout / drop */
         if (aegis_get_u32le(hdr) != REPL_MAGIC) {
             LOG_ERROR("replication: bad stream magic; dropping connection");
             break;
@@ -493,7 +545,8 @@ static void follow_session(ReplicationFollower *f) {
             continue;
         }
         if (type == MSG_RESET) {
-            LOG_INFO("replication: reset from primary (compaction); re-bootstrapping");
+            LOG_INFO("replication: reset from primary (compaction); "
+                     "re-bootstrapping");
             follower_reset(f);
             break; /* reconnect and re-subscribe from 0 */
         }
@@ -502,21 +555,27 @@ static void follow_session(ReplicationFollower *f) {
             break;
         }
         uint8_t *payload = malloc(len);
-        if (!payload) break;
-        if (net_read_full(fd, payload, len) != 0) { free(payload); break; }
+        if (!payload)
+            break;
+        if (net_read_full(fd, payload, len) != 0) {
+            free(payload);
+            break;
+        }
 
         pthread_rwlock_wrlock(&db->index_lock);
         uint64_t expected = (uint64_t)db->log.size;
         if (offset != expected) {
             pthread_rwlock_unlock(&db->index_lock);
             free(payload);
-            LOG_ERROR("replication: offset desync (got %llu, at %llu); reconnecting",
-                      (unsigned long long)offset, (unsigned long long)expected);
+            LOG_ERROR(
+                "replication: offset desync (got %llu, at %llu); reconnecting",
+                (unsigned long long)offset, (unsigned long long)expected);
             break;
         }
         uint64_t off = 0;
         int arc = log_append(&db->log, payload, len, &off);
-        if (arc == 0) arc = db_replica_apply(db, off, payload, len);
+        if (arc == 0)
+            arc = db_replica_apply(db, off, payload, len);
         uint64_t new_applied = (uint64_t)db->log.size;
         pthread_rwlock_unlock(&db->index_lock);
         free(payload);
@@ -536,7 +595,8 @@ static void *follower_loop(void *arg) {
     ReplicationFollower *f = arg;
     while (!atomic_load_explicit(&f->stop, memory_order_relaxed)) {
         follow_session(f);
-        if (atomic_load_explicit(&f->stop, memory_order_relaxed)) break;
+        if (atomic_load_explicit(&f->stop, memory_order_relaxed))
+            break;
         sleep(1); /* backoff before reconnecting */
     }
     return NULL;
@@ -545,7 +605,8 @@ static void *follower_loop(void *arg) {
 ReplicationFollower *replication_follower_start(AegisDB *db, const char *host,
                                                 int port, const char *token) {
     ReplicationFollower *f = calloc(1, sizeof *f);
-    if (!f) return NULL;
+    if (!f)
+        return NULL;
     f->db = db;
     f->port = port;
     snprintf(f->host, sizeof f->host, "%s", host);
@@ -559,7 +620,8 @@ ReplicationFollower *replication_follower_start(AegisDB *db, const char *host,
 }
 
 void replication_follower_stop(ReplicationFollower *f) {
-    if (!f) return;
+    if (!f)
+        return;
     atomic_store(&f->stop, 1);
     pthread_join(f->thread, NULL);
     free(f);
@@ -567,8 +629,12 @@ void replication_follower_stop(ReplicationFollower *f) {
 
 void replication_follower_status(ReplicationFollower *f, uint64_t *applied,
                                  uint64_t *primary_size, int *connected) {
-    if (!f) return;
-    if (applied) *applied = atomic_load(&f->applied);
-    if (primary_size) *primary_size = atomic_load(&f->primary_size);
-    if (connected) *connected = atomic_load(&f->connected);
+    if (!f)
+        return;
+    if (applied)
+        *applied = atomic_load(&f->applied);
+    if (primary_size)
+        *primary_size = atomic_load(&f->primary_size);
+    if (connected)
+        *connected = atomic_load(&f->connected);
 }

@@ -24,8 +24,10 @@ static void transform(uint32_t s[8], const uint8_t p[64]) {
         w[i] = ((uint32_t)p[i * 4] << 24) | ((uint32_t)p[i * 4 + 1] << 16) |
                ((uint32_t)p[i * 4 + 2] << 8) | (uint32_t)p[i * 4 + 3];
     for (int i = 16; i < 64; i++) {
-        uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
-        uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        uint32_t s0 =
+            rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        uint32_t s1 =
+            rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
         w[i] = w[i - 16] + s0 + w[i - 7] + s1;
     }
     uint32_t a = s[0], b = s[1], c = s[2], d = s[3];
@@ -37,11 +39,23 @@ static void transform(uint32_t s[8], const uint8_t p[64]) {
         uint32_t S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
         uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
         uint32_t t2 = S0 + maj;
-        h = g; g = f; f = e; e = d + t1;
-        d = c; c = b; b = a; a = t1 + t2;
+        h = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
     }
-    s[0] += a; s[1] += b; s[2] += c; s[3] += d;
-    s[4] += e; s[5] += f; s[6] += g; s[7] += h;
+    s[0] += a;
+    s[1] += b;
+    s[2] += c;
+    s[3] += d;
+    s[4] += e;
+    s[5] += f;
+    s[6] += g;
+    s[7] += h;
 }
 
 void sha256(const void *data, size_t len, uint8_t out[SHA256_DIGEST_LEN]) {
@@ -64,7 +78,8 @@ void sha256(const void *data, size_t len, uint8_t out[SHA256_DIGEST_LEN]) {
     for (int i = 0; i < 8; i++)
         buf[padlen - 1 - i] = (uint8_t)(bits >> (8 * i));
     transform(s, buf);
-    if (padlen == 128) transform(s, buf + 64);
+    if (padlen == 128)
+        transform(s, buf + 64);
     for (int i = 0; i < 8; i++) {
         out[i * 4] = (uint8_t)(s[i] >> 24);
         out[i * 4 + 1] = (uint8_t)(s[i] >> 16);

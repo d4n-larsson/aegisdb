@@ -221,6 +221,24 @@ DEPS += $(FUZZ_CORE_OBJ:.o=.d) $(FUZZ_CJSON_OBJ:.o=.d)
 # Run the full suite: C unit tests + protocol contract tests.
 check: test integration
 
+# ---------------------------------------------------------------------------
+# Formatting: clang-format enforces the canonical C style (see .clang-format).
+# Pin to the CI version to avoid cross-version drift:
+#   python3 -m venv .venv && .venv/bin/pip install clang-format==$(CLANG_FORMAT_VERSION)
+#   make format CLANG_FORMAT=.venv/bin/clang-format
+# `format` rewrites in place; `format-check` fails if anything is unformatted.
+# ---------------------------------------------------------------------------
+CLANG_FORMAT         ?= clang-format
+CLANG_FORMAT_VERSION := 22.1.8
+FORMAT_SRC := $(shell find src include tests/unit -name '*.c' -o -name '*.h')
+
+.PHONY: format format-check
+format:
+	$(CLANG_FORMAT) -i $(FORMAT_SRC)
+
+format-check:
+	$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_SRC)
+
 clean:
 	rm -rf $(BUILD)
 
