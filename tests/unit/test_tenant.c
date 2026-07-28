@@ -53,12 +53,16 @@ static void test_would_exceed(void) {
     TEST_ASSERT_EQUAL_INT(0, tenant_usage_would_exceed(t, "acme", 1, 0, 3, 0));
     TEST_ASSERT_EQUAL_INT(0, tenant_usage_would_exceed(t, "acme", 1, 0, 0, 0));
     /* byte cap */
-    TEST_ASSERT_EQUAL_INT(-1, tenant_usage_would_exceed(t, "acme", 0, 50, 0, 200));
-    TEST_ASSERT_EQUAL_INT(0, tenant_usage_would_exceed(t, "acme", 0, 50, 0, 300));
+    TEST_ASSERT_EQUAL_INT(-1,
+                          tenant_usage_would_exceed(t, "acme", 0, 50, 0, 200));
+    TEST_ASSERT_EQUAL_INT(0,
+                          tenant_usage_would_exceed(t, "acme", 0, 50, 0, 300));
     /* a shrink (non-positive add) never exceeds */
-    TEST_ASSERT_EQUAL_INT(0, tenant_usage_would_exceed(t, "acme", -1, -50, 1, 1));
+    TEST_ASSERT_EQUAL_INT(0,
+                          tenant_usage_would_exceed(t, "acme", -1, -50, 1, 1));
     /* an unknown tenant starts at 0 usage */
-    TEST_ASSERT_EQUAL_INT(0, tenant_usage_would_exceed(t, "new", 1, 100, 5, 500));
+    TEST_ASSERT_EQUAL_INT(0,
+                          tenant_usage_would_exceed(t, "new", 1, 100, 5, 500));
 
     tenant_table_free(t);
 }
@@ -73,8 +77,9 @@ static void test_rate_bucket(void) {
     int allowed = 0;
     for (int i = 0; i < 10; i++)
         allowed += tenant_rate_allow(t, "acme", qps, burst, now);
-    TEST_ASSERT_EQUAL_INT(10, allowed);              /* full bucket spent */
-    TEST_ASSERT_EQUAL_INT(0, tenant_rate_allow(t, "acme", qps, burst, now)); /* empty */
+    TEST_ASSERT_EQUAL_INT(10, allowed); /* full bucket spent */
+    TEST_ASSERT_EQUAL_INT(
+        0, tenant_rate_allow(t, "acme", qps, burst, now)); /* empty */
 
     /* +0.5s at 10 qps refills ~5 tokens */
     now += 500000;

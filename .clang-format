@@ -1,0 +1,13 @@
+# Canonical C formatting for AegisDB, enforced in CI (see docs/conventions.md).
+# LLVM base — attach braces, right-aligned pointers (`char *p`), K&R spacing —
+# with the project's long-standing 4-space indent and 80-column width.
+# Comment reflowing is off so existing `/* */` comments aren't re-wrapped.
+---
+Language: Cpp
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 80
+ReflowComments: false
+...

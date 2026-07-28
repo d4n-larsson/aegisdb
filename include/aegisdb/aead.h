@@ -19,9 +19,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define AEAD_KEY_LEN 32   /* 256-bit key */
-#define AEAD_NONCE_LEN 24 /* 192-bit XChaCha20 nonce (safe to choose at random) */
-#define AEAD_TAG_LEN 16   /* Poly1305 authentication tag */
+#define AEAD_KEY_LEN 32 /* 256-bit key */
+#define AEAD_NONCE_LEN                                                         \
+    24                  /* 192-bit XChaCha20 nonce (safe to choose at random) */
+#define AEAD_TAG_LEN 16 /* Poly1305 authentication tag */
 
 /* Encrypt `pt` (pt_len bytes) under `key`/`nonce`, authenticating both the
  * ciphertext and `aad` (aad_len bytes; may be NULL/0). Writes pt_len ciphertext

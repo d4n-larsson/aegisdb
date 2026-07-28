@@ -47,7 +47,8 @@ static void ameta_encode(uint8_t buf[AMETA_SIZE], uint64_t next_id) {
 /* Decode a 32-byte AMETA payload. Returns 0 and writes *next_id on a valid
  * magic; -1 otherwise. */
 static int ameta_decode(const uint8_t buf[AMETA_SIZE], uint64_t *next_id) {
-    if (memcmp(buf, "AMETA", 5) != 0) return -1;
+    if (memcmp(buf, "AMETA", 5) != 0)
+        return -1;
     memcpy(next_id, buf + 9, 8);
     return 0;
 }
@@ -109,8 +110,9 @@ int db_checkpoint(AegisDB *db) {
  *
  * Returns 1 if a graph was built and installed, 0 if there was nothing to do,
  * -1 on failure (the dense array remains authoritative and it retries later). */
-#define SEM_BUILD_COMMIT_MAX 512 /* deltas small enough to replay under the lock */
-#define SEM_BUILD_MAX_ROUNDS 16  /* off-lock catch-up rounds before giving up */
+#define SEM_BUILD_COMMIT_MAX                                                   \
+    512 /* deltas small enough to replay under the lock */
+#define SEM_BUILD_MAX_ROUNDS 16 /* off-lock catch-up rounds before giving up */
 
 static void build_abort_locked(AegisDB *db, SemBuildJob *job) {
     pthread_rwlock_wrlock(&db->index_lock);
@@ -119,20 +121,23 @@ static void build_abort_locked(AegisDB *db, SemBuildJob *job) {
 }
 
 int db_semantic_build_step(AegisDB *db) {
-    if (!db->sem) return 0;
+    if (!db->sem)
+        return 0;
 
     /* Phase 1: cheap poll under the read lock. */
     pthread_rwlock_rdlock(&db->index_lock);
     int pending = semantic_index_needs_build(db->sem);
     pthread_rwlock_unlock(&db->index_lock);
-    if (!pending) return 0;
+    if (!pending)
+        return 0;
 
     /* Phase 2: snapshot the dense vectors, enter building mode. */
     pthread_rwlock_wrlock(&db->index_lock);
     SemBuildJob *job = semantic_index_build_begin(db->sem);
     size_t snap_n = semantic_index_count(db->sem);
     pthread_rwlock_unlock(&db->index_lock);
-    if (!job) return 0; /* raced away / OOM: retry next tick */
+    if (!job)
+        return 0; /* raced away / OOM: retry next tick */
 
     LOG_INFO("semantic index: building HNSW graph from %zu vectors off-lock",
              snap_n);
@@ -155,7 +160,8 @@ int db_semantic_build_step(AegisDB *db) {
     for (int round = 0; round < SEM_BUILD_MAX_ROUNDS; round++) {
         pthread_rwlock_wrlock(&db->index_lock);
         int failed = semantic_index_build_failed(db->sem);
-        size_t took = failed ? 0 : semantic_index_build_take_deltas(db->sem, job);
+        size_t took =
+            failed ? 0 : semantic_index_build_take_deltas(db->sem, job);
         pthread_rwlock_unlock(&db->index_lock);
 
         if (failed) {
@@ -195,7 +201,8 @@ int db_semantic_build_step(AegisDB *db) {
 int db_replica_apply(AegisDB *db, uint64_t offset, const uint8_t *payload,
                      size_t len) {
     MemoryRecord r;
-    if (record_decode(payload, len, &r) != 0) return -1;
+    if (record_decode(payload, len, &r) != 0)
+        return -1;
 
     /* Diff against the record's prior live version so update/delete drop stale
      * secondary-index entries before the new version is applied. */
@@ -233,14 +240,16 @@ int db_replica_apply(AegisDB *db, uint64_t offset, const uint8_t *payload,
     }
 
     pthread_mutex_lock(&db->id_lock);
-    if (r.id + 1 > db->next_id) db->next_id = r.id + 1;
+    if (r.id + 1 > db->next_id)
+        db->next_id = r.id + 1;
     pthread_mutex_unlock(&db->id_lock);
     record_free(&r);
     return 0;
 }
 
 int db_reset_replica(AegisDB *db) {
-    if (log_truncate(&db->log, 0) != 0) return -1;
+    if (log_truncate(&db->log, 0) != 0)
+        return -1;
     HashIndex *nh = hash_index_create();
     TimeIndex *nt = time_index_create();
     TagIndex *ntag = tag_index_create();
@@ -266,10 +275,13 @@ int db_reset_replica(AegisDB *db) {
 /* A snapshot name becomes a single path component under snapshots/, so it must
  * be non-empty and free of separators or dot-traversal. */
 static int snapshot_name_ok(const char *name) {
-    if (!name || !*name) return 0;
-    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return 0;
+    if (!name || !*name)
+        return 0;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+        return 0;
     for (const char *p = name; *p; p++)
-        if (*p == '/' || *p == '\\') return 0;
+        if (*p == '/' || *p == '\\')
+            return 0;
     return 1;
 }
 
@@ -277,20 +289,30 @@ static int snapshot_name_ok(const char *name) {
  * offset untouched, so concurrent appends (which pwrite past `n`) are safe. */
 static int copy_log_prefix(int src_fd, const char *dst_path, uint64_t n) {
     FILE *dst = fopen(dst_path, "wbe");
-    if (!dst) return -1;
+    if (!dst)
+        return -1;
     char buf[AEGIS_IO_BUF_SIZE];
     uint64_t done = 0;
     int ok = 1;
     while (done < n) {
         size_t want = n - done < sizeof(buf) ? (size_t)(n - done) : sizeof(buf);
         ssize_t got = pread(src_fd, buf, want, (off_t)done);
-        if (got <= 0) { ok = 0; break; } /* short read: log shrank unexpectedly */
-        if (fwrite(buf, 1, (size_t)got, dst) != (size_t)got) { ok = 0; break; }
+        if (got <= 0) {
+            ok = 0;
+            break;
+        } /* short read: log shrank unexpectedly */
+        if (fwrite(buf, 1, (size_t)got, dst) != (size_t)got) {
+            ok = 0;
+            break;
+        }
         done += (uint64_t)got;
     }
-    if (ok && (fflush(dst) != 0 || fsync(fileno(dst)) != 0)) ok = 0;
-    if (fclose(dst) != 0) ok = 0;
-    if (!ok) unlink(dst_path);
+    if (ok && (fflush(dst) != 0 || fsync(fileno(dst)) != 0))
+        ok = 0;
+    if (fclose(dst) != 0)
+        ok = 0;
+    if (!ok)
+        unlink(dst_path);
     return ok ? 0 : -1;
 }
 
@@ -303,7 +325,8 @@ static int write_meta_file(const char *path, uint64_t nid) {
 }
 
 int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
-    if (!snapshot_name_ok(name)) return DB_SNAPSHOT_BADNAME;
+    if (!snapshot_name_ok(name))
+        return DB_SNAPSHOT_BADNAME;
 
     char dir[AEGIS_PATH_MAX];
     snprintf(dir, sizeof(dir), "%s/snapshots/%s", db->config.data_dir, name);
@@ -324,7 +347,8 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
     pthread_rwlock_rdlock(&db->index_lock);
     size_t live = 0;
     for (size_t i = 0; i < db->hash->cap; i++)
-        if (db->hash->buckets[i].used && !db->hash->buckets[i].deleted) live++;
+        if (db->hash->buckets[i].used && !db->hash->buckets[i].deleted)
+            live++;
     pthread_mutex_lock(&db->id_lock);
     uint64_t nid = db->next_id;
     pthread_mutex_unlock(&db->id_lock);
@@ -340,7 +364,8 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
      * every write blocks for the entire duration of the snapshot. */
     pthread_rwlock_unlock(&db->index_lock);
     char logpath[AEGIS_PATH_MAX];
-    if (snprintf(logpath, sizeof(logpath), "%s/memory.log", dir) >= (int)sizeof(logpath)) {
+    if (snprintf(logpath, sizeof(logpath), "%s/memory.log", dir) >=
+        (int)sizeof(logpath)) {
         pthread_rwlock_unlock(&db->log_lock);
         LOG_ERROR("snapshot: directory path too long");
         return DB_SNAPSHOT_ERR;
@@ -354,7 +379,8 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
     }
 
     char metapath[AEGIS_PATH_MAX];
-    if (snprintf(metapath, sizeof(metapath), "%s/metadata.db", dir) >= (int)sizeof(metapath)) {
+    if (snprintf(metapath, sizeof(metapath), "%s/metadata.db", dir) >=
+        (int)sizeof(metapath)) {
         LOG_ERROR("snapshot: directory path too long");
         return DB_SNAPSHOT_ERR;
     }
@@ -376,26 +402,29 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
     }
     char manifest[AEGIS_PATH_MAX];
     char man[768]; /* manifest JSON content (not a path) */
-    int mn = snprintf(man, sizeof(man),
-                      "{\"format\":1,\"created_ms\":%llu,\"version\":\"%s\","
-                      "\"log_size\":%llu,\"record_count\":%zu,\"next_id\":%llu,"
-                      "\"embedding_dim\":%zu%s}\n",
-                      (unsigned long long)created, AEGIS_VERSION_STRING,
-                      (unsigned long long)covered, live,
-                      (unsigned long long)nid, db->config.embedding_dimensions,
-                      enc_fields);
+    int mn =
+        snprintf(man, sizeof(man),
+                 "{\"format\":1,\"created_ms\":%llu,\"version\":\"%s\","
+                 "\"log_size\":%llu,\"record_count\":%zu,\"next_id\":%llu,"
+                 "\"embedding_dim\":%zu%s}\n",
+                 (unsigned long long)created, AEGIS_VERSION_STRING,
+                 (unsigned long long)covered, live, (unsigned long long)nid,
+                 db->config.embedding_dimensions, enc_fields);
     if (mn < 0 || (size_t)mn >= sizeof(man)) {
         LOG_ERROR("snapshot: manifest too large");
         return DB_SNAPSHOT_ERR; /* truncated: mn would over-read man in fwrite */
     }
-    if (snprintf(manifest, sizeof(manifest), "%s/manifest.json", dir) >= (int)sizeof(manifest)) {
+    if (snprintf(manifest, sizeof(manifest), "%s/manifest.json", dir) >=
+        (int)sizeof(manifest)) {
         LOG_ERROR("snapshot: directory path too long");
         return DB_SNAPSHOT_ERR;
     }
     FILE *mf = fopen(manifest, "wbe");
     int mok = (mf && fwrite(man, 1, (size_t)mn, mf) == (size_t)mn);
-    if (mok && (fflush(mf) != 0 || fsync(fileno(mf)) != 0)) mok = 0;
-    if (mf && fclose(mf) != 0) mok = 0;
+    if (mok && (fflush(mf) != 0 || fsync(fileno(mf)) != 0))
+        mok = 0;
+    if (mf && fclose(mf) != 0)
+        mok = 0;
     if (!mok) {
         unlink(manifest);
         LOG_ERROR("snapshot: manifest write failed (%s)", manifest);
@@ -425,7 +454,8 @@ int db_snapshot(AegisDB *db, const char *name, DbSnapshotInfo *out) {
  * a high-water mark used as a floor at recovery so next_id can't regress. */
 static uint64_t load_metadata_next_id(const char *path) {
     FILE *f = fopen(path, "rbe");
-    if (!f) return 0;
+    if (!f)
+        return 0;
     uint8_t buf[AMETA_SIZE];
     uint64_t nid = 0;
     if (fread(buf, 1, sizeof(buf), f) == sizeof(buf))
@@ -435,7 +465,8 @@ static uint64_t load_metadata_next_id(const char *path) {
 }
 
 static void free_token_array(AuthToken *toks, size_t n) {
-    if (!toks) return;
+    if (!toks)
+        return;
     for (size_t i = 0; i < n; i++) {
         free(toks[i].token);
         free(toks[i].namespace);
@@ -446,7 +477,8 @@ static void free_token_array(AuthToken *toks, size_t n) {
 /* Initialize the four db locks, unwinding any already created if one fails.
  * Returns 0 on success, -1 on failure (nothing left initialized). */
 static int init_db_locks(AegisDB *db) {
-    if (pthread_mutex_init(&db->id_lock, NULL) != 0) return -1;
+    if (pthread_mutex_init(&db->id_lock, NULL) != 0)
+        return -1;
     if (pthread_rwlock_init(&db->index_lock, NULL) != 0) {
         pthread_mutex_destroy(&db->id_lock);
         return -1;
@@ -490,10 +522,12 @@ static int dup_token_array(AegisDB *db, const Config *cfg) {
         return 0;
     }
     AuthToken *copy = calloc(cfg->auth_token_count, sizeof(AuthToken));
-    if (!copy) return -1;
+    if (!copy)
+        return -1;
     size_t i = 0;
     for (; i < cfg->auth_token_count; i++) {
-        copy[i] = cfg->auth_tokens[i]; /* hash[], hashed, scope; dup ptrs below */
+        copy[i] =
+            cfg->auth_tokens[i]; /* hash[], hashed, scope; dup ptrs below */
         copy[i].token = NULL;
         copy[i].namespace = NULL;
         if (cfg->auth_tokens[i].token &&
@@ -524,7 +558,8 @@ int db_open(AegisDB *db, const Config *cfg) {
               "fsync-batch %zu)",
               cfg->data_dir, cfg->embedding_dimensions, cfg->working_capacity,
               cfg->fsync_batch_size);
-    snprintf(db->path_log, sizeof(db->path_log), "%s/memory.log", cfg->data_dir);
+    snprintf(db->path_log, sizeof(db->path_log), "%s/memory.log",
+             cfg->data_dir);
     snprintf(db->path_index, sizeof(db->path_index), "%s/memory.index",
              cfg->data_dir);
     snprintf(db->path_meta, sizeof(db->path_meta), "%s/metadata.db",
@@ -532,10 +567,13 @@ int db_open(AegisDB *db, const Config *cfg) {
     snprintf(db->path_sem, sizeof(db->path_sem), "%s/memory.sem",
              cfg->data_dir);
 
-    if (init_db_locks(db) != 0) return -1;
-    if (dup_token_array(db, cfg) != 0) goto fail_locks;
+    if (init_db_locks(db) != 0)
+        return -1;
+    if (dup_token_array(db, cfg) != 0)
+        goto fail_locks;
 
-    const uint8_t *log_key = cfg->encryption_enabled ? cfg->encryption_key : NULL;
+    const uint8_t *log_key =
+        cfg->encryption_enabled ? cfg->encryption_key : NULL;
     LogOpenStatus log_st;
     if (log_open(&db->log, db->path_log, config_effective_fsync_batch(cfg),
                  log_key, &log_st) != 0) {
@@ -574,7 +612,8 @@ int db_open(AegisDB *db, const Config *cfg) {
     if (meta_next > db->next_id) {
         LOG_WARN("next_id from log scan (%llu) is below metadata high-water "
                  "(%llu); using the latter to avoid id reuse",
-                 (unsigned long long)db->next_id, (unsigned long long)meta_next);
+                 (unsigned long long)db->next_id,
+                 (unsigned long long)meta_next);
         db->next_id = meta_next;
     }
 

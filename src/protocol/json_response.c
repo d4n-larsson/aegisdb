@@ -8,14 +8,16 @@
 
 cJSON *json_record(const MemoryRecord *r, int include_embeddings) {
     cJSON *o = cJSON_CreateObject();
-    if (!o) return NULL;
+    if (!o)
+        return NULL;
     cJSON_AddNumberToObject(o, "id", (double)r->id);
     cJSON_AddStringToObject(o, "type", memory_type_to_string(r->type));
     cJSON_AddNumberToObject(o, "created", (double)r->created);
     cJSON_AddNumberToObject(o, "updated", (double)r->updated);
     cJSON_AddNumberToObject(o, "importance", r->importance);
     cJSON_AddNumberToObject(o, "confidence", r->confidence);
-    if (r->agent_id) cJSON_AddStringToObject(o, "agent_id", r->agent_id);
+    if (r->agent_id)
+        cJSON_AddStringToObject(o, "agent_id", r->agent_id);
 
     cJSON *tags = cJSON_AddArrayToObject(o, "tags");
     for (size_t i = 0; i < r->tag_count; i++)
@@ -35,7 +37,8 @@ cJSON *json_record(const MemoryRecord *r, int include_embeddings) {
             cJSON *vec = cJSON_CreateArray();
             for (size_t i = 0; i < r->embedding_dim; i++)
                 cJSON_AddItemToArray(
-                    vec, cJSON_CreateNumber(r->embedding[v * r->embedding_dim + i]));
+                    vec,
+                    cJSON_CreateNumber(r->embedding[v * r->embedding_dim + i]));
             cJSON_AddItemToArray(embs, vec);
         }
     }
@@ -57,7 +60,8 @@ cJSON *json_record(const MemoryRecord *r, int include_embeddings) {
     /* data is sent as a UTF-8 string (wire protocol is JSON/text). */
     char *s = malloc(r->data_len + 1);
     if (s) {
-        if (r->data_len) memcpy(s, r->data, r->data_len);
+        if (r->data_len)
+            memcpy(s, r->data, r->data_len);
         s[r->data_len] = '\0';
         cJSON_AddStringToObject(o, "data", s);
         free(s);
@@ -67,13 +71,15 @@ cJSON *json_record(const MemoryRecord *r, int include_embeddings) {
 
 cJSON *json_ok(void) {
     cJSON *o = cJSON_CreateObject();
-    if (o) cJSON_AddBoolToObject(o, "ok", 1);
+    if (o)
+        cJSON_AddBoolToObject(o, "ok", 1);
     return o;
 }
 
 cJSON *json_error(const char *code, const char *message) {
     cJSON *o = cJSON_CreateObject();
-    if (!o) return NULL;
+    if (!o)
+        return NULL;
     cJSON_AddBoolToObject(o, "ok", 0);
     cJSON *err = cJSON_AddObjectToObject(o, "error");
     cJSON_AddStringToObject(err, "code", code);
@@ -86,11 +92,14 @@ cJSON *json_error_status(aegis_status_t status) {
 }
 
 char *json_finish_line(cJSON *resp, const char *request_id, size_t *out_len) {
-    if (!resp) return NULL;
-    if (request_id) cJSON_AddStringToObject(resp, "request_id", request_id);
+    if (!resp)
+        return NULL;
+    if (request_id)
+        cJSON_AddStringToObject(resp, "request_id", request_id);
     char *json = cJSON_PrintUnformatted(resp);
     cJSON_Delete(resp);
-    if (!json) return NULL;
+    if (!json)
+        return NULL;
     size_t n = strlen(json);
     char *line = malloc(n + 2);
     if (!line) {
@@ -101,6 +110,7 @@ char *json_finish_line(cJSON *resp, const char *request_id, size_t *out_len) {
     line[n] = '\n';
     line[n + 1] = '\0';
     free(json);
-    if (out_len) *out_len = n + 1;
+    if (out_len)
+        *out_len = n + 1;
     return line;
 }

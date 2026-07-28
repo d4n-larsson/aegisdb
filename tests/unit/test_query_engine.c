@@ -93,7 +93,8 @@ static void test_insert_get_episodic(void) {
 
 static void test_get_not_found(void) {
     MemoryRecord got;
-    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_get(&g_db, 123456, NULL, &got));
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND,
+                          qe_get(&g_db, 123456, NULL, &got));
 }
 
 static void test_episodic_update_rejected(void) {
@@ -163,7 +164,8 @@ static void test_update_failed_preserves_tag_index(void) {
     /* precondition: searchable by its tag */
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &pt, &recs, &n));
     TEST_ASSERT_EQUAL_size_t(1, n);
-    for (size_t i = 0; i < n; i++) record_free(&recs[i]);
+    for (size_t i = 0; i < n; i++)
+        record_free(&recs[i]);
     free(recs);
     recs = NULL;
 
@@ -243,7 +245,8 @@ static void test_search_by_time_and_tags(void) {
     const char *tagset[] = {"alpha"};
     for (int i = 0; i < 3; i++) {
         MemoryRecord in = make_input(MEM_EPISODIC, "rec");
-        if (i == 0) record_set_tags(&in, tagset, 1);
+        if (i == 0)
+            record_set_tags(&in, tagset, 1);
         MemoryRecord out;
         TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &in, NULL, 0, &out));
         record_free(&out);
@@ -263,7 +266,8 @@ static void test_search_by_time_and_tags(void) {
     size_t n = 0;
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &recs, &n));
     TEST_ASSERT_EQUAL_size_t(3, n);
-    for (size_t i = 0; i < n; i++) record_free(&recs[i]);
+    for (size_t i = 0; i < n; i++)
+        record_free(&recs[i]);
     free(recs);
 
     /* Tag filter -> only the one tagged record. */
@@ -326,7 +330,7 @@ static void test_search_top_k_selection(void) {
         MemoryRecord in = make_input(MEM_SEMANTIC, "v");
         in.embedding = v;
         in.embedding_dim = 3;
-    in.vec_count = 1;
+        in.vec_count = 1;
         MemoryRecord out;
         TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &in, NULL, 0, &out));
         ids[i] = out.id;
@@ -346,7 +350,8 @@ static void test_search_top_k_selection(void) {
     TEST_ASSERT_EQUAL_UINT64(ids[0], recs[0].id);
     TEST_ASSERT_EQUAL_UINT64(ids[1], recs[1].id);
     TEST_ASSERT_EQUAL_UINT64(ids[2], recs[2].id);
-    for (size_t i = 0; i < n; i++) record_free(&recs[i]);
+    for (size_t i = 0; i < n; i++)
+        record_free(&recs[i]);
     free(recs);
 }
 
@@ -379,11 +384,13 @@ static void test_search_filtered_widening(void) {
     MemoryRecord *recs = NULL;
     size_t n = 0;
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &recs, &n));
-    TEST_ASSERT_EQUAL_size_t(3, n); /* found despite being past the over-fetch */
+    TEST_ASSERT_EQUAL_size_t(3,
+                             n); /* found despite being past the over-fetch */
     for (size_t i = 0; i < n; i++) {
         int is_rare = 0;
         for (int j = 0; j < 3; j++)
-            if (recs[i].id == rare[j]) is_rare = 1;
+            if (recs[i].id == rare[j])
+                is_rare = 1;
         TEST_ASSERT_TRUE(is_rare);
         record_free(&recs[i]);
     }
@@ -423,7 +430,8 @@ static void test_search_offset_and_min_score(void) {
     TEST_ASSERT_EQUAL_size_t(2, n);
     TEST_ASSERT_EQUAL_UINT64(ids[0], r[0].id);
     TEST_ASSERT_EQUAL_UINT64(ids[1], r[1].id);
-    for (size_t i = 0; i < n; i++) record_free(&r[i]);
+    for (size_t i = 0; i < n; i++)
+        record_free(&r[i]);
     free(r);
 
     /* page 2 (offset 2): the next two */
@@ -432,7 +440,8 @@ static void test_search_offset_and_min_score(void) {
     TEST_ASSERT_EQUAL_size_t(2, n);
     TEST_ASSERT_EQUAL_UINT64(ids[2], r[0].id);
     TEST_ASSERT_EQUAL_UINT64(ids[3], r[1].id);
-    for (size_t i = 0; i < n; i++) record_free(&r[i]);
+    for (size_t i = 0; i < n; i++)
+        record_free(&r[i]);
     free(r);
 
     /* offset past the end -> empty, clean */
@@ -445,7 +454,8 @@ static void test_search_offset_and_min_score(void) {
     p.offset = 0;
     p.top_k = 10;
     p.has_min_score = 1;
-    p.min_score = 0.95f; /* ids[0] (sim 1.0) and ids[1] (~0.98) qualify; rest not */
+    p.min_score =
+        0.95f; /* ids[0] (sim 1.0) and ids[1] (~0.98) qualify; rest not */
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &r, &n));
     TEST_ASSERT_TRUE(n >= 1 && n <= 2);
     for (size_t i = 0; i < n; i++) {
@@ -462,7 +472,8 @@ static void test_search_offset_and_min_score(void) {
 static void test_search_recency_decay(void) {
     float v[3] = {1.0f, 0.0f, 0.0f}; /* both aligned with the query, same imp */
     uint64_t old_id = insert_vec_tag(&g_db, v, "d");
-    usleep(800000); /* 0.8s so `updated` differs meaningfully vs a ~1s half-life */
+    usleep(
+        800000); /* 0.8s so `updated` differs meaningfully vs a ~1s half-life */
     uint64_t new_id = insert_vec_tag(&g_db, v, "d");
 
     SearchParams p = {0};
@@ -476,7 +487,8 @@ static void test_search_recency_decay(void) {
     size_t n = 0;
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &r, &n));
     TEST_ASSERT_EQUAL_size_t(2, n);
-    for (size_t i = 0; i < n; i++) record_free(&r[i]);
+    for (size_t i = 0; i < n; i++)
+        record_free(&r[i]);
     free(r);
 
     /* with a 1s half-life, the ~0.8s-older record decays to ~0.57 of the fresh
@@ -486,7 +498,8 @@ static void test_search_recency_decay(void) {
     TEST_ASSERT_EQUAL_size_t(2, n);
     TEST_ASSERT_EQUAL_UINT64(new_id, r[0].id);
     TEST_ASSERT_EQUAL_UINT64(old_id, r[1].id);
-    for (size_t i = 0; i < n; i++) record_free(&r[i]);
+    for (size_t i = 0; i < n; i++)
+        record_free(&r[i]);
     free(r);
 }
 
@@ -495,7 +508,8 @@ static uint64_t insert_tag_ns(AegisDB *db, const char *tag, const char *ns) {
     MemoryRecord in = make_input(MEM_EPISODIC, "c");
     const char *tags[] = {tag};
     record_set_tags(&in, tags, 1);
-    if (ns) in.agent_id = strdup(ns);
+    if (ns)
+        in.agent_id = strdup(ns);
     MemoryRecord out;
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(db, &in, NULL, 0, &out));
     uint64_t id = out.id;
@@ -566,7 +580,8 @@ static void test_query_scan_cap_bounds_broad_scan(void) {
     size_t rn = 0;
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &recs, &rn));
     TEST_ASSERT_EQUAL_size_t(2, rn); /* search is bounded too */
-    for (size_t i = 0; i < rn; i++) record_free(&recs[i]);
+    for (size_t i = 0; i < rn; i++)
+        record_free(&recs[i]);
     free(recs);
 
     /* cap 0 = unlimited: full count, not flagged. */
@@ -622,7 +637,8 @@ static void test_ttl_lazy_expiry(void) {
     record_free(&in2);
     record_free(&out2);
     usleep(80000);
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_get(&g_db, id2, NULL, &got)); /* still there */
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_get(&g_db, id2, NULL, &got)); /* still there */
     record_free(&got);
 }
 
@@ -652,7 +668,8 @@ static void test_ttl_sweep_tombstones(void) {
 }
 
 /* Insert a semantic record with an embedding, one tag, and an importance. */
-static uint64_t insert_sem(AegisDB *db, float *emb, const char *tag, float imp) {
+static uint64_t insert_sem(AegisDB *db, float *emb, const char *tag,
+                           float imp) {
     MemoryRecord in = make_input(MEM_SEMANTIC, "s");
     in.embedding = emb; /* borrowed */
     in.embedding_dim = 3;
@@ -663,8 +680,10 @@ static uint64_t insert_sem(AegisDB *db, float *emb, const char *tag, float imp) 
     MemoryRecord out;
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(db, &in, NULL, 0, &out));
     uint64_t id = out.id;
-    in.data = NULL; in.data_len = 0;
-    in.embedding = NULL; in.embedding_dim = 0;
+    in.data = NULL;
+    in.data_len = 0;
+    in.embedding = NULL;
+    in.embedding_dim = 0;
     record_free(&in);
     record_free(&out);
     return id;
@@ -684,8 +703,8 @@ static void test_consolidate(void) {
     uint64_t o = insert_sem(&g_db, other, "w", 0.5f);
 
     size_t clusters = 0, merged = 0;
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
-                          qe_consolidate(&g_db, NULL, 0.95f, &clusters, &merged));
+    TEST_ASSERT_EQUAL_INT(
+        AEGIS_OK, qe_consolidate(&g_db, NULL, 0.95f, &clusters, &merged));
     TEST_ASSERT_EQUAL_size_t(1, clusters); /* the {a,b,c} cluster */
     TEST_ASSERT_EQUAL_size_t(2, merged);   /* two of three tombstoned */
 
@@ -706,13 +725,14 @@ static void test_consolidate(void) {
     TEST_ASSERT_EQUAL_INT(1, alive);
     TEST_ASSERT_EQUAL_UINT64(c, survivor); /* newest updated among a,b,c */
     (void)b;
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_get(&g_db, o, NULL, &r)); /* distinct: kept */
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_get(&g_db, o, NULL, &r)); /* distinct: kept */
     record_free(&r);
 
     /* idempotent: a second pass finds nothing to merge */
     clusters = merged = 0;
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
-                          qe_consolidate(&g_db, NULL, 0.95f, &clusters, &merged));
+    TEST_ASSERT_EQUAL_INT(
+        AEGIS_OK, qe_consolidate(&g_db, NULL, 0.95f, &clusters, &merged));
     TEST_ASSERT_EQUAL_size_t(0, merged);
 }
 
@@ -731,14 +751,16 @@ static void test_forget(void) {
     MemoryRecord keep_in = make_input(MEM_EPISODIC, "critical");
     keep_in.importance = 0.9f; /* high value -> retained */
     MemoryRecord keep_out;
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &keep_in, NULL, 0, &keep_out));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_insert(&g_db, &keep_in, NULL, 0, &keep_out));
     uint64_t keep = keep_out.id;
     record_free(&keep_out);
 
     MemoryRecord sem_in = make_input(MEM_SEMANTIC, "durable fact");
     sem_in.importance = 0.01f; /* low, but protected by type */
     MemoryRecord sem_out;
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &sem_in, NULL, 0, &sem_out));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_insert(&g_db, &sem_in, NULL, 0, &sem_out));
     uint64_t sem = sem_out.id;
     record_free(&sem_out);
 
@@ -747,8 +769,8 @@ static void test_forget(void) {
 
     /* dry_run: reports would-forget, deletes nothing */
     TEST_ASSERT_EQUAL_INT(AEGIS_OK,
-        qe_forget(&g_db, NULL, MEM_EPISODIC, half_life, 0.05f, 1, 0,
-                  &scanned, &forgotten));
+                          qe_forget(&g_db, NULL, MEM_EPISODIC, half_life, 0.05f,
+                                    1, 0, &scanned, &forgotten));
     TEST_ASSERT_EQUAL_size_t(4, scanned);   /* 3 noise + keep */
     TEST_ASSERT_EQUAL_size_t(3, forgotten); /* the 3 low-value */
     MemoryRecord r;
@@ -758,21 +780,24 @@ static void test_forget(void) {
     /* real forget */
     scanned = forgotten = 0;
     TEST_ASSERT_EQUAL_INT(AEGIS_OK,
-        qe_forget(&g_db, NULL, MEM_EPISODIC, half_life, 0.05f, 0, 0,
-                  &scanned, &forgotten));
+                          qe_forget(&g_db, NULL, MEM_EPISODIC, half_life, 0.05f,
+                                    0, 0, &scanned, &forgotten));
     TEST_ASSERT_EQUAL_size_t(3, forgotten);
     for (int i = 0; i < 3; i++)
-        TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_get(&g_db, ep_ids[i], NULL, &r));
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_get(&g_db, keep, NULL, &r)); /* high imp kept */
+        TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND,
+                              qe_get(&g_db, ep_ids[i], NULL, &r));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_get(&g_db, keep, NULL, &r)); /* high imp kept */
     record_free(&r);
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_get(&g_db, sem, NULL, &r)); /* semantic protected */
+    TEST_ASSERT_EQUAL_INT(
+        AEGIS_OK, qe_get(&g_db, sem, NULL, &r)); /* semantic protected */
     record_free(&r);
 
     /* idempotent */
     scanned = forgotten = 0;
     TEST_ASSERT_EQUAL_INT(AEGIS_OK,
-        qe_forget(&g_db, NULL, MEM_EPISODIC, half_life, 0.05f, 0, 0,
-                  &scanned, &forgotten));
+                          qe_forget(&g_db, NULL, MEM_EPISODIC, half_life, 0.05f,
+                                    0, 0, &scanned, &forgotten));
     TEST_ASSERT_EQUAL_size_t(0, forgotten);
 }
 
@@ -799,46 +824,59 @@ static void test_export_and_purge(void) {
     int more = 0;
 
     /* full export */
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_export(&g_db, "alice", 0, 10, &recs, &n, &more));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_export(&g_db, "alice", 0, 10, &recs, &n, &more));
     TEST_ASSERT_EQUAL_size_t(3, n);
     TEST_ASSERT_FALSE(more);
-    for (size_t i = 0; i < n; i++) record_free(&recs[i]);
+    for (size_t i = 0; i < n; i++)
+        record_free(&recs[i]);
     free(recs);
 
     /* pagination */
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_export(&g_db, "alice", 0, 2, &recs, &n, &more));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_export(&g_db, "alice", 0, 2, &recs, &n, &more));
     TEST_ASSERT_EQUAL_size_t(2, n);
     TEST_ASSERT_TRUE(more);
     uint64_t cursor = recs[n - 1].id;
-    for (size_t i = 0; i < n; i++) record_free(&recs[i]);
+    for (size_t i = 0; i < n; i++)
+        record_free(&recs[i]);
     free(recs);
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_export(&g_db, "alice", cursor, 2, &recs, &n, &more));
+    TEST_ASSERT_EQUAL_INT(
+        AEGIS_OK, qe_export(&g_db, "alice", cursor, 2, &recs, &n, &more));
     TEST_ASSERT_EQUAL_size_t(1, n);
-    for (size_t i = 0; i < n; i++) record_free(&recs[i]);
+    for (size_t i = 0; i < n; i++)
+        record_free(&recs[i]);
     free(recs);
 
     /* a global purge is refused */
     size_t c = 0;
-    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_INVALID_REQUEST, qe_purge_namespace(&g_db, NULL, 0, &c));
-    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_INVALID_REQUEST, qe_purge_namespace(&g_db, "", 0, &c));
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_INVALID_REQUEST,
+                          qe_purge_namespace(&g_db, NULL, 0, &c));
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_INVALID_REQUEST,
+                          qe_purge_namespace(&g_db, "", 0, &c));
 
     /* dry-run counts, deletes nothing */
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_purge_namespace(&g_db, "alice", 1, &c));
     TEST_ASSERT_EQUAL_size_t(3, c);
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_export(&g_db, "alice", 0, 10, &recs, &n, &more));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_export(&g_db, "alice", 0, 10, &recs, &n, &more));
     TEST_ASSERT_EQUAL_size_t(3, n);
-    for (size_t i = 0; i < n; i++) record_free(&recs[i]);
+    for (size_t i = 0; i < n; i++)
+        record_free(&recs[i]);
     free(recs);
 
     /* real purge removes exactly alice; bob untouched */
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_purge_namespace(&g_db, "alice", 0, &c));
     TEST_ASSERT_EQUAL_size_t(3, c);
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_export(&g_db, "alice", 0, 10, &recs, &n, &more));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_export(&g_db, "alice", 0, 10, &recs, &n, &more));
     TEST_ASSERT_EQUAL_size_t(0, n);
     free(recs);
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_export(&g_db, "bob", 0, 10, &recs, &n, &more));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_export(&g_db, "bob", 0, 10, &recs, &n, &more));
     TEST_ASSERT_EQUAL_size_t(2, n);
-    for (size_t i = 0; i < n; i++) record_free(&recs[i]);
+    for (size_t i = 0; i < n; i++)
+        record_free(&recs[i]);
     free(recs);
 }
 
@@ -875,7 +913,8 @@ static void test_history_and_as_of(void) {
     TEST_ASSERT_EQUAL_size_t(3, n);
     TEST_ASSERT_EQUAL_MEMORY("v1", vers[0].data, 2);
     TEST_ASSERT_EQUAL_MEMORY("v3", vers[2].data, 2);
-    for (size_t i = 0; i < n; i++) record_free(&vers[i]);
+    for (size_t i = 0; i < n; i++)
+        record_free(&vers[i]);
     free(vers);
 
     /* point-in-time reconstruction */
@@ -886,7 +925,8 @@ static void test_history_and_as_of(void) {
     TEST_ASSERT_EQUAL_MEMORY("v2", out.data, 2);
     record_free(&out);
     /* before it existed */
-    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_get_as_of(&g_db, id, NULL, t1 - 1, &out));
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND,
+                          qe_get_as_of(&g_db, id, NULL, t1 - 1, &out));
 
     /* after delete: current is gone, but the pre-delete past is intact */
     usleep(3000);
@@ -899,12 +939,15 @@ static void test_history_and_as_of(void) {
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_history(&g_db, id, NULL, &vers, &n));
     TEST_ASSERT_EQUAL_size_t(4, n); /* + the tombstone */
     TEST_ASSERT_TRUE(vers[3].deleted);
-    for (size_t i = 0; i < n; i++) record_free(&vers[i]);
+    for (size_t i = 0; i < n; i++)
+        record_free(&vers[i]);
     free(vers);
 
     /* unknown id */
-    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_history(&g_db, 999999, NULL, &vers, &n));
-    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_get_as_of(&g_db, 999999, NULL, t3, &out));
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND,
+                          qe_history(&g_db, 999999, NULL, &vers, &n));
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND,
+                          qe_get_as_of(&g_db, 999999, NULL, t3, &out));
 }
 
 static void test_working_memory_promote(void) {
@@ -916,9 +959,8 @@ static void test_working_memory_promote(void) {
     record_free(&out);
 
     MemoryRecord promoted;
-    TEST_ASSERT_EQUAL_INT(
-        AEGIS_OK,
-        qe_promote(&g_db, "sess-1", wid, MEM_EPISODIC, NULL, &promoted));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_promote(&g_db, "sess-1", wid,
+                                               MEM_EPISODIC, NULL, &promoted));
     TEST_ASSERT_EQUAL_INT(MEM_EPISODIC, promoted.type);
     uint64_t pid = promoted.id;
     record_free(&promoted);
@@ -954,7 +996,8 @@ static void test_relate_and_traverse(void) {
     /* Traversal reaches the related target. */
     int saw_to = 0;
     for (size_t i = 0; i < n; i++) {
-        if (recs[i].id == to) saw_to = 1;
+        if (recs[i].id == to)
+            saw_to = 1;
         record_free(&recs[i]);
     }
     free(recs);
@@ -994,7 +1037,10 @@ static void test_traverse_wide_graph(void) {
     int seen_targets = 0;
     for (size_t i = 0; i < n; i++) {
         for (int t = 0; t < FANOUT; t++)
-            if (recs[i].id == targets[t]) { seen_targets++; break; }
+            if (recs[i].id == targets[t]) {
+                seen_targets++;
+                break;
+            }
         record_free(&recs[i]);
     }
     free(recs);
@@ -1089,11 +1135,11 @@ static void test_ns_scoped_writes(void) {
     /* relate: both endpoints must be owned */
     TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND,
                           qe_relate(&g_db, sid, eid, "x", "agent-B"));
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
-                          qe_relate(&g_db, sid, eid, "x", "agent-A"));
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_relate(&g_db, sid, eid, "x", "agent-A"));
 
     /* delete: wrong tenant is NOT_FOUND, owner succeeds */
-    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_delete(&g_db, sid, "agent-B"));
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND,
+                          qe_delete(&g_db, sid, "agent-B"));
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_delete(&g_db, sid, "agent-A"));
 }
 

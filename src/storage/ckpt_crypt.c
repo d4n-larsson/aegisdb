@@ -24,7 +24,8 @@
 /* Read the whole file at `path` into a fresh buffer. Returns 0/-1. */
 static int read_whole(const char *path, uint8_t **out, size_t *out_len) {
     int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return -1;
+    if (fd < 0)
+        return -1;
     off_t size = lseek(fd, 0, SEEK_END);
     if (size < 0 || lseek(fd, 0, SEEK_SET) != 0) {
         close(fd);
@@ -39,7 +40,8 @@ static int read_whole(const char *path, uint8_t **out, size_t *out_len) {
     while (got < (size_t)size) {
         ssize_t r = read(fd, buf + got, (size_t)size - got);
         if (r <= 0) {
-            if (r < 0 && errno == EINTR) continue;
+            if (r < 0 && errno == EINTR)
+                continue;
             close(fd);
             free(buf);
             return -1;
@@ -54,11 +56,13 @@ static int read_whole(const char *path, uint8_t **out, size_t *out_len) {
 
 int ckpt_write(const char *path, const uint8_t *key, const uint8_t *plain,
                size_t plain_len) {
-    if (!key) return fs_write_atomic(path, plain, plain_len, 0600);
+    if (!key)
+        return fs_write_atomic(path, plain, plain_len, 0600);
 
     size_t total = CKPT_HDR + plain_len + AEAD_TAG_LEN;
     uint8_t *env = malloc(total);
-    if (!env) return -1;
+    if (!env)
+        return -1;
     aegis_put_u32le(env, CKPT_MAGIC);
     aegis_put_u32le(env + 4, CKPT_VERSION);
     if (aegis_fill_random(env + 8, AEAD_NONCE_LEN) != 0) {
@@ -76,7 +80,8 @@ int ckpt_read(const char *path, const uint8_t *key, uint8_t **out,
               size_t *out_len) {
     uint8_t *file = NULL;
     size_t flen = 0;
-    if (read_whole(path, &file, &flen) != 0) return -1;
+    if (read_whole(path, &file, &flen) != 0)
+        return -1;
 
     if (!key) {
         *out = file;

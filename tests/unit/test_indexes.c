@@ -38,7 +38,8 @@ static void test_time_range_chronological(void) {
 
 static void test_time_range_respects_max(void) {
     TimeIndex *t = time_index_create();
-    for (uint64_t i = 1; i <= 10; i++) time_index_add(t, i * 10, i);
+    for (uint64_t i = 1; i <= 10; i++)
+        time_index_add(t, i * 10, i);
     uint64_t *ids = NULL;
     size_t n = 0;
     TEST_ASSERT_EQUAL_INT(0, time_index_range(t, 0, 1000, 3, &ids, &n));
@@ -52,7 +53,8 @@ static void test_time_range_respects_max(void) {
  * the oldest. */
 static void test_time_range_recent_keeps_newest(void) {
     TimeIndex *t = time_index_create();
-    for (uint64_t i = 1; i <= 10; i++) time_index_add(t, i * 10, i); /* ids 1..10 */
+    for (uint64_t i = 1; i <= 10; i++)
+        time_index_add(t, i * 10, i); /* ids 1..10 */
     uint64_t *ids = NULL;
     size_t n = 0;
     int trunc = -1;
@@ -163,9 +165,9 @@ static void test_tag_remove_reclaims_empty_node(void) {
 static void test_semantic_topk_ordering(void) {
     const size_t dim = 3;
     SemanticIndex *s = semantic_index_create(dim, 0, 0, 0, 0);
-    float a[] = {1.0f, 0.0f, 0.0f};  /* id 1 */
-    float b[] = {0.9f, 0.1f, 0.0f};  /* id 2 (close to query) */
-    float c[] = {0.0f, 1.0f, 0.0f};  /* id 3 (orthogonal-ish) */
+    float a[] = {1.0f, 0.0f, 0.0f}; /* id 1 */
+    float b[] = {0.9f, 0.1f, 0.0f}; /* id 2 (close to query) */
+    float c[] = {0.0f, 1.0f, 0.0f}; /* id 3 (orthogonal-ish) */
     semantic_index_add(s, 1, a, 1, dim);
     semantic_index_add(s, 2, b, 1, dim);
     semantic_index_add(s, 3, c, 1, dim);
@@ -205,8 +207,8 @@ static void test_semantic_remove_reclaims(void) {
     uint64_t *ids = NULL;
     float *scores = NULL;
     size_t n = 0;
-    TEST_ASSERT_EQUAL_INT(0,
-        semantic_index_search(s, q, dim, 10, &ids, &scores, &n));
+    TEST_ASSERT_EQUAL_INT(
+        0, semantic_index_search(s, q, dim, 10, &ids, &scores, &n));
     TEST_ASSERT_EQUAL_size_t(1, n);
     TEST_ASSERT_EQUAL_UINT64(2, ids[0]);
     free(ids);
@@ -289,7 +291,8 @@ static void test_semantic_bulk_add_remove_consistency(void) {
         seen[ids[i]] = 1;
     }
     for (uint64_t id = 1; id <= N; id++)
-        if (id % 3 != 0) TEST_ASSERT_TRUE(seen[id]); /* every survivor present */
+        if (id % 3 != 0)
+            TEST_ASSERT_TRUE(seen[id]); /* every survivor present */
     free(ids);
     free(scores);
     semantic_index_free(s);
@@ -319,8 +322,9 @@ static void test_semantic_topk_partial_selection(void) {
         0, semantic_index_search(s, q, dim, K, &ids, &scores, &n));
     TEST_ASSERT_EQUAL_size_t((size_t)K, n);
     for (uint64_t i = 0; i < K; i++) {
-        TEST_ASSERT_EQUAL_UINT64(i + 1, ids[i]);          /* exact top-k set */
-        if (i > 0) TEST_ASSERT_TRUE(scores[i - 1] >= scores[i]); /* descending */
+        TEST_ASSERT_EQUAL_UINT64(i + 1, ids[i]); /* exact top-k set */
+        if (i > 0)
+            TEST_ASSERT_TRUE(scores[i - 1] >= scores[i]); /* descending */
     }
     free(ids);
     free(scores);
@@ -334,7 +338,8 @@ static void test_semantic_topk_partial_selection(void) {
 static void test_semantic_hnsw_path(void) {
     const size_t dim = 2;
     const uint64_t N = 300, K = 5;
-    SemanticIndex *s = semantic_index_create(dim, 16, 100, 0, 0); /* HNSW once n>=16 */
+    SemanticIndex *s =
+        semantic_index_create(dim, 16, 100, 0, 0); /* HNSW once n>=16 */
     for (uint64_t id = 1; id <= N; id++) {
         float v[] = {1.0f, (float)(id - 1)};
         TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, 1, dim));
@@ -349,11 +354,13 @@ static void test_semantic_hnsw_path(void) {
     uint64_t *ids = NULL;
     float *sc = NULL;
     size_t n = 0;
-    TEST_ASSERT_EQUAL_INT(0, semantic_index_search(s, q, dim, K, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_INT(0,
+                          semantic_index_search(s, q, dim, K, &ids, &sc, &n));
     TEST_ASSERT_EQUAL_size_t((size_t)K, n);
     for (uint64_t i = 0; i < K; i++) {
-        TEST_ASSERT_EQUAL_UINT64(i + 1, ids[i]);            /* nearest are 1..5 */
-        if (i > 0) TEST_ASSERT_TRUE(sc[i - 1] >= sc[i]);
+        TEST_ASSERT_EQUAL_UINT64(i + 1, ids[i]); /* nearest are 1..5 */
+        if (i > 0)
+            TEST_ASSERT_TRUE(sc[i - 1] >= sc[i]);
     }
     free(ids);
     free(sc);
@@ -361,16 +368,19 @@ static void test_semantic_hnsw_path(void) {
     /* remove the nearest (id 1) through the HNSW path: id 2 becomes nearest */
     semantic_index_remove(s, 1);
     TEST_ASSERT_EQUAL_size_t((size_t)N - 1, semantic_index_count(s));
-    TEST_ASSERT_EQUAL_INT(0, semantic_index_search(s, q, dim, K, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_INT(0,
+                          semantic_index_search(s, q, dim, K, &ids, &sc, &n));
     TEST_ASSERT_EQUAL_UINT64(2, ids[0]);
-    for (size_t i = 0; i < n; i++) TEST_ASSERT_TRUE(ids[i] != 1);
+    for (size_t i = 0; i < n; i++)
+        TEST_ASSERT_TRUE(ids[i] != 1);
     free(ids);
     free(sc);
 
     /* overwrite id 2 to point away from q: it drops out, id 3 becomes nearest */
     float away[] = {0.0f, 1.0f};
     TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, 2, away, 1, dim));
-    TEST_ASSERT_EQUAL_INT(0, semantic_index_search(s, q, dim, K, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_INT(0,
+                          semantic_index_search(s, q, dim, K, &ids, &sc, &n));
     TEST_ASSERT_EQUAL_UINT64(3, ids[0]);
     free(ids);
     free(sc);
@@ -401,10 +411,14 @@ static void multivector_best_of_n(size_t threshold) {
         0, semantic_index_search(s, axes[1], dim, 5, &ids, &sc, &n));
     int seen1 = 0, dup1 = 0;
     for (size_t i = 0; i < n; i++) {
-        if (ids[i] == 1) { if (seen1) dup1 = 1; seen1 = 1; }
+        if (ids[i] == 1) {
+            if (seen1)
+                dup1 = 1;
+            seen1 = 1;
+        }
     }
-    TEST_ASSERT_TRUE(seen1);      /* found by its non-primary vector */
-    TEST_ASSERT_FALSE(dup1);      /* returned once, not per-vector */
+    TEST_ASSERT_TRUE(seen1);             /* found by its non-primary vector */
+    TEST_ASSERT_FALSE(dup1);             /* returned once, not per-vector */
     TEST_ASSERT_EQUAL_UINT64(1, ids[0]); /* best match is record 1 (sim ~1) */
     TEST_ASSERT_TRUE(sc[0] > 0.99f);
     free(ids);
@@ -414,7 +428,8 @@ static void multivector_best_of_n(size_t threshold) {
     semantic_index_remove(s, 1);
     TEST_ASSERT_EQUAL_INT(
         0, semantic_index_search(s, axes[1], dim, 5, &ids, &sc, &n));
-    for (size_t i = 0; i < n; i++) TEST_ASSERT_TRUE(ids[i] != 1);
+    for (size_t i = 0; i < n; i++)
+        TEST_ASSERT_TRUE(ids[i] != 1);
     free(ids);
     free(sc);
     semantic_index_free(s);
@@ -429,7 +444,8 @@ static void test_semantic_multivector_hnsw(void) { multivector_best_of_n(2); }
  * a live server, taking the index lock around begin/take/commit). */
 static void test_semantic_deferred_build_catch_up(void) {
     const size_t dim = 2;
-    SemanticIndex *s = semantic_index_create(dim, 16, 100, 0, 0); /* HNSW once n>=16 */
+    SemanticIndex *s =
+        semantic_index_create(dim, 16, 100, 0, 0); /* HNSW once n>=16 */
     for (uint64_t id = 1; id <= 20; id++) {
         float v[] = {1.0f, (float)(id - 1)};
         TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, 1, dim));
@@ -447,7 +463,8 @@ static void test_semantic_deferred_build_catch_up(void) {
     float onaxis[] = {1.0f, 0.0f};
     TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, 100, onaxis, 1, dim));
     /* Dense (still authoritative) already reflects them. */
-    TEST_ASSERT_EQUAL_size_t(20, semantic_index_count(s)); /* -1 (id1) +1 (id100) */
+    TEST_ASSERT_EQUAL_size_t(20,
+                             semantic_index_count(s)); /* -1 (id1) +1 (id100) */
 
     /* Phase 3: build from the snapshot (which predates the two mutations). */
     TEST_ASSERT_EQUAL_INT(0, semantic_index_build_run(job));
@@ -463,9 +480,11 @@ static void test_semantic_deferred_build_catch_up(void) {
     uint64_t *ids = NULL;
     float *sc = NULL;
     size_t n = 0;
-    TEST_ASSERT_EQUAL_INT(0, semantic_index_search(s, q, dim, 5, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_INT(0,
+                          semantic_index_search(s, q, dim, 5, &ids, &sc, &n));
     TEST_ASSERT_EQUAL_UINT64(100, ids[0]); /* the raced-in add is the nearest */
-    for (size_t i = 0; i < n; i++) TEST_ASSERT_TRUE(ids[i] != 1); /* raced-out gone */
+    for (size_t i = 0; i < n; i++)
+        TEST_ASSERT_TRUE(ids[i] != 1); /* raced-out gone */
     free(ids);
     free(sc);
     semantic_index_free(s);
@@ -480,7 +499,8 @@ static void test_semantic_sharded_build(void) {
     const size_t dim = 2;
     const uint64_t N = 200, K = 5;
     /* small shard target (like --ann-shard-target) forces many shards at small N */
-    SemanticIndex *s = semantic_index_create(dim, 16, 100, 0, /*shard_target=*/16);
+    SemanticIndex *s =
+        semantic_index_create(dim, 16, 100, 0, /*shard_target=*/16);
     for (uint64_t id = 1; id <= N; id++) {
         float v[] = {1.0f, (float)(id - 1)};
         TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, 1, dim));
@@ -498,11 +518,13 @@ static void test_semantic_sharded_build(void) {
     uint64_t *ids = NULL;
     float *sc = NULL;
     size_t n = 0;
-    TEST_ASSERT_EQUAL_INT(0, semantic_index_search(s, q, dim, K, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_INT(0,
+                          semantic_index_search(s, q, dim, K, &ids, &sc, &n));
     TEST_ASSERT_EQUAL_size_t((size_t)K, n);
     for (uint64_t i = 0; i < K; i++) {
-        TEST_ASSERT_EQUAL_UINT64(i + 1, ids[i]);       /* exact top-k across shards */
-        if (i > 0) TEST_ASSERT_TRUE(sc[i - 1] >= sc[i]);
+        TEST_ASSERT_EQUAL_UINT64(i + 1, ids[i]); /* exact top-k across shards */
+        if (i > 0)
+            TEST_ASSERT_TRUE(sc[i - 1] >= sc[i]);
     }
     free(ids);
     free(sc);
@@ -510,16 +532,19 @@ static void test_semantic_sharded_build(void) {
     /* remove the nearest (routes to its shard); id 2 becomes nearest */
     semantic_index_remove(s, 1);
     TEST_ASSERT_EQUAL_size_t((size_t)N - 1, semantic_index_count(s));
-    TEST_ASSERT_EQUAL_INT(0, semantic_index_search(s, q, dim, K, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_INT(0,
+                          semantic_index_search(s, q, dim, K, &ids, &sc, &n));
     TEST_ASSERT_EQUAL_UINT64(2, ids[0]);
-    for (size_t i = 0; i < n; i++) TEST_ASSERT_TRUE(ids[i] != 1);
+    for (size_t i = 0; i < n; i++)
+        TEST_ASSERT_TRUE(ids[i] != 1);
     free(ids);
     free(sc);
 
     /* overwrite id 2 to point away from q: it drops out, id 3 becomes nearest */
     float away[] = {0.0f, 1.0f};
     TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, 2, away, 1, dim));
-    TEST_ASSERT_EQUAL_INT(0, semantic_index_search(s, q, dim, K, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_INT(0,
+                          semantic_index_search(s, q, dim, K, &ids, &sc, &n));
     TEST_ASSERT_EQUAL_UINT64(3, ids[0]);
     free(ids);
     free(sc);

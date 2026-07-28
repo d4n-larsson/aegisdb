@@ -85,7 +85,8 @@ static uint64_t search_top(AegisDB *db, const float *emb) {
     size_t n = 0;
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(db, &p, &recs, &n));
     uint64_t id = n ? recs[0].id : 0;
-    for (size_t i = 0; i < n; i++) record_free(&recs[i]);
+    for (size_t i = 0; i < n; i++)
+        record_free(&recs[i]);
     free(recs);
     return id;
 }
@@ -168,7 +169,8 @@ static void test_recovery_rebuilds_secondary_from_tail(void) {
     TEST_ASSERT_EQUAL_size_t(2, n); /* both the checkpointed and tail record */
     int found_tail = 0;
     for (size_t i = 0; i < n; i++) {
-        if (recs[i].id == t) found_tail = 1;
+        if (recs[i].id == t)
+            found_tail = 1;
         record_free(&recs[i]);
     }
     free(recs);
@@ -210,12 +212,13 @@ static void test_recovery_falls_back_on_corrupt_checkpoint(void) {
 static void test_recovery_next_id_does_not_regress(void) {
     AegisDB db1;
     open_db(&db1);
-    insert_ep(&db1, "one");                       /* id 1 */
+    insert_ep(&db1, "one"); /* id 1 */
     uint64_t after_two = 0;
-    insert_ep(&db1, "two");                        /* id 2 */
-    after_two = (uint64_t)db1.log.size;            /* boundary before id 3 */
-    insert_ep(&db1, "three");                      /* id 3 */
-    db_close(&db1);  /* checkpoint covers all 3 (covered > after_two); meta next_id=4 */
+    insert_ep(&db1, "two");             /* id 2 */
+    after_two = (uint64_t)db1.log.size; /* boundary before id 3 */
+    insert_ep(&db1, "three");           /* id 3 */
+    db_close(
+        &db1); /* checkpoint covers all 3 (covered > after_two); meta next_id=4 */
 
     /* Simulate a crash that truncated the log below the checkpoint's covered
      * offset: drop id 3's frame. The checkpoint is now stale -> rejected ->
@@ -257,7 +260,8 @@ static void test_recovery_semantic_checkpoint(void) {
     TEST_ASSERT_EQUAL_INT(0, access(sem, F_OK)); /* checkpoint was written */
 
     AegisDB db2;
-    open_db_ann(&db2, 8); /* recovery loads the graph + rebuilds the dense array */
+    open_db_ann(&db2,
+                8); /* recovery loads the graph + rebuilds the dense array */
     TEST_ASSERT_EQUAL_UINT64(ids[5], search_top(&db2, v[5]));
     TEST_ASSERT_EQUAL_UINT64(ids[N], search_top(&db2, v[N]));
     db_close(&db2);
@@ -270,16 +274,25 @@ static void test_recovery_semantic_tail(void) {
     uint64_t ids[17];
     AegisDB db1;
     open_db_ann(&db1, 8);
-    for (unsigned i = 1; i <= 12; i++) { vec_for(i, v[i]); ids[i] = insert_vec(&db1, v[i]); }
-    TEST_ASSERT_EQUAL_INT(1, db_semantic_build_step(&db1)); /* build the graph */
-    TEST_ASSERT_EQUAL_INT(0, db_checkpoint(&db1)); /* covers 1..12 */
-    for (unsigned i = 13; i <= 16; i++) { vec_for(i, v[i]); ids[i] = insert_vec(&db1, v[i]); }
+    for (unsigned i = 1; i <= 12; i++) {
+        vec_for(i, v[i]);
+        ids[i] = insert_vec(&db1, v[i]);
+    }
+    TEST_ASSERT_EQUAL_INT(1,
+                          db_semantic_build_step(&db1)); /* build the graph */
+    TEST_ASSERT_EQUAL_INT(0, db_checkpoint(&db1));       /* covers 1..12 */
+    for (unsigned i = 13; i <= 16; i++) {
+        vec_for(i, v[i]);
+        ids[i] = insert_vec(&db1, v[i]);
+    }
     log_fsync(&db1.log);
 
     AegisDB db2;
     open_db_ann(&db2, 8); /* load checkpoint + replay tail 13..16 */
-    TEST_ASSERT_EQUAL_UINT64(ids[15], search_top(&db2, v[15])); /* a tail vector */
-    TEST_ASSERT_EQUAL_UINT64(ids[3], search_top(&db2, v[3]));   /* a checkpointed one */
+    TEST_ASSERT_EQUAL_UINT64(ids[15],
+                             search_top(&db2, v[15])); /* a tail vector */
+    TEST_ASSERT_EQUAL_UINT64(ids[3],
+                             search_top(&db2, v[3])); /* a checkpointed one */
     db_close(&db2);
     db_close(&db1);
 }
@@ -291,17 +304,23 @@ static void test_recovery_semantic_tail_delete(void) {
     uint64_t ids[13];
     AegisDB db1;
     open_db_ann(&db1, 8);
-    for (unsigned i = 1; i <= 12; i++) { vec_for(i, v[i]); ids[i] = insert_vec(&db1, v[i]); }
-    TEST_ASSERT_EQUAL_INT(1, db_semantic_build_step(&db1)); /* build the graph */
+    for (unsigned i = 1; i <= 12; i++) {
+        vec_for(i, v[i]);
+        ids[i] = insert_vec(&db1, v[i]);
+    }
+    TEST_ASSERT_EQUAL_INT(1,
+                          db_semantic_build_step(&db1)); /* build the graph */
     TEST_ASSERT_EQUAL_INT(0, db_checkpoint(&db1)); /* graph includes id 5 */
-    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_delete(&db1, ids[5], NULL)); /* tail delete */
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_delete(&db1, ids[5], NULL)); /* tail delete */
     log_fsync(&db1.log);
 
     AegisDB db2;
     open_db_ann(&db2, 8);
     MemoryRecord r;
     TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_get(&db2, ids[5], NULL, &r));
-    TEST_ASSERT_NOT_EQUAL(ids[5], search_top(&db2, v[5])); /* gone from results */
+    TEST_ASSERT_NOT_EQUAL(ids[5],
+                          search_top(&db2, v[5])); /* gone from results */
     db_close(&db2);
     db_close(&db1);
 }
@@ -313,8 +332,12 @@ static void test_recovery_semantic_corrupt_fallback(void) {
     uint64_t ids[13];
     AegisDB db1;
     open_db_ann(&db1, 8);
-    for (unsigned i = 1; i <= 12; i++) { vec_for(i, v[i]); ids[i] = insert_vec(&db1, v[i]); }
-    TEST_ASSERT_EQUAL_INT(1, db_semantic_build_step(&db1)); /* build the graph */
+    for (unsigned i = 1; i <= 12; i++) {
+        vec_for(i, v[i]);
+        ids[i] = insert_vec(&db1, v[i]);
+    }
+    TEST_ASSERT_EQUAL_INT(1,
+                          db_semantic_build_step(&db1)); /* build the graph */
     db_close(&db1);
 
     char sem[320];
@@ -360,7 +383,8 @@ static void test_sync_durability_flushes_per_write(void) {
     AegisDB db2;
     TEST_ASSERT_EQUAL_INT(0, db_open(&db2, &cfg));
     insert_ep(&db2, "deferred");
-    TEST_ASSERT_TRUE(log_flush_pending(&db2.log)); /* interval: flush deferred */
+    TEST_ASSERT_TRUE(
+        log_flush_pending(&db2.log)); /* interval: flush deferred */
     db_close(&db2);
     (void)!system(rm);
 }

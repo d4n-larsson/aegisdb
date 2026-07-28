@@ -41,7 +41,8 @@ static void test_put_get(void) {
 static void test_update_overwrites(void) {
     HashIndex *h = hash_index_create();
     hash_index_put(h, 5, 0, 10, 1, 0, 0);
-    hash_index_put(h, 5, 200, 20, 2, 0, 0); /* same id -> latest location wins */
+    hash_index_put(h, 5, 200, 20, 2, 0,
+                   0); /* same id -> latest location wins */
     const HashEntry *e = hash_index_get(h, 5);
     TEST_ASSERT_NOT_NULL(e);
     TEST_ASSERT_EQUAL_UINT64(200, e->offset);
@@ -76,7 +77,8 @@ static void test_save_load_roundtrip(void) {
 
     HashIndex *h2 = hash_index_create();
     uint64_t covered = 0, next_id = 0;
-    TEST_ASSERT_EQUAL_INT(0, hash_index_load(h2, path, &covered, &next_id, NULL));
+    TEST_ASSERT_EQUAL_INT(0,
+                          hash_index_load(h2, path, &covered, &next_id, NULL));
     TEST_ASSERT_EQUAL_UINT64(4096, covered);
     TEST_ASSERT_EQUAL_UINT64(21, next_id);
     const HashEntry *e = hash_index_get(h2, 10);
@@ -114,17 +116,21 @@ static void test_save_load_encrypted(void) {
 
     HashIndex *h2 = hash_index_create();
     uint64_t covered = 0, next_id = 0;
-    TEST_ASSERT_EQUAL_INT(0, hash_index_load(h2, path, &covered, &next_id, key));
+    TEST_ASSERT_EQUAL_INT(0,
+                          hash_index_load(h2, path, &covered, &next_id, key));
     TEST_ASSERT_EQUAL_UINT64(4096, covered);
     TEST_ASSERT_NOT_NULL(hash_index_get(h2, 10));
     hash_index_free(h2);
 
     HashIndex *h3 = hash_index_create();
-    TEST_ASSERT_EQUAL_INT(-1, hash_index_load(h3, path, &covered, &next_id, key2));
+    TEST_ASSERT_EQUAL_INT(-1,
+                          hash_index_load(h3, path, &covered, &next_id, key2));
     hash_index_free(h3);
 
-    HashIndex *h4 = hash_index_create(); /* NULL key on encrypted file -> refuse */
-    TEST_ASSERT_EQUAL_INT(-1, hash_index_load(h4, path, &covered, &next_id, NULL));
+    HashIndex *h4 =
+        hash_index_create(); /* NULL key on encrypted file -> refuse */
+    TEST_ASSERT_EQUAL_INT(-1,
+                          hash_index_load(h4, path, &covered, &next_id, NULL));
     hash_index_free(h4);
     remove(path);
 }
@@ -152,7 +158,8 @@ static void test_load_rejects_corrupt(void) {
 
     HashIndex *h2 = hash_index_create();
     uint64_t covered = 0, next_id = 0;
-    TEST_ASSERT_EQUAL_INT(-1, hash_index_load(h2, path, &covered, &next_id, NULL));
+    TEST_ASSERT_EQUAL_INT(-1,
+                          hash_index_load(h2, path, &covered, &next_id, NULL));
     hash_index_free(h2);
     remove(path);
 }
@@ -179,7 +186,8 @@ static void test_load_rejects_corrupt_header(void) {
 
     HashIndex *h2 = hash_index_create();
     uint64_t covered = 0, next_id = 0;
-    TEST_ASSERT_EQUAL_INT(-1, hash_index_load(h2, path, &covered, &next_id, NULL));
+    TEST_ASSERT_EQUAL_INT(-1,
+                          hash_index_load(h2, path, &covered, &next_id, NULL));
     hash_index_free(h2);
     remove(path);
 }

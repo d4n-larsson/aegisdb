@@ -8,20 +8,25 @@
 #include "aegisdb/db.h"
 #include "aegisdb/errors.h"
 
-#define MAX_TAGS 32     /* max tags per record (also enforced in validate_common) */
-#define MAX_RELATIONSHIPS 4096 /* max relationships per record. Kept well below
+#define MAX_TAGS 32 /* max tags per record (also enforced in validate_common) */
+#define MAX_RELATIONSHIPS                                                      \
+    4096               /* max relationships per record. Kept well below
                                 * UINT16_MAX so the u16 wire count in record_encode
                                 * can never truncate (which would render the record
                                 * undecodable = durable data loss). */
-#define MAX_TOP_K 1000  /* clamp untrusted top_k to bound work/allocations */
-#define SEARCH_FETCH_CAP 8192 /* upper bound on semantic over-fetch when widening
+#define MAX_TOP_K 1000 /* clamp untrusted top_k to bound work/allocations */
+#define SEARCH_FETCH_CAP                                                       \
+    8192 /* upper bound on semantic over-fetch when widening
                                * to satisfy a selective filter (bounds worst-case
                                * work; a very selective filter may still yield
                                * fewer than top_k — inherent to filtered ANN) */
-#define MAX_OFFSET 100000 /* clamp pagination offset to bound ranking work/allocs */
+#define MAX_OFFSET                                                             \
+    100000 /* clamp pagination offset to bound ranking work/allocs */
 #define MAX_VECS_PER_RECORD 64 /* cap embeddings per record (#85) */
-#define MAX_TRAVERSE_DEPTH 64 /* clamp graph-traversal depth (bounds work + the int cast) */
-#define MIN_HALF_LIFE_MS 1000 /* floor recency half-life at 1s (avoid absurd decay) */
+#define MAX_TRAVERSE_DEPTH                                                     \
+    64 /* clamp graph-traversal depth (bounds work + the int cast) */
+#define MIN_HALF_LIFE_MS                                                       \
+    1000 /* floor recency half-life at 1s (avoid absurd decay) */
 #define MAX_AGENT_ID 128
 
 /* Phase gating: fail with NOT_READY when the server runs below the phase a
@@ -43,9 +48,11 @@ int record_expired(const MemoryRecord *r, uint64_t now);
 typedef struct {
     MemoryRecord rec;
     float score;
-    float sim;     /* raw cosine similarity [-1,1] */
-    float weight;  /* importance*confidence actually applied (1.0 if that was <=0) */
-    float recency; /* recency-decay multiplier in (0,1]; 1.0 when no half-life */
+    float sim; /* raw cosine similarity [-1,1] */
+    float
+        weight; /* importance*confidence actually applied (1.0 if that was <=0) */
+    float
+        recency; /* recency-decay multiplier in (0,1]; 1.0 when no half-life */
 } Cand;
 
 #endif /* AEGISDB_QE_INTERNAL_H */

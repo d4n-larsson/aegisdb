@@ -29,7 +29,8 @@ void tearDown(void) {
 
 static char *slurp(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
+    if (!f)
+        return NULL;
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -37,7 +38,8 @@ static char *slurp(const char *path, size_t *len) {
     size_t got = fread(buf, 1, (size_t)sz, f);
     fclose(f);
     buf[got] = '\0';
-    if (len) *len = got;
+    if (len)
+        *len = got;
     return buf;
 }
 
@@ -60,7 +62,8 @@ static void test_write_atomic_content_and_mode(void) {
 
     struct stat st;
     TEST_ASSERT_EQUAL_INT(0, stat(p, &st));
-    TEST_ASSERT_EQUAL_INT(0600, st.st_mode & 0777); /* exact mode, no umask window */
+    TEST_ASSERT_EQUAL_INT(0600,
+                          st.st_mode & 0777); /* exact mode, no umask window */
 }
 
 static void test_write_atomic_overwrites(void) {
@@ -82,7 +85,8 @@ static void test_write_atomic_leaves_no_temp(void) {
     TEST_ASSERT_EQUAL_INT(0, fs_write_atomic(p, "x", 1, 0600));
     snprintf(tmp, sizeof(tmp), "%s.tmp", p);
     struct stat st;
-    TEST_ASSERT_NOT_EQUAL(0, stat(tmp, &st)); /* the .tmp is gone after rename */
+    TEST_ASSERT_NOT_EQUAL(0,
+                          stat(tmp, &st)); /* the .tmp is gone after rename */
 }
 
 static void test_write_atomic_empty(void) {
@@ -99,8 +103,10 @@ static void test_copy_file_roundtrip(void) {
     path_in(src, sizeof(src), "src.bin");
     path_in(dst, sizeof(dst), "dst.bin");
     char payload[4096];
-    for (size_t i = 0; i < sizeof(payload); i++) payload[i] = (char)(i * 31 + 7);
-    TEST_ASSERT_EQUAL_INT(0, fs_write_atomic(src, payload, sizeof(payload), 0644));
+    for (size_t i = 0; i < sizeof(payload); i++)
+        payload[i] = (char)(i * 31 + 7);
+    TEST_ASSERT_EQUAL_INT(0,
+                          fs_write_atomic(src, payload, sizeof(payload), 0644));
 
     TEST_ASSERT_EQUAL_INT(0, fs_copy_file(src, dst));
     size_t len = 0;

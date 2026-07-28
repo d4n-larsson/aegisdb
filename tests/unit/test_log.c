@@ -13,7 +13,8 @@
 static char g_path[256];
 
 void setUp(void) {
-    snprintf(g_path, sizeof(g_path), "/tmp/aegis_test_log_%d.log", (int)getpid());
+    snprintf(g_path, sizeof(g_path), "/tmp/aegis_test_log_%d.log",
+             (int)getpid());
     remove(g_path);
 }
 void tearDown(void) { remove(g_path); }
@@ -25,8 +26,10 @@ static void test_append_read_roundtrip(void) {
     const char *a = "first frame";
     const char *b = "second, longer frame payload";
     uint64_t off_a = 0, off_b = 0;
-    TEST_ASSERT_EQUAL_INT(0, log_append(&lf, (const uint8_t *)a, strlen(a), &off_a));
-    TEST_ASSERT_EQUAL_INT(0, log_append(&lf, (const uint8_t *)b, strlen(b), &off_b));
+    TEST_ASSERT_EQUAL_INT(
+        0, log_append(&lf, (const uint8_t *)a, strlen(a), &off_a));
+    TEST_ASSERT_EQUAL_INT(
+        0, log_append(&lf, (const uint8_t *)b, strlen(b), &off_b));
     TEST_ASSERT_EQUAL_UINT64(0, off_a);
     TEST_ASSERT_EQUAL_UINT64(LOG_FRAME_HEADER + strlen(a), off_b);
 
@@ -45,7 +48,8 @@ static void test_append_read_roundtrip(void) {
     log_close(&lf);
 }
 
-static int count_cb(uint64_t offset, const uint8_t *payload, size_t len, void *ctx) {
+static int count_cb(uint64_t offset, const uint8_t *payload, size_t len,
+                    void *ctx) {
     (void)offset;
     (void)payload;
     (void)len;
@@ -64,7 +68,8 @@ static void test_scan_visits_all_frames(void) {
     }
     int n = 0;
     LogScanResult res = {0};
-    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf, 0, (uint64_t)lf.size, count_cb, &n, &res));
+    TEST_ASSERT_EQUAL_INT(
+        0, log_scan(&lf, 0, (uint64_t)lf.size, count_cb, &n, &res));
     TEST_ASSERT_EQUAL_INT(5, n);
     TEST_ASSERT_EQUAL_size_t(5, res.good_frames);
     TEST_ASSERT_EQUAL_size_t(0, res.corrupt_frames);
@@ -116,7 +121,8 @@ static void test_torn_tail_detected(void) {
     TEST_ASSERT_EQUAL_INT(0, log_open(&lf2, g_path, 0, NULL, NULL));
     int n = 0;
     LogScanResult res = {0};
-    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf2, 0, (uint64_t)lf2.size, count_cb, &n, &res));
+    TEST_ASSERT_EQUAL_INT(
+        0, log_scan(&lf2, 0, (uint64_t)lf2.size, count_cb, &n, &res));
     TEST_ASSERT_EQUAL_INT(1, n); /* only the complete frame */
     TEST_ASSERT_EQUAL_UINT64(good_end, res.truncate_to);
     log_close(&lf2);
@@ -150,7 +156,8 @@ static void test_midlog_corruption_recovers_tail(void) {
     TEST_ASSERT_EQUAL_INT(0, log_open(&lf2, g_path, 0, NULL, NULL));
     int n = 0;
     LogScanResult res = {0};
-    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf2, 0, (uint64_t)lf2.size, count_cb, &n, &res));
+    TEST_ASSERT_EQUAL_INT(
+        0, log_scan(&lf2, 0, (uint64_t)lf2.size, count_cb, &n, &res));
     TEST_ASSERT_EQUAL_INT(2, n); /* bravo + charlie survive */
     TEST_ASSERT_EQUAL_size_t(2, res.good_frames);
     TEST_ASSERT_EQUAL_size_t(1, res.corrupt_frames);
@@ -174,8 +181,10 @@ static void test_legacy_v1_migration(void) {
         size_t len = strlen(payloads[i]);
         uint8_t h[8];
         uint32_t crc = crc32_compute((const uint8_t *)payloads[i], len);
-        for (int k = 0; k < 4; k++) h[k] = (uint8_t)(crc >> (8 * k));
-        for (int k = 0; k < 4; k++) h[4 + k] = (uint8_t)(len >> (8 * k));
+        for (int k = 0; k < 4; k++)
+            h[k] = (uint8_t)(crc >> (8 * k));
+        for (int k = 0; k < 4; k++)
+            h[4 + k] = (uint8_t)(len >> (8 * k));
         TEST_ASSERT_EQUAL_INT(8, pwrite(fd, h, 8, at));
         at += 8;
         TEST_ASSERT_EQUAL_INT((int)len, pwrite(fd, payloads[i], len, at));
@@ -184,10 +193,12 @@ static void test_legacy_v1_migration(void) {
     close(fd);
 
     LogFile lf;
-    TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 0, NULL, NULL)); /* triggers migration */
+    TEST_ASSERT_EQUAL_INT(
+        0, log_open(&lf, g_path, 0, NULL, NULL)); /* triggers migration */
     int n = 0;
     LogScanResult res = {0};
-    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf, 0, (uint64_t)lf.size, count_cb, &n, &res));
+    TEST_ASSERT_EQUAL_INT(
+        0, log_scan(&lf, 0, (uint64_t)lf.size, count_cb, &n, &res));
     TEST_ASSERT_EQUAL_INT(2, n);
     TEST_ASSERT_EQUAL_size_t(0, res.corrupt_frames);
 
@@ -205,14 +216,16 @@ static void test_legacy_v1_migration(void) {
 static void test_legacy_migration_preserves_corrupt_head(void) {
     /* v1-looking header claiming a huge payload that isn't there -> 0 frames.
      * First 4 bytes (0x11111111) are not the v2 magic, so migration is attempted. */
-    uint8_t junk[12] = {0x11, 0x11, 0x11, 0x11, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0};
+    uint8_t junk[12] = {0x11, 0x11, 0x11, 0x11, 0xFF, 0xFF,
+                        0xFF, 0xFF, 0,    0,    0,    0};
     int fd = open(g_path, O_RDWR | O_CREAT | O_TRUNC, 0644);
     TEST_ASSERT_TRUE(fd >= 0);
     TEST_ASSERT_EQUAL_INT(12, pwrite(fd, junk, sizeof(junk), 0));
     close(fd);
 
     LogFile lf;
-    TEST_ASSERT_EQUAL_INT(-1, log_open(&lf, g_path, 0, NULL, NULL)); /* refuses to migrate */
+    TEST_ASSERT_EQUAL_INT(
+        -1, log_open(&lf, g_path, 0, NULL, NULL)); /* refuses to migrate */
 
     struct stat st;
     TEST_ASSERT_EQUAL_INT(0, stat(g_path, &st));

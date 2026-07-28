@@ -20,9 +20,11 @@
  * follower, whose shutdown otherwise waits out a connect to an unreachable
  * primary. Returns 0 on success (fd left blocking), -1 on error/timeout. */
 #define NET_CONNECT_TIMEOUT_MS 5000
-static int connect_timeout(int fd, const struct sockaddr *addr, socklen_t alen) {
+static int connect_timeout(int fd, const struct sockaddr *addr,
+                           socklen_t alen) {
     int fl = fcntl(fd, F_GETFL, 0);
-    if (fl < 0 || fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0) return -1;
+    if (fl < 0 || fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0)
+        return -1;
     int rv = -1;
     if (connect(fd, addr, alen) == 0) {
         rv = 0; /* completed immediately (e.g. loopback) */
@@ -40,12 +42,15 @@ static int connect_timeout(int fd, const struct sockaddr *addr, socklen_t alen) 
                     rv = 0;
                 break;
             }
-            if (pr == 0) break;             /* timed out */
-            if (errno == EINTR) continue;    /* signal: retry within the deadline */
-            break;                            /* poll error */
+            if (pr == 0)
+                break; /* timed out */
+            if (errno == EINTR)
+                continue; /* signal: retry within the deadline */
+            break;        /* poll error */
         }
     }
-    if (rv == 0) fcntl(fd, F_SETFL, fl); /* restore blocking; caller closes on -1 */
+    if (rv == 0)
+        fcntl(fd, F_SETFL, fl); /* restore blocking; caller closes on -1 */
     return rv;
 }
 
@@ -54,13 +59,16 @@ int net_dial(const char *host, const char *port) {
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host, port, &hints, &res) != 0) return -1;
+    if (getaddrinfo(host, port, &hints, &res) != 0)
+        return -1;
     int fd = -1;
     for (rp = res; rp; rp = rp->ai_next) {
         fd = socket(rp->ai_family, rp->ai_socktype | SOCK_CLOEXEC,
                     rp->ai_protocol);
-        if (fd < 0) continue;
-        if (connect_timeout(fd, rp->ai_addr, rp->ai_addrlen) == 0) break;
+        if (fd < 0)
+            continue;
+        if (connect_timeout(fd, rp->ai_addr, rp->ai_addrlen) == 0)
+            break;
         close(fd);
         fd = -1;
     }
@@ -81,10 +89,12 @@ int net_write_all(int fd, const void *buf, size_t len) {
     while (len) {
         ssize_t n = write(fd, p, len);
         if (n < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR)
+                continue;
             return -1;
         }
-        if (n == 0) return -1;
+        if (n == 0)
+            return -1;
         p += n;
         len -= (size_t)n;
     }
@@ -100,10 +110,12 @@ int net_read_full(int fd, void *buf, size_t len) {
     while (len) {
         ssize_t n = read(fd, p, len);
         if (n < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR)
+                continue;
             return -1;
         }
-        if (n == 0) return -1; /* EOF */
+        if (n == 0)
+            return -1; /* EOF */
         p += n;
         len -= (size_t)n;
     }
@@ -119,15 +131,19 @@ uint64_t net_mono_ms(void) {
 int net_read_line(int fd, char *buf, size_t cap, uint64_t deadline_ms) {
     size_t i = 0;
     while (i + 1 < cap) {
-        if (deadline_ms && net_mono_ms() >= deadline_ms) return -1;
+        if (deadline_ms && net_mono_ms() >= deadline_ms)
+            return -1;
         char c;
         ssize_t n = read(fd, &c, 1);
         if (n < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR)
+                continue;
             return -1;
         }
-        if (n == 0) return -1;
-        if (c == '\n') break;
+        if (n == 0)
+            return -1;
+        if (c == '\n')
+            break;
         buf[i++] = c;
     }
     buf[i] = '\0';

@@ -13,7 +13,8 @@
 static char g_path[256];
 
 void setUp(void) {
-    snprintf(g_path, sizeof(g_path), "/tmp/aegis_test_dura_%d.log", (int)getpid());
+    snprintf(g_path, sizeof(g_path), "/tmp/aegis_test_dura_%d.log",
+             (int)getpid());
     remove(g_path);
 }
 void tearDown(void) { remove(g_path); }

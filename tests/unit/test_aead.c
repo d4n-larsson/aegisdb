@@ -15,7 +15,8 @@ void setUp(void) {}
 void tearDown(void) {}
 
 static void iota(uint8_t *b, size_t n, uint8_t start) {
-    for (size_t i = 0; i < n; i++) b[i] = (uint8_t)(start + i);
+    for (size_t i = 0; i < n; i++)
+        b[i] = (uint8_t)(start + i);
 }
 
 /* ---- primitive KATs ---------------------------------------------------- */
@@ -60,8 +61,8 @@ static void test_poly1305_rfc8439(void) {
     uint8_t mac[16];
     aegis_poly1305(mac, (const uint8_t *)msg, strlen(msg), key);
     static const uint8_t expect[16] = {0xa8, 0x06, 0x1d, 0xc1, 0x30, 0x51,
-                                        0x36, 0xc6, 0xc2, 0x2b, 0x8b, 0xaf,
-                                        0x0c, 0x01, 0x27, 0xa9};
+                                       0x36, 0xc6, 0xc2, 0x2b, 0x8b, 0xaf,
+                                       0x0c, 0x01, 0x27, 0xa9};
     TEST_ASSERT_EQUAL_MEMORY(expect, mac, 16);
 }
 
@@ -73,7 +74,7 @@ static void test_xchacha20poly1305_draft_vector(void) {
     uint8_t nonce[24];
     iota(nonce, 24, 0x40);
     static const uint8_t aad[12] = {0x50, 0x51, 0x52, 0x53, 0xc0, 0xc1,
-                                     0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7};
+                                    0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7};
     const char *pt =
         "Ladies and Gentlemen of the class of '99: If I could offer you only "
         "one tip for the future, sunscreen would be it.";
@@ -94,7 +95,8 @@ static void test_xchacha20poly1305_draft_vector(void) {
                                            0x78, 0x0a, 0xcf, 0x49};
 
     uint8_t ct[114], tag[16];
-    aead_seal(key, nonce, aad, sizeof aad, (const uint8_t *)pt, pt_len, ct, tag);
+    aead_seal(key, nonce, aad, sizeof aad, (const uint8_t *)pt, pt_len, ct,
+              tag);
     TEST_ASSERT_EQUAL_MEMORY(expect_ct, ct, pt_len);
     TEST_ASSERT_EQUAL_MEMORY(expect_tag, tag, 16);
 
@@ -113,7 +115,8 @@ static void test_seal_open_roundtrip(void) {
     iota(nonce, 24, 200);
     const char *aad = "frame-header";
     uint8_t pt[200];
-    for (size_t i = 0; i < sizeof pt; i++) pt[i] = (uint8_t)(i * 3 + 1);
+    for (size_t i = 0; i < sizeof pt; i++)
+        pt[i] = (uint8_t)(i * 3 + 1);
     uint8_t ct[200], tag[16], back[200];
     aead_seal(key, nonce, (const uint8_t *)aad, strlen(aad), pt, sizeof pt, ct,
               tag);
@@ -134,30 +137,26 @@ static void test_tamper_is_detected(void) {
 
     /* flip a ciphertext byte */
     ct[0] ^= 0x01;
-    TEST_ASSERT_EQUAL_INT(-1,
-                          aead_open(key, nonce, (const uint8_t *)aad, 3, ct,
-                                    sizeof ct, back, tag));
+    TEST_ASSERT_EQUAL_INT(-1, aead_open(key, nonce, (const uint8_t *)aad, 3, ct,
+                                        sizeof ct, back, tag));
     ct[0] ^= 0x01; /* restore */
 
     /* flip a tag byte */
     uint8_t bad_tag[16];
     memcpy(bad_tag, tag, 16);
     bad_tag[15] ^= 0x80;
-    TEST_ASSERT_EQUAL_INT(-1,
-                          aead_open(key, nonce, (const uint8_t *)aad, 3, ct,
-                                    sizeof ct, back, bad_tag));
+    TEST_ASSERT_EQUAL_INT(-1, aead_open(key, nonce, (const uint8_t *)aad, 3, ct,
+                                        sizeof ct, back, bad_tag));
 
     /* alter the AAD */
-    TEST_ASSERT_EQUAL_INT(-1,
-                          aead_open(key, nonce, (const uint8_t *)"AAD", 3, ct,
-                                    sizeof ct, back, tag));
+    TEST_ASSERT_EQUAL_INT(-1, aead_open(key, nonce, (const uint8_t *)"AAD", 3,
+                                        ct, sizeof ct, back, tag));
 
     /* wrong key */
     uint8_t key2[32];
     iota(key2, 32, 99);
-    TEST_ASSERT_EQUAL_INT(-1,
-                          aead_open(key2, nonce, (const uint8_t *)aad, 3, ct,
-                                    sizeof ct, back, tag));
+    TEST_ASSERT_EQUAL_INT(-1, aead_open(key2, nonce, (const uint8_t *)aad, 3,
+                                        ct, sizeof ct, back, tag));
 }
 
 static void test_open_failure_zeroes_output(void) {
@@ -187,15 +186,15 @@ static void test_inplace_and_empty(void) {
     memcpy(orig, buf, sizeof buf);
     uint8_t tag[16];
     aead_seal(key, nonce, NULL, 0, buf, sizeof buf, buf, tag);
-    TEST_ASSERT_EQUAL_INT(0,
-                          aead_open(key, nonce, NULL, 0, buf, sizeof buf, buf, tag));
+    TEST_ASSERT_EQUAL_INT(
+        0, aead_open(key, nonce, NULL, 0, buf, sizeof buf, buf, tag));
     TEST_ASSERT_EQUAL_MEMORY(orig, buf, sizeof buf);
 
     /* empty plaintext, non-empty AAD: still authenticates */
     uint8_t etag[16], edummy[1];
     aead_seal(key, nonce, (const uint8_t *)"x", 1, edummy, 0, edummy, etag);
-    TEST_ASSERT_EQUAL_INT(
-        0, aead_open(key, nonce, (const uint8_t *)"x", 1, edummy, 0, edummy, etag));
+    TEST_ASSERT_EQUAL_INT(0, aead_open(key, nonce, (const uint8_t *)"x", 1,
+                                       edummy, 0, edummy, etag));
     TEST_ASSERT_EQUAL_INT(-1, aead_open(key, nonce, (const uint8_t *)"y", 1,
                                         edummy, 0, edummy, etag));
 }

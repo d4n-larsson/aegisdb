@@ -22,7 +22,8 @@ static float frand(void) {
     return (float)((g_rng >> 11) * (1.0 / 9007199254740992.0)) * 2.0f - 1.0f;
 }
 static void rand_vec(float *v) {
-    for (int i = 0; i < DIM; i++) v[i] = frand();
+    for (int i = 0; i < DIM; i++)
+        v[i] = frand();
 }
 
 static float cosine(const float *a, const float *b) {
@@ -40,11 +41,13 @@ static float cosine(const float *a, const float *b) {
 static void brute_top_k(const float *vecs, size_t n, const float *q, size_t k,
                         uint64_t *out_ids) {
     float *sims = malloc(n * sizeof(float));
-    for (size_t i = 0; i < n; i++) sims[i] = cosine(q, &vecs[i * DIM]);
+    for (size_t i = 0; i < n; i++)
+        sims[i] = cosine(q, &vecs[i * DIM]);
     for (size_t r = 0; r < k; r++) {
         size_t best = 0;
         for (size_t i = 1; i < n; i++)
-            if (sims[i] > sims[best]) best = i;
+            if (sims[i] > sims[best])
+                best = i;
         out_ids[r] = (uint64_t)best;
         sims[best] = -2.0f; /* exclude */
     }
@@ -57,9 +60,11 @@ static void test_hnsw_recall(void) {
     g_rng = 0xC0FFEE123456789ULL;
 
     float *vecs = malloc(N * DIM * sizeof(float));
-    for (size_t i = 0; i < N; i++) rand_vec(&vecs[i * DIM]);
+    for (size_t i = 0; i < N; i++)
+        rand_vec(&vecs[i * DIM]);
 
-    HnswParams p = {.M = 16, .ef_construction = 200, .ef_search = 100, .seed = 42};
+    HnswParams p = {
+        .M = 16, .ef_construction = 200, .ef_search = 100, .seed = 42};
     Hnsw *h = hnsw_create(DIM, &p);
     TEST_ASSERT_NOT_NULL(h);
     for (size_t i = 0; i < N; i++)
@@ -82,7 +87,10 @@ static void test_hnsw_recall(void) {
             TEST_ASSERT_TRUE(sc[i - 1] >= sc[i]); /* scores descending */
         for (size_t i = 0; i < n; i++)
             for (size_t j = 0; j < K; j++)
-                if (ids[i] == truth[j]) { hits++; break; }
+                if (ids[i] == truth[j]) {
+                    hits++;
+                    break;
+                }
         free(ids);
         free(sc);
     }
@@ -106,7 +114,10 @@ static void test_hnsw_delete(void) {
     }
     /* remove every even id */
     size_t removed = 0;
-    for (size_t i = 0; i < N; i += 2) { hnsw_remove(h, i); removed++; }
+    for (size_t i = 0; i < N; i += 2) {
+        hnsw_remove(h, i);
+        removed++;
+    }
     TEST_ASSERT_EQUAL_size_t(N - removed, hnsw_count(h));
 
     for (size_t qi = 0; qi < 20; qi++) {
@@ -117,7 +128,8 @@ static void test_hnsw_delete(void) {
         size_t n = 0;
         TEST_ASSERT_EQUAL_INT(0, hnsw_search(h, q, DIM, 10, 0, &ids, &sc, &n));
         for (size_t i = 0; i < n; i++)
-            TEST_ASSERT_TRUE(ids[i] % 2 == 1); /* no removed (even) id returned */
+            TEST_ASSERT_TRUE(ids[i] % 2 ==
+                             1); /* no removed (even) id returned */
         free(ids);
         free(sc);
     }
@@ -132,7 +144,10 @@ static void test_hnsw_update(void) {
     /* fill with noise so the graph is non-trivial */
     g_rng = 0x99ULL;
     float v[DIM];
-    for (size_t i = 1; i < 200; i++) { rand_vec(v); hnsw_add(h, i, v, DIM); }
+    for (size_t i = 1; i < 200; i++) {
+        rand_vec(v);
+        hnsw_add(h, i, v, DIM);
+    }
 
     float axis_a[DIM] = {0}, axis_b[DIM] = {0};
     axis_a[0] = 1.0f;
@@ -140,17 +155,21 @@ static void test_hnsw_update(void) {
     hnsw_add(h, 1000, axis_a, DIM); /* id 1000 points along axis A */
     size_t before = hnsw_count(h);
 
-    uint64_t *ids = NULL; float *sc = NULL; size_t n = 0;
+    uint64_t *ids = NULL;
+    float *sc = NULL;
+    size_t n = 0;
     hnsw_search(h, axis_a, DIM, 1, 200, &ids, &sc, &n);
     TEST_ASSERT_EQUAL_UINT64(1000, ids[0]); /* nearest to A */
-    free(ids); free(sc);
+    free(ids);
+    free(sc);
 
     hnsw_add(h, 1000, axis_b, DIM); /* re-point id 1000 to axis B */
     TEST_ASSERT_EQUAL_size_t(before, hnsw_count(h)); /* replaced, not added */
 
     hnsw_search(h, axis_b, DIM, 1, 200, &ids, &sc, &n);
     TEST_ASSERT_EQUAL_UINT64(1000, ids[0]); /* now nearest to B */
-    free(ids); free(sc);
+    free(ids);
+    free(sc);
     hnsw_free(h);
 }
 
@@ -159,7 +178,8 @@ static void test_hnsw_reproducible(void) {
     const size_t N = 300;
     g_rng = 0x5555ULL;
     float *vecs = malloc(N * DIM * sizeof(float));
-    for (size_t i = 0; i < N; i++) rand_vec(&vecs[i * DIM]);
+    for (size_t i = 0; i < N; i++)
+        rand_vec(&vecs[i * DIM]);
 
     HnswParams p = {.seed = 7};
     uint64_t ids1[10], ids2[10];
@@ -169,16 +189,21 @@ static void test_hnsw_reproducible(void) {
 
     for (int pass = 0; pass < 2; pass++) {
         Hnsw *h = hnsw_create(DIM, &p);
-        for (size_t i = 0; i < N; i++) hnsw_add(h, i, &vecs[i * DIM], DIM);
-        uint64_t *ids = NULL; float *sc = NULL; size_t n = 0;
+        for (size_t i = 0; i < N; i++)
+            hnsw_add(h, i, &vecs[i * DIM], DIM);
+        uint64_t *ids = NULL;
+        float *sc = NULL;
+        size_t n = 0;
         hnsw_search(h, q, DIM, 10, 0, &ids, &sc, &n);
         TEST_ASSERT_EQUAL_size_t(10, n);
         for (size_t i = 0; i < n; i++)
             (pass == 0 ? ids1 : ids2)[i] = ids[i];
-        free(ids); free(sc);
+        free(ids);
+        free(sc);
         hnsw_free(h);
     }
-    for (int i = 0; i < 10; i++) TEST_ASSERT_EQUAL_UINT64(ids1[i], ids2[i]);
+    for (int i = 0; i < 10; i++)
+        TEST_ASSERT_EQUAL_UINT64(ids1[i], ids2[i]);
     free(vecs);
 }
 
@@ -213,12 +238,16 @@ static void test_hnsw_save_load(void) {
     const size_t N = 800, K = 10, Q = 30;
     g_rng = 0xABCDEF01ULL;
     float *vecs = malloc(N * DIM * sizeof(float));
-    for (size_t i = 0; i < N; i++) rand_vec(&vecs[i * DIM]);
+    for (size_t i = 0; i < N; i++)
+        rand_vec(&vecs[i * DIM]);
 
-    HnswParams p = {.M = 16, .ef_construction = 200, .ef_search = 64, .seed = 5};
+    HnswParams p = {
+        .M = 16, .ef_construction = 200, .ef_search = 64, .seed = 5};
     Hnsw *h = hnsw_create(DIM, &p);
-    for (size_t i = 0; i < N; i++) hnsw_add(h, i, &vecs[i * DIM], DIM);
-    for (size_t i = 0; i < N; i += 7) hnsw_remove(h, i); /* some tombstones */
+    for (size_t i = 0; i < N; i++)
+        hnsw_add(h, i, &vecs[i * DIM], DIM);
+    for (size_t i = 0; i < N; i += 7)
+        hnsw_remove(h, i); /* some tombstones */
     size_t live = hnsw_count(h);
 
     char path[256];
@@ -242,25 +271,34 @@ static void test_hnsw_save_load(void) {
         TEST_ASSERT_EQUAL_INT(0, hnsw_search(h, q, DIM, K, 0, &a, &sa, &na));
         TEST_ASSERT_EQUAL_INT(0, hnsw_search(h2, q, DIM, K, 0, &b, &sb, &nb));
         TEST_ASSERT_EQUAL_size_t(na, nb);
-        for (size_t i = 0; i < na; i++) TEST_ASSERT_EQUAL_UINT64(a[i], b[i]);
-        free(a); free(b); free(sa); free(sb);
+        for (size_t i = 0; i < na; i++)
+            TEST_ASSERT_EQUAL_UINT64(a[i], b[i]);
+        free(a);
+        free(b);
+        free(sa);
+        free(sb);
     }
 
     /* a removed id stays gone, and the reloaded graph accepts new inserts */
     float nv[DIM];
     rand_vec(nv);
     TEST_ASSERT_EQUAL_INT(0, hnsw_add(h2, 100000, nv, DIM));
-    uint64_t *ids = NULL; float *sc = NULL; size_t n = 0;
+    uint64_t *ids = NULL;
+    float *sc = NULL;
+    size_t n = 0;
     TEST_ASSERT_EQUAL_INT(0, hnsw_search(h2, nv, DIM, 1, 0, &ids, &sc, &n));
     TEST_ASSERT_EQUAL_UINT64(100000, ids[0]);
-    free(ids); free(sc);
+    free(ids);
+    free(sc);
 
     hnsw_free(h);
     hnsw_free(h2);
 
     /* rejection paths */
-    TEST_ASSERT_NULL(hnsw_load(path, DIM + 1, &got_covered, NULL)); /* dim mismatch */
-    TEST_ASSERT_NULL(hnsw_load("/tmp/aegis_hnsw_does_not_exist.bin", DIM, &got_covered, NULL));
+    TEST_ASSERT_NULL(
+        hnsw_load(path, DIM + 1, &got_covered, NULL)); /* dim mismatch */
+    TEST_ASSERT_NULL(hnsw_load("/tmp/aegis_hnsw_does_not_exist.bin", DIM,
+                               &got_covered, NULL));
     /* truncate -> bad CRC -> reject */
     TEST_ASSERT_EQUAL_INT(0, truncate(path, 64));
     TEST_ASSERT_NULL(hnsw_load(path, DIM, &got_covered, NULL));
@@ -275,10 +313,12 @@ static void test_hnsw_tombstone_rebuild(void) {
     const size_t N = 2000;
     g_rng = 0x7ACEULL;
     float *vecs = malloc(N * DIM * sizeof(float));
-    for (size_t i = 0; i < N; i++) rand_vec(&vecs[i * DIM]);
+    for (size_t i = 0; i < N; i++)
+        rand_vec(&vecs[i * DIM]);
 
     Hnsw *h = hnsw_create(DIM, NULL);
-    for (size_t i = 0; i < N; i++) hnsw_add(h, i, &vecs[i * DIM], DIM);
+    for (size_t i = 0; i < N; i++)
+        hnsw_add(h, i, &vecs[i * DIM], DIM);
     TEST_ASSERT_EQUAL_size_t(N, hnsw_total_nodes(h)); /* no tombstones yet */
 
     /* Replace every id once with a fresh vector: each replace tombstones the old
@@ -287,9 +327,10 @@ static void test_hnsw_tombstone_rebuild(void) {
         rand_vec(&vecs[i * DIM]);
         hnsw_add(h, i, &vecs[i * DIM], DIM);
     }
-    TEST_ASSERT_EQUAL_size_t(N, hnsw_count(h));          /* still N live */
-    TEST_ASSERT_TRUE(hnsw_total_nodes(h) < 2 * N);       /* compaction happened */
-    TEST_ASSERT_EQUAL_size_t(hnsw_count(h), hnsw_total_nodes(h)); /* no tombstones left */
+    TEST_ASSERT_EQUAL_size_t(N, hnsw_count(h));    /* still N live */
+    TEST_ASSERT_TRUE(hnsw_total_nodes(h) < 2 * N); /* compaction happened */
+    TEST_ASSERT_EQUAL_size_t(hnsw_count(h),
+                             hnsw_total_nodes(h)); /* no tombstones left */
 
     /* search still returns the current vectors */
     size_t hits = 0;
@@ -297,9 +338,10 @@ static void test_hnsw_tombstone_rebuild(void) {
         uint64_t *ids = NULL;
         float *sc = NULL;
         size_t n = 0;
-        TEST_ASSERT_EQUAL_INT(0,
-            hnsw_search(h, &vecs[i * DIM], DIM, 1, 64, &ids, &sc, &n));
-        if (n == 1 && ids[0] == i) hits++;
+        TEST_ASSERT_EQUAL_INT(
+            0, hnsw_search(h, &vecs[i * DIM], DIM, 1, 64, &ids, &sc, &n));
+        if (n == 1 && ids[0] == i)
+            hits++;
         free(ids);
         free(sc);
     }
@@ -315,14 +357,18 @@ static void test_hnsw_quantized(void) {
     const size_t N = 1500, K = 10, Q = 40, C = 15;
     g_rng = 0x515Eull;
     float *centers = malloc(C * DIM * sizeof(float));
-    for (size_t i = 0; i < C * DIM; i++) centers[i] = frand();
+    for (size_t i = 0; i < C * DIM; i++)
+        centers[i] = frand();
     float *vecs = malloc(N * DIM * sizeof(float));
     for (size_t i = 0; i < N; i++)
         for (size_t d = 0; d < DIM; d++)
             vecs[i * DIM + d] = centers[(i % C) * DIM + d] + 0.1f * frand();
 
-    HnswParams p = {.M = 16, .ef_construction = 200, .ef_search = 100,
-                    .seed = 9, .quantize = 1};
+    HnswParams p = {.M = 16,
+                    .ef_construction = 200,
+                    .ef_search = 100,
+                    .seed = 9,
+                    .quantize = 1};
     Hnsw *h = hnsw_create(DIM, &p);
     TEST_ASSERT_TRUE(hnsw_is_quantized(h));
     for (size_t i = 0; i < N; i++)
@@ -331,16 +377,21 @@ static void test_hnsw_quantized(void) {
     size_t hits = 0;
     uint64_t truth[16];
     for (size_t qi = 0; qi < Q; qi++) {
-        const float *q = &vecs[(qi * 37 % N) * DIM]; /* query near real clusters */
+        const float *q =
+            &vecs[(qi * 37 % N) * DIM]; /* query near real clusters */
         brute_top_k(vecs, N, q, K, truth);
         uint64_t *ids = NULL;
         float *sc = NULL;
         size_t n = 0;
         TEST_ASSERT_EQUAL_INT(0, hnsw_search(h, q, DIM, K, 0, &ids, &sc, &n));
-        for (size_t i = 1; i < n; i++) TEST_ASSERT_TRUE(sc[i - 1] >= sc[i]);
+        for (size_t i = 1; i < n; i++)
+            TEST_ASSERT_TRUE(sc[i - 1] >= sc[i]);
         for (size_t i = 0; i < n; i++)
             for (size_t j = 0; j < K; j++)
-                if (ids[i] == truth[j]) { hits++; break; }
+                if (ids[i] == truth[j]) {
+                    hits++;
+                    break;
+                }
         free(ids);
         free(sc);
     }
@@ -357,15 +408,20 @@ static void test_hnsw_quantized(void) {
     TEST_ASSERT_TRUE(hnsw_is_quantized(h2));
     TEST_ASSERT_EQUAL_size_t(hnsw_count(h), hnsw_count(h2));
     float qv[DIM];
-    for (int d = 0; d < DIM; d++) qv[d] = vecs[d];
+    for (int d = 0; d < DIM; d++)
+        qv[d] = vecs[d];
     uint64_t *a = NULL, *b = NULL;
     float *sa = NULL, *sb = NULL;
     size_t na = 0, nb = 0;
     hnsw_search(h, qv, DIM, K, 0, &a, &sa, &na);
     hnsw_search(h2, qv, DIM, K, 0, &b, &sb, &nb);
     TEST_ASSERT_EQUAL_size_t(na, nb);
-    for (size_t i = 0; i < na; i++) TEST_ASSERT_EQUAL_UINT64(a[i], b[i]);
-    free(a); free(b); free(sa); free(sb);
+    for (size_t i = 0; i < na; i++)
+        TEST_ASSERT_EQUAL_UINT64(a[i], b[i]);
+    free(a);
+    free(b);
+    free(sa);
+    free(sb);
     unlink(path);
     hnsw_free(h);
     hnsw_free(h2);
@@ -382,7 +438,8 @@ static void test_hnsw_quantized_tombstone_rebuild(void) {
     const size_t N = 2000;
     g_rng = 0xB0DEULL;
     float *vecs = malloc(N * DIM * sizeof(float));
-    for (size_t i = 0; i < N; i++) rand_vec(&vecs[i * DIM]);
+    for (size_t i = 0; i < N; i++)
+        rand_vec(&vecs[i * DIM]);
 
     HnswParams p = {.quantize = 1};
     Hnsw *h = hnsw_create(DIM, &p);
@@ -397,9 +454,10 @@ static void test_hnsw_quantized_tombstone_rebuild(void) {
         rand_vec(&vecs[i * DIM]);
         TEST_ASSERT_EQUAL_INT(0, hnsw_add(h, i, &vecs[i * DIM], DIM));
     }
-    TEST_ASSERT_EQUAL_size_t(N, hnsw_count(h));                   /* still N live */
-    TEST_ASSERT_TRUE(hnsw_total_nodes(h) < 2 * N);               /* rebuild ran */
-    TEST_ASSERT_EQUAL_size_t(hnsw_count(h), hnsw_total_nodes(h)); /* fully compacted */
+    TEST_ASSERT_EQUAL_size_t(N, hnsw_count(h));    /* still N live */
+    TEST_ASSERT_TRUE(hnsw_total_nodes(h) < 2 * N); /* rebuild ran */
+    TEST_ASSERT_EQUAL_size_t(hnsw_count(h),
+                             hnsw_total_nodes(h)); /* fully compacted */
 
     /* Search still finds current vectors after the quantized rebuild. */
     size_t hits = 0;
@@ -407,13 +465,15 @@ static void test_hnsw_quantized_tombstone_rebuild(void) {
         uint64_t *ids = NULL;
         float *sc = NULL;
         size_t n = 0;
-        TEST_ASSERT_EQUAL_INT(0,
-            hnsw_search(h, &vecs[i * DIM], DIM, 1, 64, &ids, &sc, &n));
-        if (n == 1 && ids[0] == i) hits++;
+        TEST_ASSERT_EQUAL_INT(
+            0, hnsw_search(h, &vecs[i * DIM], DIM, 1, 64, &ids, &sc, &n));
+        if (n == 1 && ids[0] == i)
+            hits++;
         free(ids);
         free(sc);
     }
-    TEST_ASSERT_TRUE(hits >= 36); /* 40 probes; quantization adds a little noise */
+    TEST_ASSERT_TRUE(hits >=
+                     36); /* 40 probes; quantization adds a little noise */
 
     hnsw_free(h);
     free(vecs);
@@ -422,10 +482,13 @@ static void test_hnsw_quantized_tombstone_rebuild(void) {
 static void test_hnsw_empty(void) {
     Hnsw *h = hnsw_create(DIM, NULL);
     float q[DIM] = {1.0f};
-    uint64_t *ids = NULL; float *sc = NULL; size_t n = 99;
+    uint64_t *ids = NULL;
+    float *sc = NULL;
+    size_t n = 99;
     TEST_ASSERT_EQUAL_INT(0, hnsw_search(h, q, DIM, 5, 0, &ids, &sc, &n));
     TEST_ASSERT_EQUAL_size_t(0, n);
-    free(ids); free(sc);
+    free(ids);
+    free(sc);
     hnsw_free(h);
 }
 

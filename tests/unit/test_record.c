@@ -71,7 +71,8 @@ static void test_encode_decode_with_embedding_and_agent(void) {
     r.embedding_dim = 4;
     r.vec_count = 1;
     r.embedding = malloc(sizeof(float) * 4);
-    for (size_t i = 0; i < 4; i++) r.embedding[i] = (float)(i + 1) * 0.25f;
+    for (size_t i = 0; i < 4; i++)
+        r.embedding[i] = (float)(i + 1) * 0.25f;
     r.data = strdup("x");
     r.data_len = 1;
 
@@ -126,18 +127,35 @@ static void test_decode_rejects_embedding_overflow(void) {
     uint8_t buf[128];
     size_t n = 0;
 #define B(x) (buf[n++] = (uint8_t)(x))
-#define Z(k) do { for (int _i = 0; _i < (k); _i++) B(0); } while (0)
-    B(2);                       /* version 2 */
-    B(1); Z(7);                 /* id = 1 (u64 LE) */
-    B(0);                       /* type */
-    Z(8); Z(8);                 /* created, updated */
-    Z(4); Z(4);                 /* importance, confidence (f32) */
-    B(0);                       /* deleted */
-    Z(8);                       /* expires_at */
-    B(0xFF); B(0xFF); B(0xFF); B(0xFF); /* agent_id = NULL marker */
-    B(0); B(0);                 /* tag_count = 0 */
-    B(0); B(0); B(0); B(0x80);  /* vec_count = 0x80000000 */
-    B(0); B(0); B(0); B(0x80);  /* dim       = 0x80000000  -> total = 2^62 */
+#define Z(k)                                                                   \
+    do {                                                                       \
+        for (int _i = 0; _i < (k); _i++)                                       \
+            B(0);                                                              \
+    } while (0)
+    B(2); /* version 2 */
+    B(1);
+    Z(7); /* id = 1 (u64 LE) */
+    B(0); /* type */
+    Z(8);
+    Z(8); /* created, updated */
+    Z(4);
+    Z(4); /* importance, confidence (f32) */
+    B(0); /* deleted */
+    Z(8); /* expires_at */
+    B(0xFF);
+    B(0xFF);
+    B(0xFF);
+    B(0xFF); /* agent_id = NULL marker */
+    B(0);
+    B(0); /* tag_count = 0 */
+    B(0);
+    B(0);
+    B(0);
+    B(0x80); /* vec_count = 0x80000000 */
+    B(0);
+    B(0);
+    B(0);
+    B(0x80); /* dim       = 0x80000000  -> total = 2^62 */
     /* no float payload follows: the guard must reject before allocating */
     MemoryRecord d;
     TEST_ASSERT_EQUAL_INT(-1, record_decode(buf, n, &d));
@@ -231,7 +249,8 @@ static void test_multivector_roundtrip(void) {
     r.embedding_dim = 4;
     r.vec_count = 3; /* three 4-D vectors, contiguous */
     r.embedding = malloc(sizeof(float) * 12);
-    for (size_t i = 0; i < 12; i++) r.embedding[i] = (float)i * 0.5f;
+    for (size_t i = 0; i < 12; i++)
+        r.embedding[i] = (float)i * 0.5f;
 
     uint8_t *buf = NULL;
     size_t len = 0;
@@ -268,7 +287,7 @@ static void test_encode_rejects_relationship_overflow(void) {
     r.created = r.updated = 1;
     r.data = strdup("d");
     r.data_len = 1;
-    size_t n = 65536 + 1; /* one past UINT16_MAX */
+    size_t n = 65536 + 1;                              /* one past UINT16_MAX */
     r.relationships = calloc(n, sizeof(Relationship)); /* kind=NULL, ids=0 */
     TEST_ASSERT_NOT_NULL(r.relationships);
     r.rel_count = n;
@@ -289,7 +308,8 @@ static void test_clone_rejects_embedding_overflow(void) {
     r.id = 1;
     r.type = MEM_SEMANTIC;
     r.created = r.updated = 1;
-    r.embedding = malloc(sizeof(float)); /* real 1-float buffer; guard trips first */
+    r.embedding =
+        malloc(sizeof(float)); /* real 1-float buffer; guard trips first */
     TEST_ASSERT_NOT_NULL(r.embedding);
     r.embedding[0] = 1.0f;
     r.vec_count = (size_t)-1 / 2; /* vec_count * dim overflows size_t */
@@ -298,7 +318,8 @@ static void test_clone_rejects_embedding_overflow(void) {
     MemoryRecord *c = record_clone(&r);
     TEST_ASSERT_NULL(c); /* refused, no allocation/overflow */
 
-    record_free(&r); /* frees the 1-float buffer (record_free ignores vec_count) */
+    record_free(
+        &r); /* frees the 1-float buffer (record_free ignores vec_count) */
 }
 
 int main(void) {

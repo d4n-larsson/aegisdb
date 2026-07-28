@@ -16,6 +16,7 @@ on:
       - 'integrations/prometheus-exporter/**'
       - 'Makefile'
       - 'CMakeLists.txt'
+      - '.clang-format'
       - '.github/workflows/ci.yml'
   workflow_dispatch:
   # Nightly libFuzzer soak (the `fuzz` job below gates on this / manual dispatch).
@@ -45,6 +46,19 @@ jobs:
         # WERROR=1 keeps the tree warning-clean under -Wall -Wextra on both
         # gcc and clang (the default build leaves -Werror off for downstream).
         run: make check WERROR=1
+
+  format:
+    name: clang-format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Pin clang-format to the version the tree was formatted with; its output
+      # drifts between major versions, so an unpinned tool would fail spuriously.
+      - name: Check formatting (clang-format, pinned)
+        run: |
+          python3 -m venv /tmp/cf
+          /tmp/cf/bin/pip install --quiet clang-format==22.1.8
+          make format-check CLANG_FORMAT=/tmp/cf/bin/clang-format
 
   asan:
     name: ASan + UBSan (make check)

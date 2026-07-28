@@ -32,7 +32,8 @@
 #include "aegisdb/json_response.h"
 #include "aegisdb/logging.h"
 
-#define POLL_TIMEOUT_MS 200 /* re-check g_stop + idle-reap at least this often */
+#define POLL_TIMEOUT_MS                                                        \
+    200 /* re-check g_stop + idle-reap at least this often */
 
 /* Set from a signal handler and read by every loop thread; atomic for both
  * (lock-free atomic_int store is async-signal-safe). */
@@ -57,12 +58,12 @@ static void accept_backoff(int err) {
     static _Atomic uint64_t last_warn_ms;
     uint64_t now = mono_ms();
     uint64_t prev = atomic_load_explicit(&last_warn_ms, memory_order_relaxed);
-    if (now - prev >= 1000 &&
-        atomic_compare_exchange_strong_explicit(&last_warn_ms, &prev, now,
-                                                memory_order_relaxed,
-                                                memory_order_relaxed))
+    if (now - prev >= 1000 && atomic_compare_exchange_strong_explicit(
+                                  &last_warn_ms, &prev, now,
+                                  memory_order_relaxed, memory_order_relaxed))
         LOG_WARN("accept: cannot accept new connections (%s); throttling until "
-                 "a file descriptor frees", strerror(err));
+                 "a file descriptor frees",
+                 strerror(err));
     nanosleep(&(struct timespec){.tv_sec = 0, .tv_nsec = 20 * 1000 * 1000L},
               NULL);
 }
@@ -78,15 +79,16 @@ static int stop_requested(void) {
 /* Per-connection state. Owned by a single loop thread. */
 typedef struct {
     int fd;
-    char peer[32];      /* "ip:port" for log context */
-    char *rbuf;         /* request accumulation */
+    char peer[32]; /* "ip:port" for log context */
+    char *rbuf;    /* request accumulation */
     size_t rlen, rcap;
-    char *wbuf;         /* pending response bytes [woff, wlen); owned, malloc'd */
+    char *wbuf; /* pending response bytes [woff, wlen); owned, malloc'd */
     size_t wlen, woff;
-    int want_write;     /* a response is staged and not yet fully sent */
+    int want_write;        /* a response is staged and not yet fully sent */
     int close_after_write; /* close once wbuf drains (e.g. oversized-line error) */
     unsigned long requests;
-    uint64_t last_activity; /* mono_ms() of last byte progress; for idle reaping */
+    uint64_t
+        last_activity; /* mono_ms() of last byte progress; for idle reaping */
 } Conn;
 
 /* Maximum accepted request line: payload limit plus JSON envelope slack. */
@@ -95,8 +97,10 @@ static size_t max_line(const AegisDB *db) {
 }
 
 static void conn_free(Conn *c) {
-    if (!c) return;
-    if (c->fd >= 0) close(c->fd);
+    if (!c)
+        return;
+    if (c->fd >= 0)
+        close(c->fd);
     free(c->rbuf);
     free(c->wbuf);
     free(c);
@@ -109,8 +113,10 @@ static int conn_flush(Conn *c) {
     while (c->woff < c->wlen) {
         ssize_t w = write(c->fd, c->wbuf + c->woff, c->wlen - c->woff);
         if (w < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) return 0; /* wait POLLOUT */
+            if (errno == EINTR)
+                continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                return 0; /* wait POLLOUT */
             return -1;
         }
         c->woff += (size_t)w;
@@ -138,7 +144,8 @@ static int conn_advance(Conn *c, AegisDB *db, size_t limit) {
                 size_t rl = 0;
                 char *resp = json_finish_line(
                     json_error_status(AEGIS_ERR_PAYLOAD_TOO_LARGE), NULL, &rl);
-                if (!resp) return -1;
+                if (!resp)
+                    return -1;
                 c->wbuf = resp;
                 c->wlen = rl;
                 c->woff = 0;
@@ -150,11 +157,13 @@ static int conn_advance(Conn *c, AegisDB *db, size_t limit) {
         }
         size_t line_len = (size_t)(nl - c->rbuf);
         size_t eff = line_len;
-        if (eff > 0 && c->rbuf[eff - 1] == '\r') eff--; /* tolerate CRLF */
+        if (eff > 0 && c->rbuf[eff - 1] == '\r')
+            eff--; /* tolerate CRLF */
 
         char *resp = NULL;
         size_t rl = 0;
-        if (eff > 0) resp = aegis_request_handle(db, c->rbuf, eff, &rl);
+        if (eff > 0)
+            resp = aegis_request_handle(db, c->rbuf, eff, &rl);
 
         /* consume the line (and its newline) from the read buffer */
         size_t consumed = line_len + 1;
@@ -163,13 +172,15 @@ static int conn_advance(Conn *c, AegisDB *db, size_t limit) {
 
         if (resp) {
             c->requests++;
-            LOG_DEBUG("connection from %s: handled request #%lu (%zu in, %zu out)",
-                      c->peer, c->requests, eff, rl);
+            LOG_DEBUG(
+                "connection from %s: handled request #%lu (%zu in, %zu out)",
+                c->peer, c->requests, eff, rl);
             c->wbuf = resp;
             c->wlen = rl;
             c->woff = 0;
             c->want_write = 1;
-            if (conn_flush(c) == -1) return -1;
+            if (conn_flush(c) == -1)
+                return -1;
         }
     }
     return 0;
@@ -180,19 +191,25 @@ static int conn_advance(Conn *c, AegisDB *db, size_t limit) {
 static int conn_read(Conn *c, size_t limit) {
     for (;;) {
         if (c->rlen == c->rcap) {
-            if (c->rcap > limit) return 0; /* full w/o newline: advance() rejects */
+            if (c->rcap > limit)
+                return 0; /* full w/o newline: advance() rejects */
             size_t ncap = c->rcap ? c->rcap * 2 : 4096;
-            if (ncap > limit + 1) ncap = limit + 1;
+            if (ncap > limit + 1)
+                ncap = limit + 1;
             char *nb = realloc(c->rbuf, ncap);
-            if (!nb) return -1;
+            if (!nb)
+                return -1;
             c->rbuf = nb;
             c->rcap = ncap;
         }
         ssize_t r = read(c->fd, c->rbuf + c->rlen, c->rcap - c->rlen);
-        if (r == 0) return 1; /* EOF */
+        if (r == 0)
+            return 1; /* EOF */
         if (r < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+            if (errno == EINTR)
+                continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                return 0;
             return -1;
         }
         c->rlen += (size_t)r;
@@ -210,7 +227,8 @@ static void loop_accept(int lfd, Conn ***conns, size_t *n, size_t *cap,
         int cfd = accept4(lfd, (struct sockaddr *)&paddr, &plen,
                           SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (cfd < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR)
+                continue;
             if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS ||
                 errno == ENOMEM)
                 accept_backoff(errno); /* fd exhaustion: nap so we don't spin */
@@ -276,7 +294,8 @@ static void *loop_main(void *arg) {
         size_t need = nconns + 1; /* +1 for the listener */
         if (need > pcap) {
             struct pollfd *np = realloc(pfds, need * sizeof(*np));
-            if (!np) break;
+            if (!np)
+                break;
             pfds = np;
             pcap = need;
         }
@@ -291,7 +310,8 @@ static void *loop_main(void *arg) {
 
         int pr = poll(pfds, need, POLL_TIMEOUT_MS);
         if (pr < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR)
+                continue;
             break;
         }
 
@@ -308,19 +328,26 @@ static void *loop_main(void *arg) {
             for (size_t i = 0; i < polled; i++) {
                 Conn *c = conns[i];
                 short re = pfds[i + 1].revents;
-                if (re == 0) continue;
+                if (re == 0)
+                    continue;
                 int closeit = 0;
                 if (re & POLLIN) {
                     int rr = conn_read(c, limit);
-                    if (rr < 0) closeit = 1;
-                    else if (conn_advance(c, db, limit) == -1) closeit = 1;
-                    else if (rr == 1) closeit = 1; /* EOF: buffered lines processed */
+                    if (rr < 0)
+                        closeit = 1;
+                    else if (conn_advance(c, db, limit) == -1)
+                        closeit = 1;
+                    else if (rr == 1)
+                        closeit = 1; /* EOF: buffered lines processed */
                 }
                 if (!closeit && (re & POLLOUT)) {
-                    if (conn_flush(c) == -1) closeit = 1;
-                    else if (conn_advance(c, db, limit) == -1) closeit = 1;
+                    if (conn_flush(c) == -1)
+                        closeit = 1;
+                    else if (conn_advance(c, db, limit) == -1)
+                        closeit = 1;
                 }
-                if (re & (POLLERR | POLLHUP | POLLNVAL)) closeit = 1;
+                if (re & (POLLERR | POLLHUP | POLLNVAL))
+                    closeit = 1;
                 if (closeit) {
                     LOG_DEBUG("connection from %s closed after %lu request(s)",
                               c->peer, c->requests);
@@ -337,9 +364,11 @@ static void *loop_main(void *arg) {
             uint64_t now = mono_ms();
             for (size_t i = 0; i < nconns; i++) {
                 Conn *c = conns[i];
-                if (!c) continue;
+                if (!c)
+                    continue;
                 if (now - c->last_activity > idle_ms) {
-                    LOG_DEBUG("connection from %s reaped: idle %llu ms", c->peer,
+                    LOG_DEBUG("connection from %s reaped: idle %llu ms",
+                              c->peer,
                               (unsigned long long)(now - c->last_activity));
                     conn_free(c);
                     conns[i] = NULL;
@@ -350,11 +379,13 @@ static void *loop_main(void *arg) {
         /* compact out closed connections */
         size_t w = 0;
         for (size_t i = 0; i < nconns; i++)
-            if (conns[i]) conns[w++] = conns[i];
+            if (conns[i])
+                conns[w++] = conns[i];
         nconns = w;
     }
 
-    for (size_t i = 0; i < nconns; i++) conn_free(conns[i]);
+    for (size_t i = 0; i < nconns; i++)
+        conn_free(conns[i]);
     free(conns);
     free(pfds);
     close(lfd);
@@ -364,7 +395,8 @@ static void *loop_main(void *arg) {
 /* Create a non-blocking SO_REUSEPORT listener bound to `port`. -1 on failure. */
 static int make_listener(int port) {
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    if (fd < 0) return -1;
+    if (fd < 0)
+        return -1;
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     /* Every loop thread binds the same port; the kernel load-balances accepts. */
@@ -380,7 +412,8 @@ static int make_listener(int port) {
     addr.sin_port = htons((uint16_t)port);
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
         listen(fd, 128) != 0) {
-        int err = errno; /* the caller logs strerror(errno); close() can clobber it */
+        int err =
+            errno; /* the caller logs strerror(errno); close() can clobber it */
         close(fd);
         errno = err;
         return -1;
@@ -395,7 +428,8 @@ int tcp_server_run(AegisDB *db) {
     atomic_store_explicit(&g_stop, 0, memory_order_relaxed);
 
     int nthreads = db->config.io_threads;
-    if (nthreads < 1) nthreads = 1;
+    if (nthreads < 1)
+        nthreads = 1;
 
     /* Create all listeners up front so a bind failure is caught before any
      * thread is spawned. */
@@ -408,7 +442,8 @@ int tcp_server_run(AegisDB *db) {
         free(threads);
         return -1;
     }
-    for (int i = 0; i < nthreads; i++) lfds[i] = -1;
+    for (int i = 0; i < nthreads; i++)
+        lfds[i] = -1;
 
     int made = 0;
     for (int i = 0; i < nthreads; i++) {
@@ -421,7 +456,8 @@ int tcp_server_run(AegisDB *db) {
         made++;
     }
     if (made != nthreads) {
-        for (int i = 0; i < made; i++) close(lfds[i]);
+        for (int i = 0; i < made; i++)
+            close(lfds[i]);
         free(lfds);
         free(loops);
         free(threads);
@@ -444,7 +480,8 @@ int tcp_server_run(AegisDB *db) {
         spawned++;
     }
     if (spawned == 0) {
-        for (int i = 0; i < nthreads; i++) close(lfds[i]);
+        for (int i = 0; i < nthreads; i++)
+            close(lfds[i]);
         free(lfds);
         free(loops);
         free(threads);
@@ -458,10 +495,12 @@ int tcp_server_run(AegisDB *db) {
          * have owned. */
         LOG_WARN("only %d of %d io threads started; running degraded", spawned,
                  nthreads);
-        for (int i = spawned; i < nthreads; i++) close(lfds[i]);
+        for (int i = spawned; i < nthreads; i++)
+            close(lfds[i]);
     }
 
-    for (int i = 0; i < spawned; i++) pthread_join(threads[i], NULL);
+    for (int i = 0; i < spawned; i++)
+        pthread_join(threads[i], NULL);
 
     LOG_INFO("shutting down");
     free(lfds);

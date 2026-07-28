@@ -16,7 +16,8 @@ static uint8_t KEY_A[AEAD_KEY_LEN];
 static uint8_t KEY_B[AEAD_KEY_LEN];
 
 void setUp(void) {
-    snprintf(g_path, sizeof(g_path), "/tmp/aegis_test_logenc_%d.log", (int)getpid());
+    snprintf(g_path, sizeof(g_path), "/tmp/aegis_test_logenc_%d.log",
+             (int)getpid());
     remove(g_path);
     for (int i = 0; i < AEAD_KEY_LEN; i++) {
         KEY_A[i] = (uint8_t)i;
@@ -41,8 +42,10 @@ static void test_encrypted_roundtrip_and_scan(void) {
     const char *a = "secret memory one";
     const char *b = "a considerably longer secret memory payload #2";
     uint64_t off_a = 0, off_b = 0;
-    TEST_ASSERT_EQUAL_INT(0, log_append(&lf, (const uint8_t *)a, strlen(a), &off_a));
-    TEST_ASSERT_EQUAL_INT(0, log_append(&lf, (const uint8_t *)b, strlen(b), &off_b));
+    TEST_ASSERT_EQUAL_INT(
+        0, log_append(&lf, (const uint8_t *)a, strlen(a), &off_a));
+    TEST_ASSERT_EQUAL_INT(
+        0, log_append(&lf, (const uint8_t *)b, strlen(b), &off_b));
     TEST_ASSERT_EQUAL_UINT64(0, off_a);
     TEST_ASSERT_NOT_EQUAL(off_a, off_b);
 
@@ -58,7 +61,8 @@ static void test_encrypted_roundtrip_and_scan(void) {
 
     int n = 0;
     LogScanResult res;
-    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf, 0, (uint64_t)lf.size, scan_count, &n, &res));
+    TEST_ASSERT_EQUAL_INT(
+        0, log_scan(&lf, 0, (uint64_t)lf.size, scan_count, &n, &res));
     TEST_ASSERT_EQUAL_INT(2, n);
     TEST_ASSERT_EQUAL_size_t(2, res.good_frames);
     TEST_ASSERT_EQUAL_size_t(0, res.corrupt_frames);
@@ -82,7 +86,10 @@ static void test_plaintext_not_on_disk(void) {
     int found = 0;
     size_t slen = strlen(secret);
     for (size_t i = 0; i + slen <= got; i++)
-        if (memcmp(buf + i, secret, slen) == 0) { found = 1; break; }
+        if (memcmp(buf + i, secret, slen) == 0) {
+            found = 1;
+            break;
+        }
     TEST_ASSERT_FALSE(found);
 }
 
@@ -90,7 +97,8 @@ static void test_reopen_right_key(void) {
     LogFile lf;
     const char *a = "persisted secret";
     TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 0, KEY_A, NULL));
-    TEST_ASSERT_EQUAL_INT(0, log_append(&lf, (const uint8_t *)a, strlen(a), NULL));
+    TEST_ASSERT_EQUAL_INT(0,
+                          log_append(&lf, (const uint8_t *)a, strlen(a), NULL));
     log_close(&lf);
 
     LogFile lf2;
@@ -131,7 +139,8 @@ static void test_reopen_encrypted_without_key_refused(void) {
 
 static void test_key_on_plaintext_log_refused(void) {
     LogFile lf;
-    TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 0, NULL, NULL)); /* plaintext */
+    TEST_ASSERT_EQUAL_INT(0,
+                          log_open(&lf, g_path, 0, NULL, NULL)); /* plaintext */
     TEST_ASSERT_EQUAL_INT(0, log_append(&lf, (const uint8_t *)"hi", 2, NULL));
     log_close(&lf);
 
@@ -147,8 +156,10 @@ static void test_tamper_detected_on_read_and_scan(void) {
     const char *b = "second frame gets tampered";
     uint64_t off2 = 0;
     TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 0, KEY_A, NULL));
-    TEST_ASSERT_EQUAL_INT(0, log_append(&lf, (const uint8_t *)a, strlen(a), NULL));
-    TEST_ASSERT_EQUAL_INT(0, log_append(&lf, (const uint8_t *)b, strlen(b), &off2));
+    TEST_ASSERT_EQUAL_INT(0,
+                          log_append(&lf, (const uint8_t *)a, strlen(a), NULL));
+    TEST_ASSERT_EQUAL_INT(
+        0, log_append(&lf, (const uint8_t *)b, strlen(b), &off2));
     log_close(&lf);
 
     /* Flip a byte inside the SECOND frame's ciphertext (its v3 header is 36
@@ -170,16 +181,20 @@ static void test_tamper_detected_on_read_and_scan(void) {
 
     uint8_t *out = NULL;
     size_t out_len = 0;
-    TEST_ASSERT_EQUAL_INT(0, log_read(&lf2, 0, &out, &out_len)); /* frame 1 ok */
+    TEST_ASSERT_EQUAL_INT(0,
+                          log_read(&lf2, 0, &out, &out_len)); /* frame 1 ok */
     free(out);
-    TEST_ASSERT_EQUAL_INT(-1, log_read(&lf2, off2, &out, &out_len)); /* auth fails */
+    TEST_ASSERT_EQUAL_INT(
+        -1, log_read(&lf2, off2, &out, &out_len)); /* auth fails */
 
     int n = 0;
     LogScanResult res;
-    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf2, 0, (uint64_t)lf2.size, scan_count, &n, &res));
-    TEST_ASSERT_EQUAL_INT(1, n);                     /* only frame 1 delivered */
+    TEST_ASSERT_EQUAL_INT(
+        0, log_scan(&lf2, 0, (uint64_t)lf2.size, scan_count, &n, &res));
+    TEST_ASSERT_EQUAL_INT(1, n); /* only frame 1 delivered */
     TEST_ASSERT_EQUAL_size_t(1, res.good_frames);
-    TEST_ASSERT_EQUAL_size_t(1, res.corrupt_frames); /* frame 2 flagged corrupt */
+    TEST_ASSERT_EQUAL_size_t(1,
+                             res.corrupt_frames); /* frame 2 flagged corrupt */
     log_close(&lf2);
 }
 

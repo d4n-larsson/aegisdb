@@ -11,10 +11,10 @@ typedef struct {
 
 typedef struct Session {
     char *session_id;
-    Slot *slots;       /* ring buffer of capacity entries */
+    Slot *slots; /* ring buffer of capacity entries */
     uint32_t capacity;
-    uint32_t head;     /* next write position */
-    uint64_t next_id;  /* session-local id counter */
+    uint32_t head;    /* next write position */
+    uint64_t next_id; /* session-local id counter */
     struct Session *next;
 } Session;
 
@@ -42,7 +42,8 @@ static size_t hash_str(const char *s) {
 
 WorkingStore *working_store_create(uint32_t capacity, uint64_t default_ttl_ms) {
     WorkingStore *ws = calloc(1, sizeof(*ws));
-    if (!ws) return NULL;
+    if (!ws)
+        return NULL;
     ws->capacity = capacity ? capacity : 256;
     ws->default_ttl_ms = default_ttl_ms ? default_ttl_ms : 3600000;
     if (pthread_mutex_init(&ws->lock, NULL) != 0) {
@@ -53,20 +54,23 @@ WorkingStore *working_store_create(uint32_t capacity, uint64_t default_ttl_ms) {
 }
 
 size_t working_store_count(const WorkingStore *ws) {
-    if (!ws) return 0;
+    if (!ws)
+        return 0;
     WorkingStore *w = (WorkingStore *)ws; /* mutex use requires non-const */
     pthread_mutex_lock(&w->lock);
     size_t n = 0;
     for (size_t i = 0; i < SBUCKETS; i++)
         for (const Session *s = w->buckets[i]; s; s = s->next)
             for (uint32_t k = 0; k < s->capacity; k++)
-                if (s->slots[k].rec) n++;
+                if (s->slots[k].rec)
+                    n++;
     pthread_mutex_unlock(&w->lock);
     return n;
 }
 
 void working_store_free(WorkingStore *ws) {
-    if (!ws) return;
+    if (!ws)
+        return;
     pthread_mutex_destroy(&ws->lock);
     for (size_t i = 0; i < SBUCKETS; i++) {
         Session *s = ws->buckets[i];
@@ -90,10 +94,13 @@ void working_store_free(WorkingStore *ws) {
 static Session *get_session(WorkingStore *ws, const char *sid, int create) {
     size_t b = hash_str(sid);
     for (Session *s = ws->buckets[b]; s; s = s->next)
-        if (strcmp(s->session_id, sid) == 0) return s;
-    if (!create) return NULL;
+        if (strcmp(s->session_id, sid) == 0)
+            return s;
+    if (!create)
+        return NULL;
     Session *s = calloc(1, sizeof(*s));
-    if (!s) return NULL;
+    if (!s)
+        return NULL;
     s->session_id = strdup(sid);
     s->capacity = ws->capacity;
     s->slots = calloc(s->capacity, sizeof(Slot));
@@ -112,14 +119,16 @@ static Session *get_session(WorkingStore *ws, const char *sid, int create) {
 static Slot *find_slot(Session *s, uint64_t id, uint64_t now) {
     for (uint32_t k = 0; k < s->capacity; k++) {
         Slot *sl = &s->slots[k];
-        if (!sl->rec) continue;
+        if (!sl->rec)
+            continue;
         if (sl->rec->expires_at && now >= sl->rec->expires_at) {
             record_free(sl->rec);
             free(sl->rec);
             sl->rec = NULL;
             continue;
         }
-        if (sl->rec->id == id) return sl;
+        if (sl->rec->id == id)
+            return sl;
     }
     return NULL;
 }
@@ -155,7 +164,8 @@ int working_store_add(WorkingStore *ws, const char *session_id,
     }
     slot->rec = copy;
     s->head = (s->head + 1) % s->capacity;
-    if (out_id) *out_id = copy->id;
+    if (out_id)
+        *out_id = copy->id;
     pthread_mutex_unlock(&ws->lock);
     return 0;
 }
@@ -167,7 +177,8 @@ MemoryRecord *working_store_get(WorkingStore *ws, const char *session_id,
     MemoryRecord *out = NULL;
     if (s) {
         Slot *sl = find_slot(s, id, now);
-        if (sl) out = record_clone(sl->rec);
+        if (sl)
+            out = record_clone(sl->rec);
     }
     pthread_mutex_unlock(&ws->lock);
     return out;

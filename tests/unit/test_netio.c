@@ -13,7 +13,9 @@
 
 static int sv[2];
 
-void setUp(void) { TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv)); }
+void setUp(void) {
+    TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+}
 void tearDown(void) {
     close(sv[0]);
     close(sv[1]);
@@ -21,7 +23,8 @@ void tearDown(void) {
 
 static void test_write_all_read_full_roundtrip(void) {
     uint8_t out[300], in[300];
-    for (int i = 0; i < 300; i++) out[i] = (uint8_t)(i * 7 + 1);
+    for (int i = 0; i < 300; i++)
+        out[i] = (uint8_t)(i * 7 + 1);
     TEST_ASSERT_EQUAL_INT(0, net_write_all(sv[0], out, sizeof out));
     TEST_ASSERT_EQUAL_INT(0, net_read_full(sv[1], in, sizeof in));
     TEST_ASSERT_EQUAL_MEMORY(out, in, sizeof out);
@@ -61,7 +64,8 @@ static void test_read_line_truncates_to_cap(void) {
 static void test_read_line_past_deadline_returns_error(void) {
     /* Deadline already elapsed, no data written: returns -1 without blocking. */
     char line[16];
-    TEST_ASSERT_EQUAL_INT(-1, net_read_line(sv[1], line, sizeof line, net_mono_ms()));
+    TEST_ASSERT_EQUAL_INT(
+        -1, net_read_line(sv[1], line, sizeof line, net_mono_ms()));
 }
 
 static void test_read_full_eof_is_error(void) {

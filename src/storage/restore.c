@@ -24,18 +24,24 @@ static int file_exists(const char *path) {
 /* -1 if the file is missing or cannot be stat'd. */
 static long long file_size(const char *path) {
     struct stat st;
-    if (stat(path, &st) != 0) return -1;
+    if (stat(path, &st) != 0)
+        return -1;
     return (long long)st.st_size;
 }
 
 /* Read an entire (small) file into a NUL-terminated heap buffer, or NULL. */
 static char *read_text(const char *path) {
     long long sz = file_size(path);
-    if (sz < 0 || sz > (1 << 20)) return NULL; /* manifests are tiny */
+    if (sz < 0 || sz > (1 << 20))
+        return NULL; /* manifests are tiny */
     FILE *f = fopen(path, "rbe");
-    if (!f) return NULL;
+    if (!f)
+        return NULL;
     char *buf = malloc((size_t)sz + 1);
-    if (!buf) { fclose(f); return NULL; }
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
     size_t got = fread(buf, 1, (size_t)sz, f);
     fclose(f);
     buf[got] = '\0';
@@ -44,13 +50,15 @@ static char *read_text(const char *path) {
 
 int restore_run(const Config *cfg) {
     const char *src = cfg->restore_from;
-    char man_path[AEGIS_PATH_MAX], src_log[AEGIS_PATH_MAX], src_meta[AEGIS_PATH_MAX];
+    char man_path[AEGIS_PATH_MAX], src_log[AEGIS_PATH_MAX],
+        src_meta[AEGIS_PATH_MAX];
     snprintf(man_path, sizeof(man_path), "%s/manifest.json", src);
     snprintf(src_log, sizeof(src_log), "%s/memory.log", src);
     snprintf(src_meta, sizeof(src_meta), "%s/metadata.db", src);
 
     if (!file_exists(src_log)) {
-        LOG_ERROR("restore: %s has no memory.log — not a snapshot directory", src);
+        LOG_ERROR("restore: %s has no memory.log — not a snapshot directory",
+                  src);
         return -1;
     }
 
@@ -79,18 +87,20 @@ int restore_run(const Config *cfg) {
     }
     if (!cJSON_IsNumber(dim) ||
         (size_t)dim->valuedouble != cfg->embedding_dimensions) {
-        LOG_ERROR("restore: snapshot embedding-dim %d does not match --embedding-dim "
-                  "%zu; restore with a matching dimension",
-                  cJSON_IsNumber(dim) ? dim->valueint : -1,
-                  cfg->embedding_dimensions);
+        LOG_ERROR(
+            "restore: snapshot embedding-dim %d does not match --embedding-dim "
+            "%zu; restore with a matching dimension",
+            cJSON_IsNumber(dim) ? dim->valueint : -1,
+            cfg->embedding_dimensions);
         goto done;
     }
     /* The copied log must be exactly the size the manifest claims. */
     if (cJSON_IsNumber(lsize) &&
         (long long)lsize->valuedouble != file_size(src_log)) {
-        LOG_ERROR("restore: memory.log size %lld does not match manifest %lld — "
-                  "snapshot is incomplete",
-                  file_size(src_log), (long long)lsize->valuedouble);
+        LOG_ERROR(
+            "restore: memory.log size %lld does not match manifest %lld — "
+            "snapshot is incomplete",
+            file_size(src_log), (long long)lsize->valuedouble);
         goto done;
     }
 
@@ -100,8 +110,9 @@ int restore_run(const Config *cfg) {
     const cJSON *enc = cJSON_GetObjectItemCaseSensitive(man, "encrypted");
     if (cJSON_IsTrue(enc)) {
         if (!cfg->encryption_enabled) {
-            LOG_ERROR("restore: snapshot is encrypted; restore with the matching "
-                      "--encryption-key-file");
+            LOG_ERROR(
+                "restore: snapshot is encrypted; restore with the matching "
+                "--encryption-key-file");
             goto done;
         }
         char fp[13];
@@ -109,16 +120,18 @@ int restore_run(const Config *cfg) {
         const cJSON *mfp =
             cJSON_GetObjectItemCaseSensitive(man, "key_fingerprint");
         if (!cJSON_IsString(mfp) || strcmp(mfp->valuestring, fp) != 0) {
-            LOG_ERROR("restore: --encryption-key-file (fingerprint %s) does not "
-                      "match the snapshot's key (%s)", fp,
-                      cJSON_IsString(mfp) ? mfp->valuestring : "?");
+            LOG_ERROR(
+                "restore: --encryption-key-file (fingerprint %s) does not "
+                "match the snapshot's key (%s)",
+                fp, cJSON_IsString(mfp) ? mfp->valuestring : "?");
             goto done;
         }
     } else if (cfg->encryption_enabled) {
         /* Plaintext snapshot but a key was given: the restored plaintext log
          * would be refused on the next start. Guide the operator. */
-        LOG_ERROR("restore: snapshot is plaintext but --encryption-key-file was "
-                  "given; restore without a key, then run --encrypt-migrate");
+        LOG_ERROR(
+            "restore: snapshot is plaintext but --encryption-key-file was "
+            "given; restore without a key, then run --encrypt-migrate");
         goto done;
     }
 
@@ -137,10 +150,13 @@ int restore_run(const Config *cfg) {
     int claim = open(dst_log, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
     if (claim < 0) {
         if (errno == EEXIST)
-            LOG_ERROR("restore: %s already contains a database; restore into an "
-                      "empty --data-dir", cfg->data_dir);
+            LOG_ERROR(
+                "restore: %s already contains a database; restore into an "
+                "empty --data-dir",
+                cfg->data_dir);
         else
-            LOG_ERROR("restore: cannot create %s: %s", dst_log, strerror(errno));
+            LOG_ERROR("restore: cannot create %s: %s", dst_log,
+                      strerror(errno));
         goto done;
     }
     close(claim);
@@ -156,9 +172,10 @@ int restore_run(const Config *cfg) {
         goto done;
     }
 
-    LOG_INFO("restore: installed snapshot into %s (%d records); start the server "
-             "to recover",
-             cfg->data_dir, cJSON_IsNumber(nrec) ? nrec->valueint : -1);
+    LOG_INFO(
+        "restore: installed snapshot into %s (%d records); start the server "
+        "to recover",
+        cfg->data_dir, cJSON_IsNumber(nrec) ? nrec->valueint : -1);
     rc = 0;
 done:
     cJSON_Delete(man);
