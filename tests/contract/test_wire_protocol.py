@@ -1719,6 +1719,249 @@ def test_concurrency(binary, port):
                 s.close()
 
 
+def test_framing(binary, port):
+    """Line framing itself: everything above uses one request per connection with
+    a clean trailing newline. Real clients pipeline, split writes across TCP
+    segments, and send CRLF — the server must not depend on a request arriving in
+    exactly one read()."""
+    print("[framing: CRLF, pipelining, split writes, blank lines]")
+    with Server(binary, port, phase=4) as srv:
+        # CRLF line endings are tolerated (the \r must not reach the JSON parser).
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.settimeout(5)
+            s.sendall(b'{"operation":"ping","request_id":"crlf"}\r\n')
+            f = s.makefile("rwb")
+            r = json.loads(f.readline().decode())
+            check(r.get("ok") is True and r.get("request_id") == "crlf",
+                  "CRLF-terminated request is handled")
+
+        # Pipelining: several requests in ONE write must all be answered, in
+        # order. This is the path where a response is staged while more input is
+        # already buffered.
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.settimeout(10)
+            n = 8
+            batch = b"".join(
+                (json.dumps({"operation": "ping", "request_id": f"p{i}"})
+                 + "\n").encode() for i in range(n))
+            s.sendall(batch)
+            f = s.makefile("rwb")
+            got = [json.loads(f.readline().decode()) for _ in range(n)]
+            check(all(r.get("ok") for r in got),
+                  f"all {n} pipelined requests answered")
+            check([r.get("request_id") for r in got] == [f"p{i}" for i in range(n)],
+                  "pipelined responses come back in request order")
+
+        # A request split across many small writes (worst case: one byte at a
+        # time) must be buffered until the newline arrives, not parsed early.
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.settimeout(10)
+            payload = (json.dumps({"operation": "insert", "type": "episodic",
+                                   "data": "split-write", "tags": ["frag"]})
+                       + "\n").encode()
+            for b in payload:
+                s.sendall(bytes([b]))
+            f = s.makefile("rwb")
+            r = json.loads(f.readline().decode())
+            check(r.get("ok") is True,
+                  "request delivered one byte per write is handled")
+
+        # A partial request with no newline yet must not be answered — and must
+        # still complete once the rest arrives on the same connection.
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.settimeout(3)
+            s.sendall(b'{"operation":"ping","request_id":"hal')
+            s.settimeout(0.7)
+            try:
+                early = s.recv(4096)
+            except socket.timeout:
+                early = b""
+            check(early == b"", "incomplete line is not answered early")
+            s.settimeout(5)
+            s.sendall(b'f"}\n')
+            f = s.makefile("rwb")
+            r = json.loads(f.readline().decode())
+            check(r.get("ok") is True and r.get("request_id") == "half",
+                  "the completed line is answered once its newline arrives")
+
+        # Blank lines carry no request: they must be skipped silently (a cheap
+        # client keepalive) and must not desynchronize the responses that follow.
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.settimeout(5)
+            s.sendall(b'\n\n\r\n{"operation":"ping","request_id":"afterblank"}\n')
+            f = s.makefile("rwb")
+            r = json.loads(f.readline().decode())
+            check(r.get("ok") is True and r.get("request_id") == "afterblank",
+                  "blank lines are ignored without desynchronizing the stream")
+
+        # A malformed line is an error response, not a dropped connection: the
+        # same socket must keep serving afterwards.
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.settimeout(5)
+            f = s.makefile("rwb")
+            for bad in (b'not json at all\n', b'{"operation":\n', b'[]\n',
+                        b'{"operation":"nosuchop"}\n'):
+                s.sendall(bad)
+                r = json.loads(f.readline().decode())
+                check(r.get("ok") is False,
+                      f"malformed input rejected: {bad[:20]!r}")
+            s.sendall(b'{"operation":"ping","request_id":"survived"}\n')
+            r = json.loads(f.readline().decode())
+            check(r.get("ok") is True and r.get("request_id") == "survived",
+                  "connection survives a run of malformed requests")
+
+        # A long-lived connection must keep answering without leaking state.
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
+            s.settimeout(10)
+            f = s.makefile("rwb")
+            ok = 0
+            for i in range(200):
+                f.write((json.dumps({"operation": "insert", "type": "episodic",
+                                     "data": f"reuse-{i}"}) + "\n").encode())
+                f.flush()
+                if json.loads(f.readline().decode()).get("ok"):
+                    ok += 1
+            check(ok == 200, f"{ok}/200 sequential requests on one connection")
+
+
+def test_connection_guards(binary, port):
+    """The DoS guards on the client port: an over-long request line, the
+    concurrent-connection cap, and idle reaping. These only trigger on abusive
+    traffic, so nothing else in this suite reaches them."""
+    print("[connection guards: oversized line, max-connections, idle timeout]")
+
+    # max_payload + 4 KiB of envelope slack is the accepted line length, so a
+    # 1 KiB payload limit rejects anything past ~5 KiB on one line.
+    with Server(binary, port, phase=4,
+                extra_args=["--max-payload", "1024"]) as srv:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.settimeout(10)
+            # No newline anywhere: the server must reject on the length alone
+            # rather than buffering without bound.
+            try:
+                s.sendall(b"x" * 200000)
+            except OSError:
+                pass  # server may already have closed us; the response is below
+            data = b""
+            try:
+                while not data.endswith(b"\n"):
+                    chunk = s.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+            except OSError:
+                pass
+            r = json.loads(data.decode()) if data.strip() else {}
+            check(r.get("ok") is False
+                  and r.get("error", {}).get("code") == "PAYLOAD_TOO_LARGE",
+                  "over-long request line -> PAYLOAD_TOO_LARGE")
+            # And the connection is dropped afterwards, so the buffer is released.
+            s.settimeout(5)
+            try:
+                rest = s.recv(4096)
+            except OSError:
+                rest = b""
+            check(rest == b"", "connection is closed after the oversized line")
+
+        # The server is still healthy for well-behaved clients afterwards.
+        r = srv.req({"operation": "ping"})
+        check(r.get("ok") is True, "server still serving after an oversized line")
+        # A payload over the limit inside a well-framed line is a normal
+        # per-request error (not a connection-level one).
+        r = srv.req({"operation": "insert", "type": "episodic",
+                     "data": "y" * 2048})
+        check(r.get("ok") is False
+              and r["error"]["code"] == "PAYLOAD_TOO_LARGE",
+              "payload past --max-payload -> PAYLOAD_TOO_LARGE")
+
+    # --max-connections: past the cap, new sockets are accepted then immediately
+    # closed, and the already-open ones keep working.
+    cap = 4
+    with Server(binary, port + 1, phase=4, io_threads=1,
+                extra_args=["--max-connections", str(cap)]) as srv:
+        held = []
+        try:
+            for _ in range(cap):
+                s = socket.create_connection(("127.0.0.1", port + 1), timeout=5)
+                s.settimeout(5)
+                # Complete a request so the connection is definitely registered.
+                s.sendall(b'{"operation":"ping"}\n')
+                s.makefile("rwb").readline()
+                held.append(s)
+            check(len(held) == cap, f"{cap} connections up to the cap are served")
+
+            refused = 0
+            for _ in range(3):
+                try:
+                    x = socket.create_connection(("127.0.0.1", port + 1),
+                                                 timeout=5)
+                    x.settimeout(5)
+                    x.sendall(b'{"operation":"ping"}\n')
+                    if x.recv(4096) == b"":
+                        refused += 1  # accepted then closed without answering
+                    x.close()
+                except OSError:
+                    refused += 1
+            check(refused == 3, "connections past --max-connections are dropped")
+
+            # The capped-out server still answers on its existing connections.
+            held[0].sendall(b'{"operation":"ping","request_id":"held"}\n')
+            r = json.loads(held[0].makefile("rwb").readline().decode())
+            check(r.get("ok") is True,
+                  "existing connections keep working while at the cap")
+        finally:
+            for s in held:
+                s.close()
+
+        # Once the held connections close, capacity frees up again.
+        for _ in range(50):
+            try:
+                r = srv.req({"operation": "ping"})
+                break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            r = {}
+        check(r.get("ok") is True,
+              "capacity is reclaimed once connections close")
+
+    # --idle-timeout-sec reaps a connection that moves no bytes (slow-loris),
+    # while an active one is never reaped.
+    with Server(binary, port + 2, phase=4,
+                extra_args=["--idle-timeout-sec", "1"]) as srv:
+        idle = socket.create_connection(("127.0.0.1", port + 2), timeout=5)
+        idle.settimeout(15)
+        reaped = False
+        deadline = time.time() + 12
+        while time.time() < deadline:
+            try:
+                if idle.recv(4096) == b"":
+                    reaped = True
+                    break
+            except socket.timeout:
+                break
+            except OSError:
+                reaped = True
+                break
+        idle.close()
+        check(reaped, "an idle connection is reaped by --idle-timeout-sec")
+
+        # A connection that keeps sending traffic across the timeout survives.
+        with socket.create_connection(("127.0.0.1", port + 2), timeout=10) as s:
+            s.settimeout(10)
+            f = s.makefile("rwb")
+            alive = True
+            for _ in range(5):  # ~2.5 s of activity, past the 1 s timeout
+                f.write(b'{"operation":"ping"}\n')
+                f.flush()
+                line = f.readline()
+                if not line or not json.loads(line.decode()).get("ok"):
+                    alive = False
+                    break
+                time.sleep(0.5)
+            check(alive, "an active connection is not reaped mid-conversation")
+
+
 def test_search_candidate_selection(binary, port):
     print("[search: max_importance ceiling + order=oldest (candidate selection)]")
     with Server(binary, port, phase=4) as srv:
@@ -1779,6 +2022,8 @@ def main():
     test_encryption_at_rest(binary, 19492)
     test_encrypt_migrate(binary, 19493)
     test_concurrency(binary, 19479)
+    test_framing(binary, 19505)
+    test_connection_guards(binary, 19506)  # uses port, +1, +2
     test_bulk_ops(binary, 19480)
     test_consolidate(binary, 19481)
     test_forget(binary, 19499)

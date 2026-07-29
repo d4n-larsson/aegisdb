@@ -389,9 +389,83 @@ static void test_sync_durability_flushes_per_write(void) {
     (void)!system(rm);
 }
 
+/* A replica re-bootstraps by wiping itself back to empty: after the primary
+ * compacts, its log offsets have shifted, so the follower cannot reconcile
+ * incrementally and must start over from offset 0. The wipe has to clear the
+ * log AND every in-memory index AND the id allocator — a leftover index entry
+ * would resolve to a stale offset in the freshly-truncated log, and a leftover
+ * next_id would let the replica's ids drift from the primary's. */
+static void test_reset_replica_wipes_everything(void) {
+    AegisDB db;
+    open_db(&db);
+    uint64_t a = insert_ep(&db, "alpha");
+    uint64_t b = insert_ep(&db, "bravo");
+    insert_ep(&db, "charlie");
+    TEST_ASSERT_TRUE(db.log.size > 0);
+    assert_data(&db, a, "alpha");
+
+    /* follower_reset() holds both locks around the call; mirror that here. */
+    pthread_rwlock_wrlock(&db.index_lock);
+    pthread_rwlock_wrlock(&db.log_lock);
+    TEST_ASSERT_EQUAL_INT(0, db_reset_replica(&db));
+    pthread_rwlock_unlock(&db.log_lock);
+    pthread_rwlock_unlock(&db.index_lock);
+
+    /* Log emptied, so the replica re-subscribes from offset 0. */
+    TEST_ASSERT_EQUAL_INT(0, (int)db.log.size);
+    /* Primary-key index cleared: the old ids resolve to nothing, rather than to
+     * a stale offset in the truncated log. */
+    MemoryRecord r;
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_get(&db, a, NULL, &r));
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_get(&db, b, NULL, &r));
+    /* Secondary indexes cleared too: a tag search finds nothing. */
+    SearchParams p = {0};
+    const char *tags[] = {"r"};
+    p.tags = tags;
+    p.tag_count = 1;
+    p.top_k = 10;
+    MemoryRecord *recs = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&db, &p, &recs, &n));
+    TEST_ASSERT_EQUAL_size_t(0, n);
+    free(recs);
+
+    /* The id allocator restarts, so replayed frames get the primary's ids. */
+    uint64_t fresh = insert_ep(&db, "after-reset");
+    TEST_ASSERT_EQUAL_UINT64(1, fresh);
+    assert_data(&db, fresh, "after-reset");
+    db_close(&db);
+
+    /* And the wipe is durable: reopening recovers only the post-reset write. */
+    AegisDB db2;
+    open_db(&db2);
+    assert_data(&db2, 1, "after-reset");
+    TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND, qe_get(&db2, 2, NULL, &r));
+    db_close(&db2);
+}
+
+/* Resetting an already-empty replica is a no-op, not a failure — a follower can
+ * be told to re-bootstrap before it has applied anything. */
+static void test_reset_replica_on_empty_db(void) {
+    AegisDB db;
+    open_db(&db);
+    pthread_rwlock_wrlock(&db.index_lock);
+    pthread_rwlock_wrlock(&db.log_lock);
+    TEST_ASSERT_EQUAL_INT(0, db_reset_replica(&db));
+    /* Twice in a row must also be safe (double reset on reconnect churn). */
+    TEST_ASSERT_EQUAL_INT(0, db_reset_replica(&db));
+    pthread_rwlock_unlock(&db.log_lock);
+    pthread_rwlock_unlock(&db.index_lock);
+    TEST_ASSERT_EQUAL_INT(0, (int)db.log.size);
+    TEST_ASSERT_EQUAL_UINT64(1, insert_ep(&db, "first"));
+    db_close(&db);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_sync_durability_flushes_per_write);
+    RUN_TEST(test_reset_replica_wipes_everything);
+    RUN_TEST(test_reset_replica_on_empty_db);
     RUN_TEST(test_recovery_replays_tail_after_checkpoint);
     RUN_TEST(test_recovery_rebuilds_secondary_from_tail);
     RUN_TEST(test_recovery_falls_back_on_corrupt_checkpoint);
