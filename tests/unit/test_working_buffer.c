@@ -90,6 +90,36 @@ static void test_working_ttl_saturates(void) {
     working_store_free(ws);
 }
 
+/* Reads addressed to a session that was never written must miss cleanly rather
+ * than materialize an empty session — an unauthenticated client can name any
+ * session_id, so a lookup must never allocate on the read path. */
+static void test_working_unknown_session(void) {
+    WorkingStore *ws = working_store_create(4, 1000);
+    MemoryRecord in = mk("v", NULL);
+    uint64_t id = 0;
+    TEST_ASSERT_EQUAL_INT(0, working_store_add(ws, "known", &in, 100, 0, &id));
+    TEST_ASSERT_EQUAL_size_t(1, working_store_count(ws));
+
+    TEST_ASSERT_NULL(working_store_get(ws, "never-seen", id, 200));
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(
+        -1, working_store_take(ws, "never-seen", id, 200, NULL, &out));
+    /* The failed lookups created nothing. */
+    TEST_ASSERT_EQUAL_size_t(1, working_store_count(ws));
+
+    /* Sessions are isolated: the id is valid, just not in that session. */
+    MemoryRecord *g = working_store_get(ws, "known", id, 200);
+    TEST_ASSERT_NOT_NULL(g);
+    record_free(g);
+    free(g);
+
+    /* An unknown id inside a KNOWN session misses too. */
+    TEST_ASSERT_NULL(working_store_get(ws, "known", id + 999, 200));
+    TEST_ASSERT_EQUAL_INT(
+        -1, working_store_take(ws, "known", id + 999, 200, NULL, &out));
+    working_store_free(ws);
+}
+
 /* ---- concurrent stress (#3 regression) --------------------------------- */
 
 #define NTHREADS 8
@@ -160,6 +190,7 @@ int main(void) {
     RUN_TEST(test_working_add_get_take);
     RUN_TEST(test_working_ring_evicts_oldest);
     RUN_TEST(test_working_ttl_saturates);
+    RUN_TEST(test_working_unknown_session);
     RUN_TEST(test_working_concurrent_stress);
     return UNITY_END();
 }

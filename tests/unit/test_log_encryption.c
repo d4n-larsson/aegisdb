@@ -198,6 +198,64 @@ static void test_tamper_detected_on_read_and_scan(void) {
     log_close(&lf2);
 }
 
+/* The test above tampers with CIPHERTEXT, so the v3 header stays valid and the
+ * scanner steps over the frame by its trusted length. Damaging the v3 HEADER
+ * instead forces the keyless structural resync — a distinct branch from the v2
+ * one, since it matches a different magic and header layout. Resync must work
+ * without decrypting anything, so an encrypted log recovers a mid-stream hole
+ * exactly as a plaintext one does. */
+static void test_encrypted_corrupt_header_resyncs(void) {
+    LogFile lf;
+    uint64_t off[3] = {0};
+    TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 0, KEY_A, NULL));
+    TEST_ASSERT_EQUAL_INT(0,
+                          log_append(&lf, (const uint8_t *)"one", 3, &off[0]));
+    TEST_ASSERT_EQUAL_INT(0,
+                          log_append(&lf, (const uint8_t *)"two", 3, &off[1]));
+    TEST_ASSERT_EQUAL_INT(
+        0, log_append(&lf, (const uint8_t *)"three", 5, &off[2]));
+    log_close(&lf);
+
+    /* Destroy the length field (bytes 4..7 of the v3 header) of the middle
+     * frame: its header CRC no longer matches, so the frame length can't be
+     * trusted and the scanner must byte-scan to the third frame's magic. */
+    int fd = open(g_path, O_RDWR);
+    TEST_ASSERT_TRUE(fd >= 0);
+    for (int i = 0; i < 4; i++) {
+        off_t pos = (off_t)off[1] + 4 + i;
+        uint8_t byte;
+        TEST_ASSERT_EQUAL_INT(1, (int)pread(fd, &byte, 1, pos));
+        byte ^= 0xFF;
+        TEST_ASSERT_EQUAL_INT(1, (int)pwrite(fd, &byte, 1, pos));
+    }
+    close(fd);
+
+    LogFile lf2;
+    LogOpenStatus st = LOG_OPEN_ERR_IO;
+    TEST_ASSERT_EQUAL_INT(0, log_open(&lf2, g_path, 0, KEY_A, &st));
+    TEST_ASSERT_EQUAL_INT(LOG_OPEN_OK, st); /* frame 1 still authenticates */
+
+    int n = 0;
+    LogScanResult res = {0};
+    TEST_ASSERT_EQUAL_INT(
+        0, log_scan(&lf2, 0, (uint64_t)lf2.size, scan_count, &n, &res));
+    TEST_ASSERT_EQUAL_INT(2, n); /* frames 1 and 3 */
+    TEST_ASSERT_EQUAL_size_t(2, res.good_frames);
+    TEST_ASSERT_EQUAL_size_t(1, res.corrupt_frames);
+    TEST_ASSERT_TRUE(res.recovered_after_hole);
+    /* Frame 3 survived past the hole, so the tail must not be truncated away. */
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)lf2.size, res.truncate_to);
+
+    /* The recovered tail frame is still readable (and decryptable) by offset. */
+    uint8_t *out = NULL;
+    size_t out_len = 0;
+    TEST_ASSERT_EQUAL_INT(0, log_read(&lf2, off[2], &out, &out_len));
+    TEST_ASSERT_EQUAL_size_t(5, out_len);
+    TEST_ASSERT_EQUAL_MEMORY("three", out, out_len);
+    free(out);
+    log_close(&lf2);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_encrypted_roundtrip_and_scan);
@@ -207,5 +265,6 @@ int main(void) {
     RUN_TEST(test_reopen_encrypted_without_key_refused);
     RUN_TEST(test_key_on_plaintext_log_refused);
     RUN_TEST(test_tamper_detected_on_read_and_scan);
+    RUN_TEST(test_encrypted_corrupt_header_resyncs);
     return UNITY_END();
 }

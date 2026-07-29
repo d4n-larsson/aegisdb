@@ -93,6 +93,74 @@ static void test_time_range_recent_keeps_newest(void) {
     time_index_free(t);
 }
 
+/* The result buffer starts at a fixed capacity and doubles. Every earlier test
+ * stays under it, so ask for more than the initial 16 to exercise the growth
+ * path — and check the ids are still complete and ordered afterwards. */
+static void test_time_range_grows_result_buffer(void) {
+    TimeIndex *t = time_index_create();
+    const int N = 100;
+    /* Insert in reverse so each add also lands at the front of the sorted array. */
+    for (int i = N; i-- > 0;) {
+        TEST_ASSERT_EQUAL_INT(
+            0, time_index_add(t, 1000 + (uint64_t)i * 10, (uint64_t)(i + 1)));
+    }
+    uint64_t *ids = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, time_index_range(t, 0, UINT64_MAX, 0, &ids, &n));
+    TEST_ASSERT_EQUAL_size_t((size_t)N, n);
+    for (int i = 0; i < N; i++) {
+        TEST_ASSERT_EQUAL_UINT64((uint64_t)(i + 1), ids[i]);
+    }
+    free(ids);
+
+    /* Same for the recent variant, which allocates exactly `take` up front. */
+    int trunc = -1;
+    TEST_ASSERT_EQUAL_INT(
+        0, time_index_range_recent(t, 0, UINT64_MAX, 0, &ids, &n, &trunc));
+    TEST_ASSERT_EQUAL_size_t((size_t)N, n);
+    TEST_ASSERT_EQUAL_INT(0, trunc);
+    free(ids);
+    time_index_free(t);
+}
+
+/* range_recent binary-searches for the end of the in-range span. With entries
+ * beyond `end` present it has to walk the upper half of that search — a branch
+ * no other test reaches, and an off-by-one there would leak out-of-range ids. */
+static void test_time_range_recent_excludes_after_end(void) {
+    TimeIndex *t = time_index_create();
+    for (int i = 0; i < 40; i++) {
+        time_index_add(t, (uint64_t)(i + 1) * 100, (uint64_t)(i + 1));
+    }
+    uint64_t *ids = NULL;
+    size_t n = 0;
+    int trunc = -1;
+    /* [500, 1500] covers ids 5..15; 25 entries lie past `end`. */
+    TEST_ASSERT_EQUAL_INT(
+        0, time_index_range_recent(t, 500, 1500, 0, &ids, &n, &trunc));
+    TEST_ASSERT_EQUAL_size_t(11, n);
+    TEST_ASSERT_EQUAL_INT(0, trunc);
+    TEST_ASSERT_EQUAL_UINT64(5, ids[0]);
+    TEST_ASSERT_EQUAL_UINT64(15, ids[n - 1]);
+    free(ids);
+
+    /* Capped inside a bounded window: keep the newest of the in-range span, and
+     * still nothing from beyond `end`. */
+    TEST_ASSERT_EQUAL_INT(
+        0, time_index_range_recent(t, 500, 1500, 3, &ids, &n, &trunc));
+    TEST_ASSERT_EQUAL_size_t(3, n);
+    TEST_ASSERT_EQUAL_INT(1, trunc);
+    TEST_ASSERT_EQUAL_UINT64(13, ids[0]);
+    TEST_ASSERT_EQUAL_UINT64(15, ids[2]);
+    free(ids);
+
+    /* A window entirely past the newest entry yields nothing. */
+    TEST_ASSERT_EQUAL_INT(
+        0, time_index_range_recent(t, 100000, 200000, 0, &ids, &n, &trunc));
+    TEST_ASSERT_EQUAL_size_t(0, n);
+    free(ids);
+    time_index_free(t);
+}
+
 /* ---- TagIndex ---------------------------------------------------------- */
 
 static void test_tag_intersection_and_union(void) {
@@ -157,6 +225,91 @@ static void test_tag_remove_reclaims_empty_node(void) {
     free(ids);
     tag_index_add(t, "solo", 9);
     TEST_ASSERT_EQUAL_size_t(1, tag_index_count(t));
+    tag_index_free(t);
+}
+
+/* A query with no tags at all (e.g. a filter that resolved to nothing) must
+ * return an empty result rather than fail or leave *out uninitialized — callers
+ * free() the pointer unconditionally. */
+static void test_tag_query_no_tags(void) {
+    TagIndex *t = tag_index_create();
+    tag_index_add(t, "x", 1);
+    uint64_t *ids = (uint64_t *)0x1; /* poisoned: must be overwritten */
+    size_t n = 99;
+    TEST_ASSERT_EQUAL_INT(0, tag_index_query(t, NULL, 0, 0, &ids, &n));
+    TEST_ASSERT_EQUAL_size_t(0, n);
+    TEST_ASSERT_NULL(ids);
+    free(ids);
+    tag_index_free(t);
+}
+
+/* An intersection where a tag OTHER than the first is absent must be empty. The
+ * existing tests only cover a missing first tag, which short-circuits earlier. */
+static void test_tag_intersection_with_absent_tag(void) {
+    TagIndex *t = tag_index_create();
+    tag_index_add(t, "present", 1);
+    tag_index_add(t, "present", 2);
+    tag_index_add(t, "other", 2);
+
+    uint64_t *ids = NULL;
+    size_t n = 0;
+    /* Second tag was never indexed -> nothing can match all three. */
+    const char *q3[] = {"present", "other", "never-indexed"};
+    TEST_ASSERT_EQUAL_INT(0, tag_index_query(t, q3, 3, 1, &ids, &n));
+    TEST_ASSERT_EQUAL_size_t(0, n);
+    free(ids);
+
+    /* Absent tag in the middle position, with a matchable tag after it. */
+    const char *q_mid[] = {"present", "never-indexed", "other"};
+    TEST_ASSERT_EQUAL_INT(0, tag_index_query(t, q_mid, 3, 1, &ids, &n));
+    TEST_ASSERT_EQUAL_size_t(0, n);
+    free(ids);
+
+    /* Sanity: the same query without the absent tag still matches. */
+    const char *q2[] = {"present", "other"};
+    TEST_ASSERT_EQUAL_INT(0, tag_index_query(t, q2, 2, 1, &ids, &n));
+    TEST_ASSERT_EQUAL_size_t(1, n);
+    TEST_ASSERT_EQUAL_UINT64(2, ids[0]);
+    free(ids);
+    tag_index_free(t);
+}
+
+/* The union merges into one sorted, deduped array, inserting each id at its
+ * sorted position — so a result larger than the initial capacity both grows the
+ * buffer and shifts existing entries. Feed the tags in descending id order so
+ * (almost) every insert lands at the FRONT, maximising the shifting, and check
+ * the output is still fully sorted with no duplicates or dropped ids. */
+static void test_tag_union_grows_and_stays_sorted(void) {
+    TagIndex *t = tag_index_create();
+    const int N = 60; /* > the initial capacity of 16 */
+    /* Descending ids; every id also lands in a second tag so dedup is exercised. */
+    for (int i = N; i-- > 0;) {
+        tag_index_add(t, i % 2 ? "odd" : "even", (uint64_t)(i + 1));
+        tag_index_add(t, "all", (uint64_t)(i + 1));
+    }
+    const char *q[] = {"odd", "even", "all"};
+    uint64_t *ids = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, tag_index_query(t, q, 3, 0, &ids, &n));
+    TEST_ASSERT_EQUAL_size_t((size_t)N, n); /* deduped, not 2N */
+    for (int i = 0; i < N; i++) {
+        TEST_ASSERT_EQUAL_UINT64((uint64_t)(i + 1), ids[i]); /* sorted asc */
+    }
+    free(ids);
+
+    /* A union over a single large tag takes the same growth path. */
+    const char *q1[] = {"all"};
+    TEST_ASSERT_EQUAL_INT(0, tag_index_query(t, q1, 1, 0, &ids, &n));
+    TEST_ASSERT_EQUAL_size_t((size_t)N, n);
+    TEST_ASSERT_EQUAL_UINT64(1, ids[0]);
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)N, ids[n - 1]);
+    free(ids);
+
+    /* A union mixing a populated tag with an absent one ignores the absent one. */
+    const char *q_mix[] = {"never-indexed", "all"};
+    TEST_ASSERT_EQUAL_INT(0, tag_index_query(t, q_mix, 2, 0, &ids, &n));
+    TEST_ASSERT_EQUAL_size_t((size_t)N, n);
+    free(ids);
     tag_index_free(t);
 }
 
@@ -335,6 +488,90 @@ static void test_semantic_topk_partial_selection(void) {
  * vectors (id i -> (1, i-1), monotonic angle from the query) the approximate
  * path still returns the exact top-k, and remove/overwrite stay correct through
  * it. */
+/* A query vector of the wrong dimension must be rejected outright: reading it as
+ * if it had the index's dim would run off the end of the caller's buffer. Both
+ * the dense and the HNSW path must fail the same way. */
+static void test_semantic_search_rejects_dim_mismatch(void) {
+    const size_t dim = 4;
+    SemanticIndex *s = semantic_index_create(dim, 0, 0, 0, 0);
+    float v[] = {1.0f, 0.0f, 0.0f, 0.0f};
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, 1, v, 1, dim));
+
+    float shortq[] = {1.0f, 0.0f};
+    uint64_t *ids = NULL;
+    float *sc = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(
+        -1, semantic_index_search(s, shortq, 2, 5, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_INT(
+        -1, semantic_index_search(s, v, dim + 1, 5, &ids, &sc, &n));
+    /* An add of the wrong dim is refused too, so a bad vector never lands. */
+    TEST_ASSERT_EQUAL_INT(-1, semantic_index_add(s, 2, shortq, 1, 2));
+    TEST_ASSERT_EQUAL_size_t(1, semantic_index_count(s));
+    semantic_index_free(s);
+}
+
+/* top_k == 0 means "unlimited", not "none" — and the dense scan and the HNSW
+ * graph must agree on that, since which one runs depends on the index size and
+ * is invisible to the caller. A path that read 0 as "no results" would silently
+ * return an empty search once the index crossed the ANN threshold. */
+static void test_semantic_search_zero_topk_is_unlimited(void) {
+    const size_t dim = 2;
+    /* ann_threshold 8: below it the dense scan runs, above it the HNSW graph. */
+    SemanticIndex *s = semantic_index_create(dim, 8, 0, 0, 0);
+    float q[] = {1.0f, 0.0f};
+    for (uint64_t id = 1; id <= 4; id++) {
+        float v[] = {1.0f, (float)id};
+        TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, 1, dim));
+    }
+    uint64_t *ids = NULL;
+    float *sc = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0,
+                          semantic_index_search(s, q, dim, 0, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_size_t(4, n); /* dense path: every record */
+    free(ids);
+    free(sc);
+
+    /* Cross the threshold and build, so the same query runs on the graph. */
+    for (uint64_t id = 5; id <= 40; id++) {
+        float v[] = {1.0f, (float)id};
+        TEST_ASSERT_EQUAL_INT(0, semantic_index_add(s, id, v, 1, dim));
+    }
+    TEST_ASSERT_EQUAL_INT(0, semantic_index_build_now(s));
+    ids = NULL;
+    sc = NULL;
+    n = 0;
+    TEST_ASSERT_EQUAL_INT(0,
+                          semantic_index_search(s, q, dim, 0, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_size_t(40, n); /* HNSW path: every record too */
+    /* Still ranked, and still deduped to one entry per record. */
+    for (size_t i = 1; i < n; i++) {
+        TEST_ASSERT_TRUE(sc[i - 1] >= sc[i]);
+        TEST_ASSERT_TRUE(ids[i] != ids[i - 1]);
+    }
+    free(ids);
+    free(sc);
+    semantic_index_free(s);
+}
+
+/* Searching an index with nothing in it is a normal cold-start case (a fresh
+ * server answering its first query), not an error. */
+static void test_semantic_search_empty_index(void) {
+    const size_t dim = 3;
+    SemanticIndex *s = semantic_index_create(dim, 0, 0, 0, 0);
+    float q[] = {1.0f, 0.0f, 0.0f};
+    uint64_t *ids = NULL;
+    float *sc = NULL;
+    size_t n = 99;
+    TEST_ASSERT_EQUAL_INT(0,
+                          semantic_index_search(s, q, dim, 5, &ids, &sc, &n));
+    TEST_ASSERT_EQUAL_size_t(0, n);
+    free(ids);
+    free(sc);
+    semantic_index_free(s);
+}
+
 static void test_semantic_hnsw_path(void) {
     const size_t dim = 2;
     const uint64_t N = 300, K = 5;
@@ -556,9 +793,17 @@ int main(void) {
     RUN_TEST(test_time_range_chronological);
     RUN_TEST(test_time_range_respects_max);
     RUN_TEST(test_time_range_recent_keeps_newest);
+    RUN_TEST(test_time_range_grows_result_buffer);
+    RUN_TEST(test_time_range_recent_excludes_after_end);
     RUN_TEST(test_tag_intersection_and_union);
     RUN_TEST(test_tag_remove);
     RUN_TEST(test_tag_remove_reclaims_empty_node);
+    RUN_TEST(test_tag_query_no_tags);
+    RUN_TEST(test_tag_intersection_with_absent_tag);
+    RUN_TEST(test_tag_union_grows_and_stays_sorted);
+    RUN_TEST(test_semantic_search_rejects_dim_mismatch);
+    RUN_TEST(test_semantic_search_zero_topk_is_unlimited);
+    RUN_TEST(test_semantic_search_empty_index);
     RUN_TEST(test_semantic_topk_ordering);
     RUN_TEST(test_semantic_remove_reclaims);
     RUN_TEST(test_semantic_overwrite_in_place);

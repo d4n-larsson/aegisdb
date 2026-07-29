@@ -232,6 +232,227 @@ static void test_legacy_migration_preserves_corrupt_head(void) {
     TEST_ASSERT_EQUAL_INT(12, (int)st.st_size); /* original bytes preserved */
 }
 
+/* ---- header damage: byte-scan resynchronization ------------------------- */
+/* The tests above damage a PAYLOAD, which leaves the header (and thus the frame
+ * length) trusted, so the scanner steps over the bad frame by arithmetic. The
+ * tests below damage the HEADER itself: the length is then untrustworthy, and
+ * recovery must resynchronize by scanning forward for the next frame's magic.
+ * That is a separate code path, and the one a real torn/garbled write hits. */
+
+static void append_three(uint64_t off[3]) {
+    LogFile lf;
+    TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 0, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        0, log_append(&lf, (const uint8_t *)"alpha", 5, &off[0]));
+    TEST_ASSERT_EQUAL_INT(
+        0, log_append(&lf, (const uint8_t *)"bravo", 5, &off[1]));
+    TEST_ASSERT_EQUAL_INT(
+        0, log_append(&lf, (const uint8_t *)"charlie", 7, &off[2]));
+    TEST_ASSERT_EQUAL_INT(0, log_close(&lf));
+}
+
+/* XOR `n` bytes at `at` in the log file, corrupting them in place. */
+static void flip_bytes(off_t at, size_t n) {
+    int fd = open(g_path, O_RDWR);
+    TEST_ASSERT_TRUE(fd >= 0);
+    for (size_t i = 0; i < n; i++) {
+        uint8_t b = 0;
+        TEST_ASSERT_EQUAL_INT(1, pread(fd, &b, 1, at + (off_t)i));
+        b ^= 0xFF;
+        TEST_ASSERT_EQUAL_INT(1, pwrite(fd, &b, 1, at + (off_t)i));
+    }
+    close(fd);
+}
+
+/* Collect the payloads a scan delivers, so we can assert exactly WHICH frames
+ * survived rather than just how many. */
+typedef struct {
+    char seen[8][32];
+    int n;
+} Seen;
+
+static int collect_cb(uint64_t offset, const uint8_t *payload, size_t len,
+                      void *ctx) {
+    (void)offset;
+    Seen *s = ctx;
+    if (s->n < 8 && len < sizeof(s->seen[0])) {
+        memcpy(s->seen[s->n], payload, len);
+        s->seen[s->n][len] = '\0';
+        s->n++;
+    }
+    return 0;
+}
+
+/* Destroy the LENGTH field of the MIDDLE frame. Its header CRC no longer
+ * matches, so the frame length cannot be trusted to step over it; the scanner
+ * must byte-scan forward to the third frame's magic and recover it. */
+static void test_corrupt_header_length_resyncs(void) {
+    uint64_t off[3];
+    append_three(off);
+    flip_bytes((off_t)off[1] + 4, 4); /* len field of frame 1 */
+
+    LogFile lf;
+    TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 0, NULL, NULL));
+    Seen seen = {{{0}}, 0};
+    LogScanResult res = {0};
+    TEST_ASSERT_EQUAL_INT(
+        0, log_scan(&lf, 0, (uint64_t)lf.size, collect_cb, &seen, &res));
+    TEST_ASSERT_EQUAL_INT(2, seen.n);
+    TEST_ASSERT_EQUAL_STRING("alpha", seen.seen[0]);
+    TEST_ASSERT_EQUAL_STRING("charlie", seen.seen[1]); /* found by resync */
+    TEST_ASSERT_EQUAL_size_t(2, res.good_frames);
+    TEST_ASSERT_EQUAL_size_t(1, res.corrupt_frames);
+    TEST_ASSERT_TRUE(res.recovered_after_hole);
+    /* A frame was recovered past the hole, so the tail must be kept. */
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)lf.size, res.truncate_to);
+    log_close(&lf);
+}
+
+/* Destroy the MAGIC of the middle frame: the sync marker itself is gone, so the
+ * scanner cannot even recognize a frame there and must resync past it. */
+static void test_corrupt_header_magic_resyncs(void) {
+    uint64_t off[3];
+    append_three(off);
+    flip_bytes((off_t)off[1], 4); /* magic of frame 1 */
+
+    LogFile lf;
+    TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 0, NULL, NULL));
+    Seen seen = {{{0}}, 0};
+    LogScanResult res = {0};
+    TEST_ASSERT_EQUAL_INT(
+        0, log_scan(&lf, 0, (uint64_t)lf.size, collect_cb, &seen, &res));
+    TEST_ASSERT_EQUAL_INT(2, seen.n);
+    TEST_ASSERT_EQUAL_STRING("alpha", seen.seen[0]);
+    TEST_ASSERT_EQUAL_STRING("charlie", seen.seen[1]);
+    TEST_ASSERT_EQUAL_size_t(1, res.corrupt_frames);
+    TEST_ASSERT_TRUE(res.recovered_after_hole);
+    log_close(&lf);
+}
+
+/* Damage the header of the LAST frame. There is nothing recoverable ahead, so
+ * the resync scan runs to the end and the scanner reports a torn tail — truncate
+ * back to the end of the last clean frame, keeping the two good frames. */
+static void test_corrupt_header_in_last_frame_is_torn_tail(void) {
+    uint64_t off[3];
+    append_three(off);
+    flip_bytes((off_t)off[2] + 4, 4); /* len field of the final frame */
+
+    LogFile lf;
+    TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 0, NULL, NULL));
+    Seen seen = {{{0}}, 0};
+    LogScanResult res = {0};
+    TEST_ASSERT_EQUAL_INT(
+        0, log_scan(&lf, 0, (uint64_t)lf.size, collect_cb, &seen, &res));
+    TEST_ASSERT_EQUAL_INT(2, seen.n);
+    TEST_ASSERT_EQUAL_STRING("alpha", seen.seen[0]);
+    TEST_ASSERT_EQUAL_STRING("bravo", seen.seen[1]);
+    TEST_ASSERT_FALSE(res.recovered_after_hole);
+    TEST_ASSERT_EQUAL_UINT64(off[2], res.truncate_to);
+    log_close(&lf);
+}
+
+/* Damage the header of the FIRST frame: the scan starts on a bad header with no
+ * preceding clean region, so recovery still finds the frames that follow. */
+static void test_corrupt_header_in_first_frame_resyncs(void) {
+    uint64_t off[3];
+    append_three(off);
+    flip_bytes((off_t)off[0] + 4, 4);
+
+    LogFile lf;
+    TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 0, NULL, NULL));
+    Seen seen = {{{0}}, 0};
+    LogScanResult res = {0};
+    TEST_ASSERT_EQUAL_INT(
+        0, log_scan(&lf, 0, (uint64_t)lf.size, collect_cb, &seen, &res));
+    TEST_ASSERT_EQUAL_INT(2, seen.n);
+    TEST_ASSERT_EQUAL_STRING("bravo", seen.seen[0]);
+    TEST_ASSERT_EQUAL_STRING("charlie", seen.seen[1]);
+    TEST_ASSERT_EQUAL_size_t(1, res.corrupt_frames);
+    TEST_ASSERT_TRUE(res.recovered_after_hole);
+    log_close(&lf);
+}
+
+/* Garbage in place of a whole frame (no magic anywhere in it) must not be
+ * mistaken for data: the scanner resyncs to the next real frame and reports
+ * exactly one corrupt region, however many bytes it spans. */
+static void test_garbage_region_resyncs_once(void) {
+    uint64_t off[3];
+    append_three(off);
+    /* Overwrite frame 1 entirely (header + payload) with a non-magic pattern. */
+    int fd = open(g_path, O_RDWR);
+    TEST_ASSERT_TRUE(fd >= 0);
+    uint8_t junk[LOG_FRAME_HEADER + 5];
+    memset(junk, 0x5A, sizeof(junk));
+    TEST_ASSERT_EQUAL_INT((int)sizeof(junk),
+                          pwrite(fd, junk, sizeof(junk), (off_t)off[1]));
+    close(fd);
+
+    LogFile lf;
+    TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 0, NULL, NULL));
+    Seen seen = {{{0}}, 0};
+    LogScanResult res = {0};
+    TEST_ASSERT_EQUAL_INT(
+        0, log_scan(&lf, 0, (uint64_t)lf.size, collect_cb, &seen, &res));
+    TEST_ASSERT_EQUAL_INT(2, seen.n);
+    TEST_ASSERT_EQUAL_STRING("alpha", seen.seen[0]);
+    TEST_ASSERT_EQUAL_STRING("charlie", seen.seen[1]);
+    TEST_ASSERT_EQUAL_size_t(1, res.corrupt_frames);
+    log_close(&lf);
+}
+
+/* ---- log_truncate ------------------------------------------------------- */
+
+/* Truncation is how recovery drops a torn tail. It must shrink both the file and
+ * the in-memory size, and the dropped region must be gone after a reopen. */
+static void test_truncate_drops_tail(void) {
+    uint64_t off[3];
+    append_three(off);
+
+    LogFile lf;
+    TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 0, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(0, log_truncate(&lf, off[1])); /* keep frame 0 only */
+    TEST_ASSERT_EQUAL_INT((int)off[1], (int)lf.size);
+    TEST_ASSERT_EQUAL_INT(0, log_close(&lf));
+
+    struct stat st;
+    TEST_ASSERT_EQUAL_INT(0, stat(g_path, &st));
+    TEST_ASSERT_EQUAL_INT((int)off[1], (int)st.st_size);
+
+    LogFile lf2;
+    TEST_ASSERT_EQUAL_INT(0, log_open(&lf2, g_path, 0, NULL, NULL));
+    int n = 0;
+    LogScanResult res = {0};
+    TEST_ASSERT_EQUAL_INT(
+        0, log_scan(&lf2, 0, (uint64_t)lf2.size, count_cb, &n, &res));
+    TEST_ASSERT_EQUAL_INT(1, n);
+    TEST_ASSERT_EQUAL_size_t(0, res.corrupt_frames);
+    /* Appends resume at the truncated end rather than the old one. */
+    uint64_t new_off = 0;
+    TEST_ASSERT_EQUAL_INT(
+        0, log_append(&lf2, (const uint8_t *)"delta", 5, &new_off));
+    TEST_ASSERT_EQUAL_UINT64(off[1], new_off);
+    log_close(&lf2);
+}
+
+/* Truncating to 0 empties the log without invalidating the handle. */
+static void test_truncate_to_empty(void) {
+    uint64_t off[3];
+    append_three(off);
+
+    LogFile lf;
+    TEST_ASSERT_EQUAL_INT(0, log_open(&lf, g_path, 0, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(0, log_truncate(&lf, 0));
+    TEST_ASSERT_EQUAL_INT(0, (int)lf.size);
+    int n = 0;
+    TEST_ASSERT_EQUAL_INT(0, log_scan(&lf, 0, 0, count_cb, &n, NULL));
+    TEST_ASSERT_EQUAL_INT(0, n);
+    uint64_t new_off = 1;
+    TEST_ASSERT_EQUAL_INT(
+        0, log_append(&lf, (const uint8_t *)"fresh", 5, &new_off));
+    TEST_ASSERT_EQUAL_UINT64(0, new_off);
+    log_close(&lf);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_append_read_roundtrip);
@@ -239,6 +460,13 @@ int main(void) {
     RUN_TEST(test_reopen_persists);
     RUN_TEST(test_torn_tail_detected);
     RUN_TEST(test_midlog_corruption_recovers_tail);
+    RUN_TEST(test_corrupt_header_length_resyncs);
+    RUN_TEST(test_corrupt_header_magic_resyncs);
+    RUN_TEST(test_corrupt_header_in_last_frame_is_torn_tail);
+    RUN_TEST(test_corrupt_header_in_first_frame_resyncs);
+    RUN_TEST(test_garbage_region_resyncs_once);
+    RUN_TEST(test_truncate_drops_tail);
+    RUN_TEST(test_truncate_to_empty);
     RUN_TEST(test_legacy_v1_migration);
     RUN_TEST(test_legacy_migration_preserves_corrupt_head);
     return UNITY_END();
