@@ -284,10 +284,10 @@
           <div>
             <h1>Memory that<br>outlives the<br><span class="em">context window.</span></h1>
             <p class="lead">
-              Agents start every session with amnesia — so you re-paste your
-              stack, conventions, and past decisions into every prompt, and pay
-              for it in tokens. AegisDB is the memory layer that keeps that
-              knowledge and feeds back only what's relevant, per prompt.
+              Agents rarely carry what you taught them from one session into the
+              next — so you re-establish context by hand, every time, and pay for
+              it in tokens. AegisDB keeps that knowledge outside the window and
+              feeds back only what's relevant, per prompt.
             </p>
             <div class="cta">
               <a class="btn primary" href="#start">▍ get started</a>
@@ -320,14 +320,14 @@
         <div class="twoup">
           <div>
             <h2 class="title">Why not Redis, SQLite, or a vector store?</h2>
-            <p class="lede">You almost certainly run a database already. None of them was built to remember the way an agent needs to.</p>
-            <p class="lede">A vector store recalls by similarity but has no notion of an event, a fact that gets corrected, or context that should expire. A cache forgets on its own timer. A relational table stores rows but can't rank by meaning. Agent memory is all of these at once — so AegisDB makes each its own kind, with the lifecycle it actually needs.</p>
+            <p class="lede">You almost certainly run a database already, and you can absolutely build an agent memory layer on Postgres and pgvector — plenty of teams have.</p>
+            <p class="lede">What you end up writing is everything the database doesn't give you: the distinction between an event and a fact that gets corrected, the expiry rules, the supersession rules, the ranking, the graph traversal, the per-prompt recall budget. AegisDB is that layer already built and benchmarked, in one binary that speaks a line of JSON.</p>
           </div>
           <div>
-            <p class="cap">what each one remembers</p>
+            <p class="cap">what you still have to build</p>
 <pre><span class="key">redis</span>      <span class="ar">→</span> fast, but evicts on its own TTL
 <span class="key">sqlite</span>     <span class="ar">→</span> durable rows, no recall by meaning
-<span class="key">pgvector</span>   <span class="ar">→</span> similarity only — no events, TTL, or graph
+<span class="key">pgvector</span>   <span class="ar">→</span> similarity; events, expiry, graph are yours
 <span class="op">aegisdb</span>    <span class="ar">→</span> events, facts, working + a graph, each lifecycled</pre>
           </div>
         </div>
@@ -341,8 +341,8 @@
         <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0003</b>&nbsp;·&nbsp;type=semantic</p>
         <div class="twoup">
           <div>
-            <h2 class="title">Stop paying to re-teach the model.</h2>
-            <p class="lede">Every session normally re-pastes your stack, conventions, and past decisions into the prompt. AegisDB keeps that knowledge out of the window and feeds back only what's relevant, per prompt — so you pay for the work, not for re-establishing context.</p>
+            <h2 class="title">Fewer tokens spent re-teaching the model.</h2>
+            <p class="lede">Pasted-in context is billed again on every turn it stays in the window. AegisDB holds it outside the prompt and injects a ranked slice per request, so the window carries the task instead of the backstory.</p>
           </div>
           <div>
             <ul>
@@ -361,8 +361,8 @@
       <div class="off mono">0x01A0</div>
       <div class="col">
         <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0004</b>&nbsp;·&nbsp;type=semantic</p>
-        <h2 class="title">A memory model shaped like memory.</h2>
-        <p class="lede">Three kinds of memory, each with the lifecycle it actually needs — not one generic store with a TTL bolted on. Persisted memories are durable by default, and can be set to auto-archive after a deadline when you want them to fade.</p>
+        <h2 class="title">Three kinds of memory, three lifecycles.</h2>
+        <p class="lede">Episodic records are immutable, semantic facts are updatable, working memory expires on a TTL. Persisted memories are durable by default; give one a deadline and it auto-archives instead.</p>
         <div class="legend">
           <span class="l-ep"><i></i><b>episodic</b> — immutable events</span>
           <span class="l-se"><i></i><b>semantic</b> — facts that update</span>
@@ -387,7 +387,7 @@
           </div>
           <div class="feat se" data-k="0x0320">
             <h3><span class="bar"></span>Vector search that scales</h3>
-            <p>Exact cosine while a set is small; past a threshold it switches to an <b>HNSW graph</b> for sublinear approximate-nearest-neighbour search, so recall stays fast as memories accumulate. The graph is <b>checkpointed</b> — a restart reloads it instead of rebuilding — and vectors can be <b>int8-quantized</b> to cut its memory ~4×.</p>
+            <p>Exact cosine while a set is small; past a threshold it switches to an <b>HNSW graph</b> for sublinear approximate-nearest-neighbour search. The graph is <b>checkpointed</b> — a restart reloads it instead of rebuilding — and vectors can be <b>int8-quantized</b> to cut its memory ~4×.</p>
           </div>
           <div class="feat" data-k="0x0360">
             <h3><span class="bar"></span>A graph of context</h3>
@@ -395,19 +395,14 @@
           </div>
         </div>
         <details class="more">
-          <summary>Built for production — and more</summary>
+          <summary>Production hardening</summary>
           <ul class="morelist">
-            <li><b>Ranked like memory</b> — similarity × importance × confidence, with opt-in recency decay and a minimum-score gate.</li>
-            <li><b>Crash-safe log</b> — magic + CRC frames; a torn tail is trimmed and interior bit-rot skipped, so one bad record never costs you the log.</li>
-            <li><b>Multi-tenant isolation</b> — namespace + scope (<span class="mono">ro</span>/<span class="mono">rw</span>/admin) tokens; a tenant sees only its own memories.</li>
-            <li><b>Per-tenant quotas + rate limits</b> — bound one namespace's records, bytes, and request rate.</li>
-            <li><b>Encryption at rest</b> — optional XChaCha20-Poly1305 over the log + checkpoints (vendored, no deps), with an offline migrator.</li>
+            <li><b>Crash-safe log</b> — magic + CRC frames; a torn tail is trimmed and interior bit-rot skipped, so one bad record doesn't cost you the log.</li>
             <li><b>Tunable durability</b> — <span class="mono">sync</span>/<span class="mono">batch</span>/<span class="mono">interval</span> fsync; checkpoint + non-blocking compaction recovery.</li>
+            <li><b>Encryption at rest</b> — optional XChaCha20-Poly1305 over the log + checkpoints (vendored, no deps), with an offline migrator.</li>
             <li><b>Read replicas</b> — async log-shipping standbys for read scaling and manual failover.</li>
-            <li><b>Online backup + restore</b> — consistent point-in-time snapshots, no downtime.</li>
-            <li><b>Memory-bounded</b> — a soft index-RAM cap backpressures instead of getting OOM-killed.</li>
           </ul>
-          <p class="moremore">Full reference in the <a href="https://github.com/d4n-larsson/aegisdb#readme">README</a> &amp; <a href="https://github.com/d4n-larsson/aegisdb/tree/main/docs">docs</a>.</p>
+          <p class="moremore">Also: multi-tenant namespace + scope tokens, per-tenant quotas and rate limits, online backup/restore, and a soft index-RAM cap that backpressures rather than getting OOM-killed. Full reference in the <a href="https://github.com/d4n-larsson/aegisdb#readme">README</a> &amp; <a href="https://github.com/d4n-larsson/aegisdb/tree/main/docs">docs</a>.</p>
         </details>
       </div>
     </section>
@@ -417,8 +412,8 @@
       <div class="off mono">0x0400</div>
       <div class="col">
         <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0005</b>&nbsp;·&nbsp;type=semantic</p>
-        <h2 class="title">Memory that curates itself.</h2>
-        <p class="lede">A store that only grows becomes noise. AegisDB keeps memory coherent — collapsing duplicates, retiring what's gone stale, and letting a new fact supersede the one it contradicts — and every recall can show its work.</p>
+        <h2 class="title">Keeping the corpus from becoming noise.</h2>
+        <p class="lede">A store that only grows gets harder to retrieve from. AegisDB collapses near-duplicates, ages out low-value records, and lets a new fact supersede the one it contradicts — and any recall can print the arithmetic behind its ranking.</p>
         <div class="feats">
           <div class="feat se" data-k="0x0400">
             <h3><span class="bar"></span>Dedup with a paper trail</h3>
@@ -434,7 +429,7 @@
           </div>
           <div class="feat" data-k="0x0430">
             <h3><span class="bar"></span>Explainable recall</h3>
-            <p>Ask <span class="mono">search</span> to <span class="mono">explain</span> and every hit returns its ranking breakdown — <b>similarity × weight × recency = score</b>. No black box.</p>
+            <p>Ask <span class="mono">search</span> to <span class="mono">explain</span> and every hit returns its ranking breakdown — <b>similarity × weight × recency = score</b> — so you can see why a memory surfaced, or why it didn't.</p>
           </div>
           <div class="feat" data-k="0x0440">
             <h3><span class="bar"></span>Prove it, don't guess</h3>
@@ -482,7 +477,7 @@
         <div class="twoup">
           <div>
             <h2 class="title">Fast enough to be invisible.</h2>
-            <p class="lede">Recall sits in the agent's inner loop, so latency is the whole game. AegisDB keeps vector search <b>sub-millisecond</b> as memories pile up — exact while a set is small, an HNSW graph past a threshold, so recall stays fast without losing accuracy.</p>
+            <p class="lede">Recall sits in the agent's inner loop, so latency is the whole game. Vector search stays <b>sub-millisecond</b> at 100k memories, and recall@10 holds at 1.00 on the bench corpus.</p>
             <p class="lede">These are AegisDB's own numbers, not a comparison — and you can reproduce them yourself: <span class="mono">make bench</span> (vector recall + latency) and <span class="mono">make wire-bench</span> (end-to-end over TCP).</p>
           </div>
           <div>
@@ -492,7 +487,7 @@ recall@10      <span class="ar">→</span> 1.00  (384-dim, HNSW)
 ping           <span class="ar">→</span> 158k ops/s · p50 0.05 ms
 read (get)     <span class="ar">→</span> p50 0.8 ms over the wire
 
-<span class="c">measured on a 2023 laptop i7, loopback</span></pre>
+<span class="c">Intel Core i7-1355U · loopback · single node</span></pre>
           </div>
         </div>
       </div>
@@ -505,20 +500,19 @@ read (get)     <span class="ar">→</span> p50 0.8 ms over the wire
         <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0008</b>&nbsp;·&nbsp;type=semantic</p>
         <div class="twoup">
           <div>
-            <h2 class="title">Does the memory actually work? Measure it.</h2>
-            <p class="lede">Memory only earns its tokens if it changes outcomes — so AegisDB ships the benchmarks to prove it, not just claim it. Two evals, reproducible on your machine.</p>
-            <p class="lede">The task benchmark is a controlled A/B: teach a fact in one session, then answer a question in a <b>fresh</b> session — with recalled memory versus without. Sandboxed so the "without" arm has no side channel, the agent goes from <b>0% to 100%</b>. The recall eval separately gates retrieval quality (recall@k / MRR) so scoring changes can't regress silently.</p>
+            <h2 class="title">Does the memory actually work? Run the benchmark.</h2>
+            <p class="lede">Memory only earns its tokens if it changes outcomes, so the benchmark ships with the code. <span class="mono">make eval-tasks</span> is a controlled A/B: each task teaches a fact in one session, then asks about it in a <b>fresh</b> session — once with recall, once without. Each task runs in its own namespace, and <span class="mono">--sandbox</span> runs the no-memory arm from an empty directory so it can't recover the answer from your repo.</p>
+            <p class="lede">On the bundled 10-task suite the recorded run is <b>100% with memory, 0% without</b>. The facts are fictional and unguessable, so that 0% is the no-memory arm correctly answering "I don't know" — the number measures the harness's isolation as much as memory's lift. Point it at your own tasks or a different answer model and expect a smaller, more interesting gap. <span class="mono">make eval</span> separately gates retrieval quality (recall@k / MRR) so scoring changes can't regress silently.</p>
           </div>
           <div>
-            <p class="cap">make eval-tasks · make eval</p>
-<pre>A/B tasks · memory ON vs OFF (sandboxed)
-answer with memory     <span class="ar">→</span> 100%
-answer without memory  <span class="ar">→</span>   0%
-lift                   <span class="ar">→</span> +100%   <span class="c">10 tasks</span>
+            <p class="cap">recorded run · 10 coding-agent tasks</p>
+<pre><span class="c">$ make eval-tasks EVAL_ARGS='--model claude-code --sandbox'</span>
+with memory (ON)     <span class="ar">→</span> 100%
+without memory (OFF) <span class="ar">→</span>   0%   <span class="c">answers "I don't know"</span>
+lift                 <span class="ar">→</span> +100%  <span class="c">10 tasks</span>
 
-recall quality         <span class="ar">→</span> recall@k / MRR gate
-
-<span class="c">reproducible: make eval-tasks · make eval</span></pre>
+<span class="c">$ make eval</span>
+recall quality       <span class="ar">→</span> recall@k / MRR gate</pre>
           </div>
         </div>
       </div>
@@ -670,35 +664,11 @@ docker exec aegisdb aegisdb client search --tags user</code>
     }
   }
 }</code>
-              <p class="ann">The token's namespace is authoritative — no <span class="mono">AEGIS_NAMESPACE</span> needed. <span class="mono">uvx</span> fetches the package on demand (install <a href="https://docs.astral.sh/uv/">uv</a> once). Or skip the hand-editing: <span class="mono">uvx --from aegisdb-mcp aegisdb-init --host memory.internal --auth-token &lt;token&gt;</span> writes this and the hooks.</p>
-            </div>
-          </div>
-          <div class="row2">
-            <span class="seq">04</span>
-            <div>
-              <p class="what">Enable auto recall &amp; capture — <span class="mono">.claude/settings.json</span></p>
-              <code>{
-  "hooks": {
-    "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "uvx --from aegisdb-mcp aegisdb-recall-hook" } ] }
-    ],
-    "SessionEnd": [
-      { "hooks": [ { "type": "command", "command": "uvx --from aegisdb-mcp aegisdb-capture-hook" } ] }
-    ]
-  }
-}</code>
-              <p class="ann">Relevant memories are recalled into context each prompt; salient outcomes are captured at session end.</p>
-            </div>
-          </div>
-          <div class="row2">
-            <span class="seq">05</span>
-            <div>
-              <p class="what">Onboard a teammate</p>
-              <p class="ann">They repeat step&nbsp;1 for their own token (their own <span class="mono">--namespace</span> for isolation, or a shared one to pool memory) and steps&nbsp;3–4. No clone, no build.</p>
+              <p class="ann">The token's namespace is authoritative — no <span class="mono">AEGIS_NAMESPACE</span> needed. <span class="mono">uvx</span> fetches the package on demand (install <a href="https://docs.astral.sh/uv/">uv</a> once). Or skip the hand-editing entirely — <span class="mono">uvx --from aegisdb-mcp aegisdb-init --host memory.internal --auth-token &lt;token&gt;</span> writes this file <em>and</em> the recall/capture hooks.</p>
             </div>
           </div>
         </div>
-        <p class="moremore">Full step-by-step walkthrough — quotas, encryption at rest, backups &amp; troubleshooting: the <a href="https://github.com/d4n-larsson/aegisdb/blob/main/docs/tutorial-team-server.md">team server tutorial</a>.</p>
+        <p class="moremore">A teammate repeats step&nbsp;1 for their own token — their own <span class="mono">--namespace</span> to stay isolated, a shared one to pool memory — then step&nbsp;3. No clone, no build. The <a href="https://github.com/d4n-larsson/aegisdb/blob/main/docs/tutorial-team-server.md">team server tutorial</a> covers the hook config, quotas, encryption at rest, backups &amp; troubleshooting.</p>
       </div>
     </section>
 
