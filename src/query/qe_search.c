@@ -68,12 +68,107 @@ static int passes_filters(const MemoryRecord *r, const SearchParams *p) {
     return 1;
 }
 
-/* A candidate's log offset + similarity score, snapshotted under the index lock
- * so the record body can be read off it. */
+/* Where a query's candidate ids come from, and whether they arrive ranked. */
+typedef enum {
+    CAND_FILTER = 0, /* time / tags / scan — time-ordered, unscored */
+    CAND_SEMANTIC,   /* vector ANN, ranked by cosine similarity */
+    CAND_LEXICAL,    /* BM25 over the payload text (ROADMAP 4.1) */
+    CAND_HYBRID      /* both, fused by reciprocal rank */
+} CandSource;
+
+/* One candidate id with the full ranking breakdown assembled for it, so a hybrid
+ * hit can explain which retrieval path found it (ROADMAP 1.2). */
+typedef struct {
+    uint64_t id;
+    float score; /* the raw relevance this candidate ranks on */
+    float sim;
+    float bm25;
+    float rrf;
+    uint32_t srank; /* 1-based rank in the semantic list; 0 = absent */
+    uint32_t lrank; /* 1-based rank in the lexical list; 0 = absent */
+} ScoredId;
+
+/* A candidate's log offset + its ranking breakdown, snapshotted under the index
+ * lock so the record body can be read off it. */
 typedef struct {
     uint64_t off;
-    float score;
+    ScoredId sc;
 } SearchSnap;
+
+static int cmp_scored_by_id(const void *a, const void *b) {
+    uint64_t x = ((const ScoredId *)a)->id;
+    uint64_t y = ((const ScoredId *)b)->id;
+    if (x < y) {
+        return -1;
+    }
+    if (x > y) {
+        return 1;
+    }
+    return 0;
+}
+
+/* Fuse a semantic and a lexical result list by reciprocal rank:
+ *   score = sum over the lists containing the record of 1/(RRF_K + rank).
+ *
+ * Rank-based rather than score-based deliberately: a cosine in [-1,1] and an
+ * unbounded BM25 score share no scale, and normalising them per query would make
+ * each record's score depend on the rest of the batch (so adding one document
+ * could reorder unrelated results). Ranks are comparable by construction.
+ *
+ * Consumes nothing; allocates the fused array (free with free()). Returns NULL
+ * on allocation failure. */
+static ScoredId *rrf_fuse(const uint64_t *sids, const float *sscores, size_t sn,
+                          const uint64_t *lids, const float *lscores, size_t ln,
+                          size_t *out_n) {
+    *out_n = 0;
+    size_t total = sn + ln;
+    ScoredId *all = malloc((total ? total : 1) * sizeof(*all));
+    if (!all) {
+        return NULL;
+    }
+    size_t n = 0;
+    for (size_t i = 0; i < sn; i++) {
+        all[n] = (ScoredId){
+            .id = sids[i], .sim = sscores[i], .srank = (uint32_t)(i + 1)};
+        n++;
+    }
+    for (size_t i = 0; i < ln; i++) {
+        all[n] = (ScoredId){
+            .id = lids[i], .bm25 = lscores[i], .lrank = (uint32_t)(i + 1)};
+        n++;
+    }
+    /* Merge the two lists on id: sort, then fold each run of equal ids into one
+     * entry carrying both ranks. */
+    qsort(all, n, sizeof(*all), cmp_scored_by_id);
+    size_t m = 0;
+    for (size_t i = 0; i < n;) {
+        ScoredId cur = all[i];
+        size_t j = i + 1;
+        for (; j < n && all[j].id == cur.id; j++) {
+            if (all[j].srank) {
+                cur.srank = all[j].srank;
+                cur.sim = all[j].sim;
+            }
+            if (all[j].lrank) {
+                cur.lrank = all[j].lrank;
+                cur.bm25 = all[j].bm25;
+            }
+        }
+        float rrf = 0.0F;
+        if (cur.srank) {
+            rrf += 1.0F / (float)(RRF_K + cur.srank);
+        }
+        if (cur.lrank) {
+            rrf += 1.0F / (float)(RRF_K + cur.lrank);
+        }
+        cur.rrf = rrf;
+        cur.score = rrf;
+        all[m++] = cur;
+        i = j;
+    }
+    *out_n = m;
+    return all;
+}
 
 static int cmp_score_desc(const void *a, const void *b) {
     float x = ((const Cand *)a)->score;
@@ -83,6 +178,18 @@ static int cmp_score_desc(const void *a, const void *b) {
     }
     if (x > y) {
         return -1;
+    }
+    /* Equal scores break on ascending id, so the ranking is deterministic and
+     * paging is stable. qsort is not a stable sort, and exact ties are routine
+     * under fusion: a record at rank 1 of the lexical list scores exactly what a
+     * record at rank 1 of the semantic list does. */
+    uint64_t i = ((const Cand *)a)->rec.id;
+    uint64_t j = ((const Cand *)b)->rec.id;
+    if (i < j) {
+        return -1;
+    }
+    if (i > j) {
+        return 1;
     }
     return 0;
 }
@@ -194,16 +301,16 @@ static Cand *select_top(Cand *cands, size_t m, size_t sel_n,
     return top;
 }
 
-/* Resolve a candidate id set and load the surviving records. For semantic
- * queries the candidates are the top `fetch` by vector similarity; otherwise
- * the complete matching set from the time/tag index. Offsets are snapshotted
- * under index_lock, then records are read under log_lock (off the index lock)
- * and post-filtered. *exhausted is set when the candidate source returned fewer
- * than `fetch` (semantic) or is inherently complete (non-semantic) — i.e. there
- * is nothing more to find by widening. Allocates *out_cands (record_free each,
- * then free the array). 0/-1. */
+/* Resolve a candidate id set and load the surviving records. A ranked source
+ * (semantic / lexical / hybrid) contributes its top `fetch`; CAND_FILTER
+ * contributes the complete matching set from the time/tag index. Offsets are
+ * snapshotted under index_lock, then records are read under log_lock (off the
+ * index lock) and post-filtered. *exhausted is set when the candidate source
+ * returned fewer than `fetch`, or is inherently complete — i.e. there is nothing
+ * more to find by widening. Allocates *out_cands (record_free each, then free
+ * the array). 0/-1. */
 static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
-                                        size_t fetch, int semantic,
+                                        size_t fetch, CandSource src,
                                         size_t load_cap, Cand **out_cands,
                                         size_t *out_m, int *exhausted) {
     *out_cands = NULL;
@@ -212,16 +319,88 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
     uint64_t *ids = NULL;
     float *scores = NULL;
     size_t nids = 0;
+    ScoredId *sc = NULL; /* ranked sources only */
+    int ranked = (src != CAND_FILTER);
 
     pthread_rwlock_rdlock(&db->index_lock);
-    if (semantic) {
+    if (src == CAND_SEMANTIC || src == CAND_HYBRID) {
         if (semantic_index_search(db->sem, p->embedding, p->embedding_dim,
                                   fetch, &ids, &scores, &nids) != 0) {
             pthread_rwlock_unlock(&db->index_lock);
             return AEGIS_ERR_INTERNAL;
         }
-        *exhausted =
-            (nids < fetch); /* fewer returned than asked -> saw them all */
+        /* Fewer returned than asked -> the index has nothing more to give.
+         * Measured before min_score trims the list, so widening is driven by
+         * what the index holds, not by how much the caller filtered out. */
+        *exhausted = (nids < fetch);
+        /* min_score gates on the raw cosine, before the fusion and the log
+         * read, so it means the same thing in a hybrid query as it does alone. */
+        if (p->has_min_score) {
+            size_t keep = 0;
+            for (size_t i = 0; i < nids; i++) {
+                if (scores[i] >= p->min_score) {
+                    ids[keep] = ids[i];
+                    scores[keep] = scores[i];
+                    keep++;
+                }
+            }
+            nids = keep;
+        }
+    }
+    if (src == CAND_LEXICAL || src == CAND_HYBRID) {
+        uint64_t *lids = NULL;
+        float *lscores = NULL;
+        size_t lnids = 0;
+        if (lexical_index_search(db->lex, p->query, fetch, &lids, &lscores,
+                                 &lnids) != 0) {
+            free(ids);
+            free(scores);
+            pthread_rwlock_unlock(&db->index_lock);
+            return AEGIS_ERR_INTERNAL;
+        }
+        if (src == CAND_LEXICAL) {
+            *exhausted = (lnids < fetch);
+            sc = malloc((lnids ? lnids : 1) * sizeof(*sc));
+            if (sc) {
+                for (size_t i = 0; i < lnids; i++) {
+                    sc[i] = (ScoredId){.id = lids[i],
+                                       .score = lscores[i],
+                                       .bm25 = lscores[i],
+                                       .lrank = (uint32_t)(i + 1)};
+                }
+                nids = lnids;
+            }
+        } else {
+            /* Widening only helps while *both* sources still have more. */
+            *exhausted = *exhausted && (lnids < fetch);
+            size_t fn = 0;
+            sc = rrf_fuse(ids, scores, nids, lids, lscores, lnids, &fn);
+            nids = fn;
+        }
+        free(lids);
+        free(lscores);
+        free(ids);
+        free(scores);
+        ids = NULL;
+        scores = NULL;
+        if (!sc) {
+            pthread_rwlock_unlock(&db->index_lock);
+            return AEGIS_ERR_INTERNAL;
+        }
+    } else if (src == CAND_SEMANTIC) {
+        sc = malloc((nids ? nids : 1) * sizeof(*sc));
+        if (!sc) {
+            free(ids);
+            free(scores);
+            pthread_rwlock_unlock(&db->index_lock);
+            return AEGIS_ERR_INTERNAL;
+        }
+        for (size_t i = 0; i < nids; i++) {
+            sc[i] = (ScoredId){.id = ids[i],
+                               .score = scores[i],
+                               .sim = scores[i],
+                               .srank = (uint32_t)(i + 1)};
+        }
     } else if (p->has_time) {
         /* A wide-open time range is effectively a full scan, so bound it to
          * `load_cap` (0 = unlimited); *exhausted stays set only if nothing was
@@ -263,22 +442,24 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
     }
 
     /* resolve id -> log offset under the index lock, snapshotting (offset,
-     * similarity) so the disk reads can run off it */
+     * ranking breakdown) so the disk reads can run off it */
     SearchSnap *snap = malloc((nids ? nids : 1) * sizeof(SearchSnap));
     if (!snap) {
         free(ids);
         free(scores);
+        free(sc);
         pthread_rwlock_unlock(&db->index_lock);
         return AEGIS_ERR_INTERNAL;
     }
     size_t sn = 0;
     for (size_t i = 0; i < nids; i++) {
-        const HashEntry *e = hash_index_get(db->hash, ids[i]);
+        uint64_t id = ranked ? sc[i].id : ids[i];
+        const HashEntry *e = hash_index_get(db->hash, id);
         if (!e) {
             continue;
         }
         snap[sn].off = e->offset;
-        snap[sn].score = semantic ? scores[i] : 0.0F;
+        snap[sn].sc = ranked ? sc[i] : (ScoredId){.id = id};
         sn++;
     }
     pthread_rwlock_rdlock(
@@ -286,6 +467,7 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
     pthread_rwlock_unlock(&db->index_lock);
     free(ids);
     free(scores);
+    free(sc);
 
     /* load + decode + post-filter off the index lock; disk I/O holds only
      * log_lock, so concurrent writers are not blocked by it */
@@ -300,10 +482,6 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
     uint64_t now = db_now_ms();
     size_t m = 0;
     for (size_t i = 0; i < sn; i++) {
-        /* min_score gates on the raw cosine similarity, before the log read */
-        if (semantic && p->has_min_score && snap[i].score < p->min_score) {
-            continue;
-        }
         uint8_t *buf = NULL;
         size_t len = 0;
         if (log_read(&db->log, snap[i].off, &buf, &len) != 0) {
@@ -320,25 +498,49 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
             continue;
         }
         cands[m].rec = r;
-        if (semantic) {
-            /* T038: re-rank by importance * confidence * similarity, then (#69)
-             * an optional exponential recency decay by age since `updated`. */
-            float sim = snap[i].score;
+        if (ranked) {
+            /* T038: re-rank the source's relevance by importance * confidence,
+             * then (#69) an optional exponential recency decay by age since
+             * `updated`. The relevance is the cosine (semantic) or the BM25 score
+             * (lexical).
+             *
+             * A fused (hybrid) query is deliberately NOT weighted this way.
+             * Reciprocal-rank scores are near-uniform by construction — rank 1
+             * and rank 2 differ by 1/61 vs 1/62, under 2% — so any multiplier
+             * with a wider spread than that becomes the primary sort key instead
+             * of a modifier. Multiplying by importance*confidence (commonly
+             * 0.5..1.0) demoted correct top-1 hits below merely-important ones
+             * and measurably cost recall@1 in `make eval EVAL_ARGS='--lexical'`.
+             * So a hybrid query ranks on the fusion alone, and reports weight and
+             * recency_factor as 1.0 — "not applied" — which keeps the documented
+             * score == weight * relevance * recency_factor identity true. Use a
+             * single-source query when importance or half_life_ms shaping is what
+             * you want. */
+            int fused = (src == CAND_HYBRID);
+            float relevance = snap[i].sc.score;
             float w = r.importance * r.confidence;
-            float wapplied = w > 0 ? w : 1.0F;
+            float wapplied = (fused || w <= 0) ? 1.0F : w;
             float recency = 1.0F;
-            if (p->half_life_ms) {
+            if (p->half_life_ms && !fused) {
                 double age = now > r.updated ? (double)(now - r.updated) : 0.0;
                 /* 0.5^(age/half_life) == exp(-ln2 * age/half_life) */
                 recency = (float)exp(-0.6931471805599453 * age /
                                      (double)p->half_life_ms);
             }
-            cands[m].sim = sim;
+            cands[m].sim = snap[i].sc.sim;
+            cands[m].bm25 = snap[i].sc.bm25;
+            cands[m].rrf = snap[i].sc.rrf;
+            cands[m].srank = snap[i].sc.srank;
+            cands[m].lrank = snap[i].sc.lrank;
             cands[m].weight = wapplied;
             cands[m].recency = recency;
-            cands[m].score = wapplied * sim * recency;
+            cands[m].score = wapplied * relevance * recency;
         } else {
             cands[m].sim = 0;
+            cands[m].bm25 = 0;
+            cands[m].rrf = 0;
+            cands[m].srank = 0;
+            cands[m].lrank = 0;
             cands[m].weight = r.importance * r.confidence;
             cands[m].recency = 1.0F;
             cands[m].score = 0;
@@ -368,28 +570,45 @@ aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
         p->embedding_dim != db->config.embedding_dimensions) {
         return AEGIS_ERR_INVALID_REQUEST;
     }
+    /* A text query needs the lexical index, which --no-lexical-index omits.
+     * Report that as NOT_READY (the server cannot serve this yet) rather than
+     * silently ignoring the query and returning unranked filter results. */
+    if (p->query && *p->query && !db->lex) {
+        return AEGIS_ERR_NOT_READY;
+    }
 
     size_t top_k = p->top_k ? p->top_k : 10;
     int semantic = p->embedding_dim ? 1 : 0;
+    int lexical = (p->query && *p->query) ? 1 : 0;
+    CandSource src = CAND_FILTER;
+    if (semantic && lexical) {
+        src = CAND_HYBRID;
+    } else if (semantic) {
+        src = CAND_SEMANTIC;
+    } else if (lexical) {
+        src = CAND_LEXICAL;
+    }
+    int is_ranked = (src != CAND_FILTER);
     size_t offset = p->offset < MAX_OFFSET ? p->offset : MAX_OFFSET;
     /* rank enough to page past `offset` and still fill top_k */
     size_t want = offset + top_k;
 
     Cand *cands = NULL;
     size_t m = 0;
-    if (semantic) {
+    if (is_ranked) {
         /* Over-fetch, then widen if a selective post-filter (or min_score, or a
-         * page offset) leaves < want: the global vector index returns the
-         * nearest regardless of filter, so a selective filter (e.g. a small
+         * page offset) leaves < want: the ranked sources return their best
+         * matches regardless of filter, so a selective filter (e.g. a small
          * namespace) can drop them all. Re-query with a growing fetch until
-         * enough survive, the index is exhausted, or the cap is hit. */
+         * enough survive, the source is exhausted, or the cap is hit. */
         size_t fetch = (want * 4) + 32;
         if (fetch > SEARCH_FETCH_CAP) {
             fetch = SEARCH_FETCH_CAP;
         }
         for (;;) {
             int exhausted = 0;
-            st = gather_candidates(db, p, fetch, 1, 0, &cands, &m, &exhausted);
+            st =
+                gather_candidates(db, p, fetch, src, 0, &cands, &m, &exhausted);
             if (st != AEGIS_OK) {
                 return st;
             }
@@ -406,8 +625,8 @@ aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
         }
     } else {
         int exhausted = 0;
-        st = gather_candidates(db, p, 0, 0, db->config.query_scan_cap, &cands,
-                               &m, &exhausted);
+        st = gather_candidates(db, p, 0, CAND_FILTER, db->config.query_scan_cap,
+                               &cands, &m, &exhausted);
         if (st != AEGIS_OK) {
             return st;
         }
@@ -417,7 +636,7 @@ aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
      * (sorted best-first), then page: return the slice [offset, sel_n) and free
      * the paged-over head. */
     int (*cmp)(const void *, const void *) =
-        semantic ? cmp_score_desc : cmp_created_asc;
+        is_ranked ? cmp_score_desc : cmp_created_asc;
     size_t sel_n = (want < m) ? want : m;
     /* Rank the best `sel_n` into `ranked` (best-first); it owns .rec for
      * [0, sel_n). NULL is OOM only when sel_n > 0 (sel_n == 0 == no candidates). */
@@ -457,8 +676,16 @@ aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
         res[i - start] = ranked[i].rec;
         if (exp) {
             exp[i - start] = (SearchExplain){
-                .semantic = semantic,
+                /* Per hit, not per query: in a hybrid search one record may be
+                 * found only lexically and the next only semantically, so these
+                 * follow the ranks the sources actually assigned. */
+                .semantic = ranked[i].srank ? 1 : 0,
+                .lexical = ranked[i].lrank ? 1 : 0,
                 .similarity = ranked[i].sim,
+                .bm25 = ranked[i].bm25,
+                .semantic_rank = (int)ranked[i].srank,
+                .lexical_rank = (int)ranked[i].lrank,
+                .rrf = ranked[i].rrf,
                 .importance = ranked[i].rec.importance,
                 .confidence = ranked[i].rec.confidence,
                 .weight = ranked[i].weight,

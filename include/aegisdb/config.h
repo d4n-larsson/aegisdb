@@ -87,7 +87,13 @@ typedef struct {
      * (amplification DoS). Selective filters (tags) are unaffected. Default
      * 100000; 0 = unlimited. */
     size_t query_scan_cap;
-    /* Soft cap on total in-RAM index bytes (hash+time+tag+semantic). Inserts are
+    /* Build the lexical (BM25) index over record payloads, enabling `search`
+     * with a `query` string (ROADMAP 4.1). On by default; --no-lexical-index
+     * turns it off, which trades keyword search for the index RAM a text index
+     * over every payload costs. Disabled, a `query` returns NOT_READY. */
+    int lexical_index;
+    /* Soft cap on total in-RAM index bytes (hash+time+tag+lexical+semantic).
+     * Inserts are
      * refused with MEMORY_LIMIT once the sampled index size reaches this, so a
      * growing dataset backpressures instead of getting OOM-killed. Sampled
      * periodically by the maintenance thread, so it is approximate (enforced

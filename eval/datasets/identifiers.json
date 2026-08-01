@@ -1,0 +1,148 @@
+{
+  "name": "coding-agent identifiers",
+  "description": "Identifier-heavy recall for the coding-agent wedge (ROADMAP 4.1). Every query is the kind a developer actually types mid-task — a flag, an env var, a file:line, an error string, a symbol — and every relevant memory is the one that literally contains that token. Run it with `make eval EVAL_ARGS='--lexical --dataset eval/datasets/identifiers.json'` to compare all three retrieval modes. IMPORTANT CAVEAT: the default `hashing` embedder is itself token-based (it hashes whitespace/alnum tokens into buckets), so it behaves like a lexical matcher and scores far better on these queries than a real dense embedding model would — it is NOT a stand-in for the weakness this dataset is meant to expose. With the default embedder this set works as a regression gate (hybrid must not lose to semantic-only, and must not drop a query semantic-only answered); to see the actual size of the gap, run it against a real model via --embedder command --embedder-cmd.",
+  "embedding_dim": 256,
+  "memories": [
+    {
+      "label": "tenant_max_records",
+      "type": "semantic",
+      "importance": 0.8,
+      "tags": ["ops", "limits"],
+      "text": "Per-tenant storage is capped with --tenant-max-records and --tenant-max-bytes. A tenant past either cap gets QUOTA_EXCEEDED on insert; deletes still work so it can recover on its own."
+    },
+    {
+      "label": "tenant_rate_qps",
+      "type": "semantic",
+      "importance": 0.8,
+      "tags": ["ops", "limits"],
+      "text": "Request rate is bounded per namespace by --tenant-rate-qps with a --tenant-rate-burst allowance. Over the rate the server answers RATE_LIMITED rather than queueing."
+    },
+    {
+      "label": "recall_top_k_env",
+      "type": "semantic",
+      "importance": 0.7,
+      "tags": ["integration", "config"],
+      "text": "The Claude Code recall hook is capped by the AEGIS_RECALL_TOP_K environment variable, set in settings.json. The hook does not inherit the .mcp.json env, so it falls back to embedding_mode none."
+    },
+    {
+      "label": "hnsw_crc_fix",
+      "type": "semantic",
+      "importance": 0.9,
+      "tags": ["bug", "storage"],
+      "text": "The CRC framing bug that dropped records after a torn write was fixed in hnsw.c:214 — the length prefix was read before the magic was validated."
+    },
+    {
+      "label": "query_scan_cap",
+      "type": "semantic",
+      "importance": 0.7,
+      "tags": ["ops", "limits"],
+      "text": "A filterless search is bounded by --query-scan-cap (default 100000) so one broad query cannot pull the whole dataset into RAM. When the cap truncates, count reports a floor rather than an exact number."
+    },
+    {
+      "label": "max_index_bytes",
+      "type": "semantic",
+      "importance": 0.7,
+      "tags": ["ops", "memory"],
+      "text": "Index RAM backpressure is configured with --max-index-bytes. Past the cap inserts return MEMORY_LIMIT while deletes and updates still proceed, so the operator can free space."
+    },
+    {
+      "label": "no_lexical_index",
+      "type": "semantic",
+      "importance": 0.6,
+      "tags": ["ops", "search"],
+      "text": "Passing --no-lexical-index skips the BM25 keyword index and saves its RAM, but a search carrying a query string then returns NOT_READY."
+    },
+    {
+      "label": "header_rebuild",
+      "type": "semantic",
+      "importance": 0.8,
+      "tags": ["build"],
+      "text": "The Makefile tracks header dependencies with -MMD -MP, so editing a header in include/ rebuilds every object that included it. The old advice to run make clean first no longer applies."
+    },
+    {
+      "label": "auth_token_file",
+      "type": "semantic",
+      "importance": 0.8,
+      "tags": ["auth", "ops"],
+      "text": "Tokens are loaded from --auth-token-file, one 'secret namespace scope' triple per line; a bare line is a global admin token. Runtime token_add rewrites the file with every entry hashed."
+    },
+    {
+      "label": "embedding_dim_mismatch",
+      "type": "semantic",
+      "importance": 0.7,
+      "tags": ["search", "gotcha"],
+      "text": "A search whose embedding length differs from --embedding-dim is rejected with INVALID_REQUEST. Restoring a snapshot into a server with a different dimension is refused for the same reason."
+    },
+    {
+      "label": "fsync_batch",
+      "type": "semantic",
+      "importance": 0.6,
+      "tags": ["durability"],
+      "text": "Durability mode is chosen with --fsync-batch or --fsync-interval-ms; with neither, every append fsyncs. The stats response reports whichever tuning value is active."
+    },
+    {
+      "label": "log_generation",
+      "type": "semantic",
+      "importance": 0.6,
+      "tags": ["replication"],
+      "text": "Compaction bumps log_generation, and a replica watching the stream re-bootstraps because its byte-offset cursor into the old log is no longer valid."
+    },
+    {
+      "label": "make_eval_decay",
+      "type": "semantic",
+      "importance": 0.6,
+      "tags": ["eval"],
+      "text": "Forgetting is measured with make eval EVAL_ARGS='--decay': it seeds low-value episodic noise and asserts the corpus plateaus while recall@10 holds."
+    },
+    {
+      "label": "supersedes_link",
+      "type": "semantic",
+      "importance": 0.7,
+      "tags": ["quality"],
+      "text": "Consolidation records a supersedes relationship from the surviving record to each absorbed one, so a merge is auditable lineage instead of silent loss."
+    },
+    {
+      "label": "blue_green_rejected",
+      "type": "semantic",
+      "importance": 0.9,
+      "tags": ["decision"],
+      "text": "The blue-green migration approach was rejected last quarter: it doubled the infrastructure bill for a service whose deploys are already sub-minute. Canary rollout was chosen instead."
+    },
+    {
+      "label": "working_capacity",
+      "type": "semantic",
+      "importance": 0.5,
+      "tags": ["config"],
+      "text": "Volatile working memory is a per-session ring buffer sized by --working-capacity, with entries expiring after --default-ttl-ms unless promoted."
+    }
+  ],
+  "queries": [
+    {"text": "--tenant-max-records", "relevant": ["tenant_max_records"]},
+    {"text": "--tenant-rate-qps", "relevant": ["tenant_rate_qps"]},
+    {"text": "AEGIS_RECALL_TOP_K", "relevant": ["recall_top_k_env"]},
+    {"text": "hnsw.c:214", "relevant": ["hnsw_crc_fix"]},
+    {"text": "--query-scan-cap", "relevant": ["query_scan_cap"]},
+    {"text": "--max-index-bytes", "relevant": ["max_index_bytes"]},
+    {"text": "--no-lexical-index", "relevant": ["no_lexical_index"]},
+    {"text": "--auth-token-file", "relevant": ["auth_token_file"]},
+    {"text": "QUOTA_EXCEEDED", "relevant": ["tenant_max_records"]},
+    {"text": "RATE_LIMITED", "relevant": ["tenant_rate_qps"]},
+    {"text": "MEMORY_LIMIT", "relevant": ["max_index_bytes"]},
+    {"text": "NOT_READY", "relevant": ["no_lexical_index"]},
+    {"text": "INVALID_REQUEST embedding dim", "relevant": ["embedding_dim_mismatch"]},
+    {"text": "-MMD -MP header dependencies", "relevant": ["header_rebuild"]},
+    {"text": "--fsync-batch", "relevant": ["fsync_batch"]},
+    {"text": "log_generation", "relevant": ["log_generation"]},
+    {"text": "EVAL_ARGS='--decay'", "relevant": ["make_eval_decay"]},
+    {"text": "supersedes", "relevant": ["supersedes_link"]},
+    {"text": "blue-green", "relevant": ["blue_green_rejected"]},
+    {"text": "--working-capacity", "relevant": ["working_capacity"]},
+    {"text": "why does the build need a clean rebuild after a header edit?",
+     "relevant": ["header_rebuild"]},
+    {"text": "which migration approach did we reject and why?",
+     "relevant": ["blue_green_rejected"]},
+    {"text": "how do I stop one tenant filling the disk?",
+     "relevant": ["tenant_max_records"]},
+    {"text": "what bounds a filterless search?", "relevant": ["query_scan_cap"]}
+  ]
+}

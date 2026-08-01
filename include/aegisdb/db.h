@@ -7,6 +7,7 @@
 
 #include "aegisdb/config.h"
 #include "aegisdb/hash_index.h"
+#include "aegisdb/lexical_index.h"
 #include "aegisdb/log.h"
 #include "aegisdb/semantic_index.h"
 #include "aegisdb/tag_index.h"
@@ -60,6 +61,8 @@ typedef struct {
     HashIndex *hash;       /* id -> log location (Phase 1) */
     TimeIndex *time;       /* created -> ids (Phase 2) */
     TagIndex *tags;        /* tag -> ids (Phase 2) */
+    LexicalIndex *lex;     /* term -> postings, BM25 (ROADMAP 4.1); NULL when
+                            * --no-lexical-index disabled it */
     SemanticIndex *sem;    /* embedding ANN (Phase 3) */
     WorkingStore *working; /* volatile sessions (Phase 4) */
     TenantTable

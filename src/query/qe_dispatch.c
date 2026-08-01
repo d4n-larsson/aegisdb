@@ -21,16 +21,32 @@
 /* ----- dispatch / wire handlers ---------------------------------------- */
 
 /* Ranking breakdown for one hit (ROADMAP 1.2): explains why it ranked here.
- * score == weight * similarity * recency_factor for semantic queries. */
+ * score == weight * relevance * recency_factor, where relevance is the cosine
+ * similarity, the BM25 score, or the fused reciprocal rank (ROADMAP 4.1). Only
+ * the fields that contributed are emitted, so a response stays readable. */
 static cJSON *search_explain_json(const SearchExplain *e) {
     cJSON *o = cJSON_CreateObject();
     if (!o) {
         return NULL;
     }
     cJSON_AddBoolToObject(o, "semantic", e->semantic);
+    cJSON_AddBoolToObject(o, "lexical", e->lexical);
     cJSON_AddNumberToObject(o, "score", e->score);
     if (e->semantic) {
         cJSON_AddNumberToObject(o, "similarity", e->similarity);
+    }
+    if (e->lexical) {
+        cJSON_AddNumberToObject(o, "bm25", e->bm25);
+    }
+    /* Hybrid only (rrf is 0 for a single-source query). Both ranks are always
+     * reported, including the zero, so a one-sided match is visible rather than
+     * inferred from an absent field: `lexical_rank: 1, semantic_rank: 0` is the
+     * case this feature exists for — the exact term found it, the vectors
+     * missed it. */
+    if (e->rrf > 0) {
+        cJSON_AddNumberToObject(o, "semantic_rank", e->semantic_rank);
+        cJSON_AddNumberToObject(o, "lexical_rank", e->lexical_rank);
+        cJSON_AddNumberToObject(o, "rrf", e->rrf);
     }
     cJSON_AddNumberToObject(o, "importance", e->importance);
     cJSON_AddNumberToObject(o, "confidence", e->confidence);
@@ -208,6 +224,11 @@ static void stats_add_storage(cJSON *o, AegisDB *db) {
     if (idx) {
         cJSON_AddNumberToObject(idx, "time", (double)db->time->n);
         cJSON_AddNumberToObject(idx, "tags", (double)tag_index_count(db->tags));
+        /* Distinct terms and indexed documents; both 0 with --no-lexical-index. */
+        cJSON_AddNumberToObject(idx, "lexical_terms",
+                                (double)lexical_index_terms(db->lex));
+        cJSON_AddNumberToObject(idx, "lexical_docs",
+                                (double)lexical_index_docs(db->lex));
         cJSON_AddNumberToObject(idx, "semantic",
                                 (double)semantic_index_count(db->sem));
         cJSON_AddNumberToObject(idx, "working",
@@ -222,13 +243,15 @@ static void stats_add_storage(cJSON *o, AegisDB *db) {
         size_t hb = hash_index_bytes(db->hash);
         size_t tb = time_index_bytes(db->time);
         size_t gb = tag_index_bytes(db->tags);
+        size_t lb = lexical_index_bytes(db->lex);
         size_t sb = semantic_index_bytes(db->sem);
         cJSON_AddNumberToObject(mem, "hash_bytes", (double)hb);
         cJSON_AddNumberToObject(mem, "time_bytes", (double)tb);
         cJSON_AddNumberToObject(mem, "tag_bytes", (double)gb);
+        cJSON_AddNumberToObject(mem, "lexical_bytes", (double)lb);
         cJSON_AddNumberToObject(mem, "semantic_bytes", (double)sb);
         cJSON_AddNumberToObject(mem, "index_bytes_total",
-                                (double)(hb + tb + gb + sb));
+                                (double)(hb + tb + gb + lb + sb));
         /* The configured backpressure cap (0 = unlimited), so a scraper can
          * alert on index_bytes_total approaching it. */
         cJSON_AddNumberToObject(mem, "index_bytes_limit",
@@ -860,6 +883,17 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     /* order=oldest keeps the aging tail when a bounded scan truncates (candidate
      * selection); absent/anything else = default recent-biased scan. */
     p.oldest_first = (strcmp(jr_str(req, "order", ""), "oldest") == 0);
+    /* Lexical (BM25) query text; fused with `embedding` when both are present
+     * (ROADMAP 4.1). Borrows the cJSON string for the life of the call. */
+    p.query = jr_str(req, "query", NULL);
+    /* qe_search_ex also rejects this, but with the generic NOT_READY message
+     * about phases — which points at the wrong cause. Say what actually needs
+     * changing, since the operator has to restart the server to fix it. */
+    if (p.query && *p.query && !db->lex) {
+        return json_error("NOT_READY",
+                          "lexical index is disabled (--no-lexical-index), so "
+                          "`query` cannot be served");
+    }
 
     const char **tags = NULL;
     size_t tn = 0;

@@ -29,6 +29,35 @@ Exits non-zero if the corpus didn't shrink or recall@maxk regressed. Typical run
 on the starter dataset: **66 → 22 records** with recall@10 held at 93% (and
 recall@3/@5 improved, since duplicates no longer crowd the top-k).
 
+### Retrieval-mode comparison (ROADMAP 4.1)
+
+Measures the three retrieval paths over one corpus — semantic-only (embedding),
+lexical-only (BM25 `query`), and hybrid (both, fused by reciprocal rank) — and
+lists the queries hybrid answers that semantic-only misses entirely.
+
+```sh
+make eval EVAL_ARGS='--lexical --dataset eval/datasets/identifiers.json'
+python3 eval/recall_eval.py ./build/aegisdb --retrieval lexical   # one mode only
+```
+
+Exits non-zero if hybrid scores below semantic-only, **or if hybrid loses any
+query semantic-only answered** — the interesting failure, since fusion trading
+old wins for new ones looks fine in the aggregate.
+
+**Read the numbers with the caveat.** The default `hashing` embedder is itself
+token-based, so it behaves much like a lexical matcher and scores far better on
+identifier queries than a real dense model would. On
+`datasets/identifiers.json` it reports semantic 92% / lexical 100% / hybrid 96%
+at recall@1 — so with this embedder the mode is a **regression gate, not a
+demonstration of the gap**. For the real gap, point `--embedder command
+--embedder-cmd` at an actual embedding model.
+
+This mode earned its keep immediately: it caught the fused ranking being
+dominated by the `importance × confidence` multiplier (recall@1 62% vs 92%
+semantic-only), because reciprocal-rank scores differ by under 2% between
+adjacent ranks and any wider multiplier becomes the primary sort key. Hybrid now
+ranks on the fusion alone — see the note in `gather_candidates`.
+
 ### Forgetting eval (ROADMAP 2.3)
 
 Measures decay/forgetting: seed the curated facts, flood the corpus with
@@ -82,6 +111,9 @@ owns embedding for both memories and queries. See `embedders.py`.
                 "tags": ["..."], "match": "all"}]
 }
 ```
+
+`datasets/identifiers.json` — identifier-heavy recall (flags, env vars,
+`file.c:line`, error codes) for the lexical/hybrid comparison above. Same format.
 
 `relevant` lists the memory labels that *should* surface for the query. Add
 scenarios by dropping in another JSON file and pointing `--dataset` at it.

@@ -481,6 +481,7 @@ when **both** `start_time` and `end_time` are present.
 | `tags` | string[] | Tag filter |
 | `match` | string | `all` (intersection) \| `any` (union); default `all` |
 | `embedding` | number[] | Semantic query vector; ranked by cosine similarity weighted by importance × confidence |
+| `query` | string | Lexical query text; ranked by Okapi BM25 over record payloads. Combine with `embedding` for hybrid retrieval (see below). Returns `NOT_READY` if the server runs with `--no-lexical-index` |
 | `type` | string | Filter by memory type |
 | `agent_id` | string | Namespace filter |
 | `top_k` | integer | Max results; default 10 |
@@ -494,7 +495,41 @@ when **both** `start_time` and `end_time` are present.
 `max_importance` combined with `type` + a time range and `order: "oldest"` is how
 a summarization/maintenance job selects the oldest, lowest-value records to
 distill (server-side, so the client doesn't over-fetch and filter). `order` has
-no effect on semantic (embedding) queries, which rank by similarity.
+no effect on ranked (embedding or `query`) searches, which rank by relevance.
+
+**Lexical search (`query`)**: matches the words a record's payload actually
+contains, ranked by BM25. Identifier shape is preserved by the tokenizer, so
+`--tenant-max-records`, `hnsw.c:214` and `AEGIS_RECALL_TOP_K` are each findable
+by their exact spelling — the rare tokens a dense embedding averages away. A
+compound term is additionally indexed by its parts (`tenant`, `max`, `records`),
+so one word finds the flag. Matching is case-insensitive.
+
+```json
+{ "operation": "search", "query": "--tenant-max-records", "top_k": 5 }
+```
+
+**Hybrid search (`query` + `embedding`)**: the two result lists are fused by
+reciprocal rank — each record scores `Σ 1/(60 + rank)` over the lists it appears
+in. Ranks are fused rather than scores because a cosine in [-1,1] and an
+unbounded BM25 score share no scale, and normalising them per query would make
+one record's score depend on the rest of the batch.
+
+```json
+{ "operation": "search", "query": "CRC framing", "embedding": [ 0.01, "..." ],
+  "top_k": 10, "explain": true }
+```
+
+Two behaviours differ in hybrid mode, both deliberate:
+
+- `min_score` gates the **semantic** side only (it is a cosine floor), applied
+  before fusion — so it means the same thing it does in a semantic-only query.
+- `importance × confidence` weighting and `half_life_ms` recency decay are **not
+  applied**. Reciprocal-rank scores are near-uniform by construction (adjacent
+  ranks differ by under 2%), so any multiplier with a wider spread stops being a
+  modifier and becomes the primary sort key — measurably costing recall@1. A
+  fused query therefore ranks on the fusion alone and reports `weight` and
+  `recency_factor` as `1.0`. Use a single-source query when that shaping is what
+  you want.
 
 **Ranking explanation (`explain: true`)**: each record carries an `explain`
 object so retrieval is inspectable rather than a black box:
@@ -503,6 +538,7 @@ object so retrieval is inspectable rather than a black box:
 {
   "explain": {
     "semantic": true,
+    "lexical": false,
     "score": 0.8945,
     "similarity": 0.9939,
     "importance": 0.9,
@@ -513,11 +549,34 @@ object so retrieval is inspectable rather than a black box:
 }
 ```
 
-For semantic queries `score == weight × similarity × recency_factor`, where
-`weight = importance × confidence` (or `1.0` if that product is ≤ 0) and
-`recency_factor = 0.5^(age/half_life)` (`1.0` when no `half_life_ms` is set).
-`similarity` is the raw cosine ([-1, 1]). For non-semantic queries `semantic` is
-`false`, `similarity`/`score` are `0`, and results are ordered by time, not score.
+In every mode `score == weight × relevance × recency_factor`, where
+`weight = importance × confidence` (or `1.0` if that product is ≤ 0),
+`recency_factor = 0.5^(age/half_life)` (`1.0` when no `half_life_ms` is set), and
+`relevance` is whichever signal ranked the hit:
+
+| Query | `relevance` | Fields present |
+|-------|-------------|----------------|
+| `embedding` | `similarity` — raw cosine ([-1, 1]) | `similarity` |
+| `query` | `bm25` — raw BM25 score (≥ 0, unbounded) | `bm25` |
+| both (hybrid) | `rrf` — fused reciprocal rank | `similarity`/`bm25` as applicable, plus `semantic_rank`, `lexical_rank`, `rrf` |
+| filters only | — | `semantic`/`lexical` both `false`, `similarity`/`score` `0`, ordered by time |
+
+`semantic` and `lexical` are **per hit, not per query**: in a hybrid search one
+record can be found only lexically and the next only semantically. The rank pair
+is what says which, and both are always reported including the zero —
+`"lexical_rank": 1, "semantic_rank": 0` means the exact term found this record and
+the vector search missed it entirely, which is the case hybrid retrieval exists
+to cover.
+
+```json
+{
+  "explain": {
+    "semantic": false, "lexical": true, "score": 0.01639,
+    "bm25": 4.0581, "semantic_rank": 0, "lexical_rank": 1, "rrf": 0.01639,
+    "importance": 0.9, "confidence": 1.0, "weight": 1.0, "recency_factor": 1.0
+  }
+}
+```
 
 **Response (success)**:
 
@@ -686,8 +745,8 @@ authentication when enabled (unlike `ping`). Available at every phase.
 | `tombstones` | Deleted-but-not-yet-compacted records still in the log |
 | `log_bytes` | Current size of `memory.log` on disk |
 | `log_flush_pending` | `true` if writes have not yet been `fsync`'d — the current durability lag |
-| `indexes` | Per-index entry counts (`semantic` is the brute-force vector count; watch it for scale) |
-| `memory` | Approximate resident bytes per in-RAM index — `hash_bytes`, `time_bytes`, `tag_bytes`, `semantic_bytes`, `index_bytes_total`, and `index_bytes_limit` (the configured `--max-index-bytes` cap; 0 = unlimited). Indexes are held in memory and grow with the dataset (the semantic vectors usually dominate), so this is the figure to monitor/alert on; past the limit inserts return `MEMORY_LIMIT`. Excludes allocator overhead. |
+| `indexes` | Per-index entry counts (`semantic` is the brute-force vector count; watch it for scale). `lexical_terms`/`lexical_docs` are the distinct terms and indexed payloads in the BM25 index, both `0` under `--no-lexical-index` |
+| `memory` | Approximate resident bytes per in-RAM index — `hash_bytes`, `time_bytes`, `tag_bytes`, `lexical_bytes`, `semantic_bytes`, `index_bytes_total`, and `index_bytes_limit` (the configured `--max-index-bytes` cap; 0 = unlimited). Indexes are held in memory and grow with the dataset (the semantic vectors usually dominate), so this is the figure to monitor/alert on; past the limit inserts return `MEMORY_LIMIT`. Excludes allocator overhead. |
 | `next_id` | The id the next persisted insert will receive |
 | `metrics` | Monotonic operational counters since startup (below) |
 
