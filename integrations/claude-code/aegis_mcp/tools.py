@@ -50,6 +50,20 @@ def score_record(rec: dict, query_embedding, *, semantic: bool) -> float | None:
     return sim * (0.5 + 0.5 * importance) * confidence
 
 
+def _explain_score(rec: dict) -> float | None:
+    """The server's own rank score, from the `explain` block it was asked for.
+
+    Used when the server did the ranking (lexical or fused), where a client-side
+    cosine is either unavailable or the wrong signal. Note the scale differs from
+    score_record's: a fused score is a reciprocal-rank sum (~0.01-0.03), a lexical
+    one is an unbounded BM25 value. Compare scores only within one result set."""
+    exp = rec.get("explain")
+    if not isinstance(exp, dict):
+        return None
+    score = exp.get("score")
+    return float(score) if isinstance(score, (int, float)) else None
+
+
 def _suppress_near_duplicates(scored, threshold):
     """Drop a memory whose embedding is >= `threshold` cosine to an already-kept,
     higher-ranked one, so recall doesn't spend tokens re-injecting the same fact
@@ -155,7 +169,16 @@ class MemoryTools:
                start_time: int | None = None, end_time: int | None = None,
                top_k: int | None = None, kind: str | None = None,
                max_importance: float | None = None,
-               order: str | None = None) -> dict:
+               order: str | None = None, lexical: bool = False) -> dict:
+        """Recall memories. `lexical` opts into the server's BM25 keyword index
+        (fused with the embedding when one is available), which is what makes an
+        exact identifier findable and is the *only* content-based path when
+        embeddings are off — the recall hook's default.
+
+        It is opt-in per call site rather than always-on because server-ranked
+        results carry a score on a different scale (see _explain_score): a caller
+        that filters on a cosine floor — capture's supersede detection does —
+        would silently discard everything if handed fused scores."""
         top_k = top_k or self.config.recall_top_k
         tags = list(tags or [])
         if not query and not tags and start_time is None and end_time is None:
@@ -181,30 +204,66 @@ class MemoryTools:
         query_embedding = None
         usable = self._embeddings_usable()
         semantic = bool(query) and usable
-        degraded = bool(query) and not usable
+        want_lexical = bool(lexical and query)
+        if want_lexical:
+            payload["query"] = query
         if semantic:
             query_embedding = self.provider.embed_query(query)
             payload["embedding"] = query_embedding
+            if want_lexical and self.config.recall_min_score > 0:
+                # The cosine floor still gates the semantic side, but the server
+                # must apply it *before* fusing: applied client-side afterwards it
+                # would also discard lexical-only hits, which have no cosine.
+                payload["min_score"] = self.config.recall_min_score
+        # When the server ranks (fused or lexical-only) its order is
+        # authoritative — re-sorting by client-side cosine would throw the fusion
+        # away — so ask it to explain and carry its score through.
+        server_ranked = want_lexical
+        if server_ranked:
+            payload["explain"] = True
 
         try:
             resp = self._request(payload)
         except AegisUnavailable as exc:
             return {**results.unavailable(str(exc)), "memories": [], "total": 0,
                     "degraded": True}
+        # A server built with --no-lexical-index rejects `query` with NOT_READY.
+        # Retry once without it rather than failing recall outright.
+        if (not resp.get("ok") and want_lexical
+                and str(resp.get("error", {}).get("code", "")) == "NOT_READY"):
+            for k in ("query", "explain", "min_score"):
+                payload.pop(k, None)
+            want_lexical = False
+            server_ranked = False
+            try:
+                resp = self._request(payload)
+            except AegisUnavailable as exc:
+                return {**results.unavailable(str(exc)), "memories": [],
+                        "total": 0, "degraded": True}
+        # Degraded now means no content-based retrieval happened at all: no usable
+        # embeddings *and* no lexical fallback.
+        degraded = bool(query) and not semantic and not want_lexical
         if not resp.get("ok"):
             return {**results.from_aegis_error(resp), "memories": [], "total": 0,
                     "degraded": degraded}
 
         records = resp.get("records", [])
-        scored = [(score_record(r, query_embedding, semantic=semantic), r)
-                  for r in records]
-        if semantic:
-            scored.sort(key=lambda s: (s[0] if s[0] is not None else 0.0),
-                        reverse=True)
-            scored = [(s, r) for (s, r) in scored
-                      if (s or 0.0) >= self.config.recall_min_score]
+        if server_ranked:
+            scored = [(_explain_score(r), r) for r in records]
+            # min_score was applied server-side; dedup still pays for itself here
+            # (it keeps recall from re-injecting one fact phrased several ways).
             scored = _suppress_near_duplicates(
                 scored, self.config.recall_dedup_threshold)
+        else:
+            scored = [(score_record(r, query_embedding, semantic=semantic), r)
+                      for r in records]
+            if semantic:
+                scored.sort(key=lambda s: (s[0] if s[0] is not None else 0.0),
+                            reverse=True)
+                scored = [(s, r) for (s, r) in scored
+                          if (s or 0.0) >= self.config.recall_min_score]
+                scored = _suppress_near_duplicates(
+                    scored, self.config.recall_dedup_threshold)
         scored = scored[:top_k]
         memories = [record_to_memory(r, score=s) for (s, r) in scored]
         return results.ok(total=len(memories), memories=memories, degraded=degraded)

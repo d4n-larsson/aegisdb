@@ -34,10 +34,12 @@ def _free_port() -> int:
 class AegisServer:
     """Context manager that launches aegisdb on a free port with a temp datadir."""
 
-    def __init__(self, dim: int = TEST_DIM, phase: int = 4, token_lines=None):
+    def __init__(self, dim: int = TEST_DIM, phase: int = 4, token_lines=None,
+                 extra_args=None):
         self.dim = dim
         self.phase = phase
         self.token_lines = token_lines  # lines for --auth-token-file (auth on)
+        self.extra_args = list(extra_args or [])  # arbitrary extra server flags
         self.port = _free_port()
         self.datadir = tempfile.mkdtemp(prefix="aegis_it_")
         self.proc = None
@@ -45,6 +47,7 @@ class AegisServer:
     def __enter__(self):
         args = [AEGIS_BIN, "--data-dir", self.datadir, "--port", str(self.port),
                 "--phase", str(self.phase), "--embedding-dim", str(self.dim)]
+        args += self.extra_args
         if self.token_lines:
             tf = os.path.join(self.datadir, "tokens")
             with open(tf, "w") as fh:

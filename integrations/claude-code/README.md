@@ -154,8 +154,11 @@ Without embeddings, recall still works but falls back to **tags and time** only
   from the Hugging Face Hub and caches it under `~/.cache/`, then runs entirely on
   your CPU — nothing leaves the machine. It produces **384-dim** vectors, so set
   `AEGIS_EMBEDDING_DIMENSIONS=384` and start the server with `--embedding-dim 384`.
-- **`none`** — skip this; semantic search disables and recall falls back to
-  tags/time. Zero setup, nothing sent anywhere.
+- **`none`** — skip embeddings entirely. Recall then uses the server's **keyword
+  (BM25)** index, which still matches on content — including the exact
+  identifiers embeddings are worst at (`--tenant-max-records`, `hnsw.c:214`) —
+  plus tags and time. You lose *paraphrase* matching, not recall itself. Zero
+  setup, nothing sent anywhere.
 
 (A fourth mode, `fake`, is a deterministic hash used only by the test suite — not
 for real use.)
@@ -300,8 +303,9 @@ for the full design.
 - A running **AegisDB** server, started with the embedding dimension you intend to
   use, e.g. `./build/aegisdb --embedding-dim 1024`.
 - **Python 3.10+**.
-- For semantic recall: a `VOYAGE_API_KEY` (Voyage), the optional local model, or
-  neither (semantic search disables; tag/time recall still works).
+- For *semantic* (paraphrase) recall: a `VOYAGE_API_KEY` (Voyage), the optional
+  local model, or neither — with neither, recall falls back to the server's
+  keyword index plus tags/time, which still matches on content.
 
 ## Install
 

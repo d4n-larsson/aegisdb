@@ -127,9 +127,13 @@ def main() -> int:
     def memory_search(query: str | None = None, tags: list[str] | None = None,
                       match: str = "any", start_time: int | None = None,
                       end_time: int | None = None, top_k: int = 5) -> dict:
-        """Recall relevant memories by meaning, tags, and/or recency."""
+        """Recall relevant memories by meaning, exact keyword, tags, and/or
+        recency. `query` matches both semantically and literally, so searching an
+        exact identifier — a flag like `--tenant-max-records`, a `file.c:line`
+        reference, an error code — finds the memory containing that token."""
         return tools.search(query=query, tags=tags, match=match,
-                           start_time=start_time, end_time=end_time, top_k=top_k)
+                           start_time=start_time, end_time=end_time,
+                           top_k=top_k, lexical=True)
 
     @mcp.tool()
     def memory_get(id: int) -> dict:

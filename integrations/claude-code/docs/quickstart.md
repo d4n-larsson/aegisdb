@@ -6,9 +6,9 @@
 - A running **AegisDB** server (see the database quickstart). Launch it with the
   embedding dimension you intend to use, e.g. `--embedding-dim 1024`.
 - **Python 3.10+** and Claude Code installed.
-- (Optional, for semantic recall) a `VOYAGE_API_KEY`, **or** the optional local
-  embedding model, **or** neither (semantic search disables; tag/time recall
-  still works).
+- (Optional, for *semantic* / paraphrase recall) a `VOYAGE_API_KEY`, **or** the
+  optional local embedding model, **or** neither — with neither, recall uses the
+  server's keyword (BM25) index plus tags/time, so content matching still works.
 
 ## Install
 
@@ -120,5 +120,9 @@ pytest -m integration        # end-to-end against a running aegisdb
   them equal and restart both.
 - **Recall never appears** → check `recall_enabled`, that the hook is wired in
   `settings.json`, and that AegisDB is reachable (`ping`).
-- **No semantic ranking, only tag/time hits** → embeddings are in `none` mode
-  (no key / provider). Set `VOYAGE_API_KEY` or install the local extra.
+- **No semantic ranking, only keyword/tag/time hits** → embeddings are in `none`
+  mode (no key / provider). Keyword recall still works; for paraphrase matching
+  set `VOYAGE_API_KEY` or install the local extra.
+- **Keyword recall finds nothing either** → the server may be running with
+  `--no-lexical-index`. The client falls back silently rather than erroring, so
+  check the server's flags (`stats` reports `lexical_terms: 0`).

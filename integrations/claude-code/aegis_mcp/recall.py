@@ -121,7 +121,12 @@ def run_recall(prompt: str, config, provider: EmbeddingProvider,
 
     def _work():
         try:
-            box["res"] = tools.search(query=prompt, top_k=config.recall_top_k)
+            # lexical=True: the prompt is full of the exact tokens a dense
+            # embedding averages away (flags, file:line refs, symbols), and with
+            # embedding_mode=none — this hook's default — it is the only
+            # content-based retrieval available at all.
+            box["res"] = tools.search(query=prompt, top_k=config.recall_top_k,
+                                      lexical=True)
         except BaseException as exc:  # noqa: BLE001 — must never reach the turn
             box["exc"] = exc
 
