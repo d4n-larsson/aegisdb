@@ -224,6 +224,40 @@ behind the provider seam.*
 
 ---
 
+## Horizon 4 — Next: retrieval that finds identifiers, not just topics
+
+*Theme: close the recall gap dense vectors structurally cannot. Horizons 1–2 made
+the memory-quality layer coherent and measurable; this is the retrieval side of
+the same bet, and it needs no model on the hot path.*
+
+### 4.1 Lexical search + hybrid fusion
+- **Why now:** `search` has no text matching at all — the filters are time, tags,
+  type, and an embedding vector, so a memory cannot be found by the words it
+  contains. That is a structural miss for the coding-agent wedge, whose memories
+  are dense with rare tokens: `--tenant-max-records`, `hnsw.c:214`,
+  `AEGIS_RECALL_TOP_K`, a CRC framing error string, a PR number. Dense embeddings
+  are the wrong instrument for exactly those terms — they are averaged away — and
+  a deployment running `embedding_mode=none` (the recall hook's own default) has
+  *no* content-based retrieval whatsoever, only tags and time. Every downstream
+  policy already shipped (extraction, dedup, decay) is tuned against a retrieval
+  stage that cannot answer keyword queries.
+- **Build:** an inverted token→postings index alongside `tag_index`, BM25 scoring,
+  a `query` string field on `search`, and reciprocal-rank fusion when `query` and
+  `embedding` are both supplied. `explain` gains the lexical and fused-rank terms
+  so hybrid hits stay as inspectable as semantic ones (1.2). Tokenization must
+  keep identifier shape — don't split on `_`/`-`/`.`/`:` or case boundaries, or
+  the exact terms this exists to retrieve are destroyed before indexing.
+- **Leverages:** the existing tag index's postings machinery, the hybrid scorer
+  (importance × confidence × recency) for weighting fused results, `explain`,
+  and the eval harness as the scoreboard.
+- **Falls out for free:** a working search box in the inspector (1.3), and
+  "find every memory mentioning X" for audit/`export` workflows.
+- **Done when:** an identifier-heavy query set added to the `make eval` dataset
+  scores materially better hybrid than semantic-only, and a server with no
+  embedding provider configured still answers content queries.
+
+---
+
 ## Sequencing rationale
 
 ```
@@ -235,6 +269,9 @@ behind the provider seam.*
         (each validated against 1.1)
         │
 3.1 temporal ─ 3.2 forget/export ─ 3.3 hosted tier
+        │
+4.1 lexical + hybrid retrieval
+        (validated against 1.1; graded by the same recall@k/MRR)
 ```
 
 Build the **scoreboard (1.1)** before the memory-policy work in Horizon 2, so
@@ -242,13 +279,22 @@ extraction, dedup, and decay are tuned against numbers rather than vibes. Ship
 **provenance + inspection (1.2/1.3)** early because trust — not features — is what
 gates adoption of the wedge.
 
+**Lexical (4.1) comes after Horizon 2, not before it** — the policy layer is what
+differentiates, and it needed the scoreboard first. But it lands ahead of 3.3's
+remaining SDK/metrics work: a keyword query that returns nothing is a recall
+failure users feel on every session, whereas a missing SDK is friction for
+adopters who haven't arrived yet.
+
 ## Risks & how the roadmap answers them
 
 - **Commoditization from above** (model providers ship native memory, frameworks
   bundle it). *Answer:* be better and *inspectable* at the policy + trust layer
   (Horizons 1–2), and stay provider-neutral.
 - **Scope drift into a generic vector DB.** *Answer:* the non-goals, and keeping
-  every workstream tied to the coding-agent wedge until it's won.
+  every workstream tied to the coding-agent wedge until it's won. Note that 4.1
+  is *not* an exception: hybrid retrieval is one `query` field on the existing
+  `search` op — not a query language, and not full-text search as a product —
+  scoped to a recall failure the wedge hits daily.
 - **Polishing the engine because it's concrete** while the unglamorous
   extraction/eval/UI work — where the users are — waits. *Answer:* Horizon 1 is
   deliberately the eval + trust surface, not more storage features.
