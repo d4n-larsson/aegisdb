@@ -62,6 +62,55 @@ running): `uvx --from aegisdb-mcp aegisdb-init` — see
   a documented security review, and CI that runs ASan/UBSan/TSan plus continuous
   fuzzing.
 
+## What teams use it for
+
+**The flagship case: one shared memory pool per repo.** Everyone on a team
+re-teaches their agent the same things — why the auth middleware is bypassed in
+staging, that the build needs a clean rebuild after a header change, which
+migration approach was rejected last quarter and why. That knowledge dies at the
+end of each session, per person, and the next agent re-derives it from scratch.
+
+Point every teammate's Claude Code at one AegisDB with a token in a shared
+namespace, and a decision captured on Tuesday is recalled into someone else's
+session on Thursday — automatically, ranked and size-capped, a relevant slice
+rather than a context dump. A new hire's agent starts on day one already knowing
+the conventions, the gotchas, and the shape of the system.
+[`docs/tutorial-team-server.md`](docs/tutorial-team-server.md) is the end-to-end
+setup; [`integrations/claude-code/README.md`](integrations/claude-code/README.md#shared-team-server)
+covers the client side.
+
+Self-hosting is load-bearing here, not a preference. The memories a coding agent
+accumulates **are** your internal engineering knowledge — architecture
+rationale, security posture, incident history, unreleased plans. That is exactly
+the category most teams can't hand to a third-party SaaS, which is why this is a
+binary you run, on your box, with a key only you hold.
+
+Three more that fall out of the same deployment:
+
+- **Isolated tenants instead of a shared pool.** One namespace per person or per
+  client project, enforced by the server — a consultancy can run a single
+  instance across engagements with no cross-contamination. Per-tenant quotas and
+  rate limits (`--tenant-max-records`, `--tenant-rate-qps`) stop one runaway
+  agent from filling the disk or monopolizing the box, which is the failure mode
+  that actually kills shared internal services.
+- **An auditable memory layer, not a black box.** `search` with `explain:true`
+  shows *why* each memory ranked; the inspector UI browses and deletes bad ones;
+  `history` and `get` with `as_of` answer "what did the agent believe when it
+  made that recommendation?" When agents influence real decisions, being able to
+  inspect and correct their memory is what makes them trustworthy — and
+  `export`/`purge` cover the "erase everything about X" request when it arrives.
+- **Read-only tokens for automation.** A `ro`-scoped token lets CI, a review bot,
+  or a docs generator read team memory without writing to it, keeping the write
+  path limited to humans' interactive sessions.
+
+**Where it doesn't pay off.** This earns its keep for a team with agents in the
+daily loop that already feels the re-explaining tax. If you use Claude Code
+occasionally, a `CLAUDE.md` checked into the repo does most of the job for free —
+the value starts when the knowledge is too large, too per-developer, or too
+fast-moving to hand-maintain in a file. A shared pool also wants a little hygiene
+(`consolidate`, `forget`) so it doesn't silt up with stale facts, and `make eval`
+tells you whether recall quality is holding.
+
 ## Features
 
 - **Durable episodic memory** — append-only log with magic + CRC32 framing, corruption-resilient recovery, and legacy-log migration

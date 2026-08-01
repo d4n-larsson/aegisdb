@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AegisDB — memory that outlives the context window</title>
-  <meta name="description" content="AegisDB is a small, fast C database that gives AI agents durable memory — episodic, semantic, and working — over a one-line-of-JSON wire protocol, with HNSW vector search, a relationship graph, and a crash-safe append-only log with tunable durability and fast checkpoint recovery.">
+  <meta name="description" content="AegisDB is a small, fast, self-hosted C database that gives AI agents durable memory — episodic, semantic, and working — with HNSW vector search over a one-line-of-JSON protocol. Multi-tenant, so a whole team's coding agents share one memory on your own box.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%2314110E'/%3E%3Ctext x='12' y='17' font-family='monospace' font-size='13' font-weight='700' fill='%23C9A24B' text-anchor='middle'%3E%E2%96%8D%3C/text%3E%3C/svg%3E">
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -268,8 +268,8 @@
           <a href="#proof" class="nav-hide">proof</a>
           <a href="#wire" class="nav-hide">protocol</a>
           <a href="#claude" class="nav-hide">claude&nbsp;code</a>
-          <a href="#start">get&nbsp;started</a>
           <a href="#team" class="nav-hide">team</a>
+          <a href="#start">get&nbsp;started</a>
           <a href="https://github.com/d4n-larsson/aegisdb" class="gh">github&nbsp;↗</a>
         </nav>
       </div>
@@ -576,11 +576,36 @@ recall quality       <span class="ar">→</span> recall@k / MRR gate</pre>
       </div>
     </section>
 
+    <!-- TEAM: THE CASE -->
+    <section class="rec" id="team">
+      <div class="off mono">0x0860</div>
+      <div class="col">
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0011</b>&nbsp;·&nbsp;type=semantic</p>
+        <div class="twoup">
+          <div>
+            <h2 class="title">One agent learns it. Everyone's agent knows it.</h2>
+            <p class="lede">Every developer on a team re-teaches their agent the same things — why the middleware is bypassed in staging, which migration approach was rejected last quarter and why, the gotcha that costs an hour if you miss it. That knowledge dies at the end of each session, per person, and the next agent re-derives it from scratch.</p>
+            <p class="lede">Point the team at one server with a token in a shared namespace, and a decision captured on Tuesday is recalled into someone else's session on Thursday — ranked and budgeted, a slice rather than a dump. A new hire's agent starts on day one already knowing the conventions and the shape of the system.</p>
+            <p class="lede">Self-hosting is load-bearing here, not a preference. The memories a coding agent accumulates <b>are</b> your internal engineering knowledge — architecture rationale, security posture, incident history, unreleased plans. That is the category you can't hand to a third-party SaaS, which is why this is a binary you run, on your box, with a key only you hold.</p>
+          </div>
+          <div>
+            <ul>
+              <li><b>Isolated tenants, or one shared pool</b> — a namespace per person or per client project, enforced by the server; quotas and rate limits keep one runaway agent from filling the disk or monopolizing the box.</li>
+              <li><b>Auditable, not a black box</b> — <span class="mono">explain</span> shows why a memory ranked, <span class="mono">as_of</span> replays what the agent knew at T, and <span class="mono">export</span>&nbsp;/&nbsp;<span class="mono">purge</span> answer "erase everything about X".</li>
+              <li><b>Read-only tokens for automation</b> — CI, a review bot, or a docs generator reads team memory without writing to it.</li>
+              <li><b>Set up in three commands</b> — mint a token, run the server, drop in a <span class="mono">.mcp.json</span>. <a href="#team-setup">The recipe is below ↓</a></li>
+            </ul>
+          </div>
+        </div>
+        <p class="moremore">Where it doesn't pay off: if you use Claude&nbsp;Code occasionally, a <span class="mono">CLAUDE.md</span> checked into the repo does most of this for free. Shared memory earns its keep once the knowledge is too large, too per-developer, or too fast-moving to hand-maintain in a file — and a shared pool wants a little hygiene (<span class="mono">consolidate</span>, <span class="mono">forget</span>) so it doesn't silt up.</p>
+      </div>
+    </section>
+
     <!-- GET STARTED -->
     <section class="rec" id="start">
       <div class="off mono">0x0940</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0011</b>&nbsp;·&nbsp;type=episodic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0012</b>&nbsp;·&nbsp;type=episodic</p>
         <h2 class="title">Run it, talk to it.</h2>
         <p class="lede">Pull the image or build from source — either way you're holding a connection in seconds.</p>
         <div class="start-log">
@@ -619,10 +644,10 @@ docker exec aegisdb aegisdb client search --tags user</code>
     </section>
 
     <!-- TEAM SETUP -->
-    <section class="rec" id="team">
+    <section class="rec" id="team-setup">
       <div class="off mono">0x0B20</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0012</b>&nbsp;·&nbsp;type=meta</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0013</b>&nbsp;·&nbsp;type=meta</p>
         <h2 class="title">Set up shared memory for a team.</h2>
         <p class="lede">One server, one tenant token per project, and Claude&nbsp;Code wired in with <span class="mono">uvx</span> — no clone anywhere. Uses the published image and the <a href="https://pypi.org/project/aegisdb-mcp/"><span class="mono">aegisdb-mcp</span></a> PyPI package.</p>
         <div class="start-log">
