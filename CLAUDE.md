@@ -10,9 +10,13 @@ under `integrations/claude-code/`.
 - C unit tests: `make test`. Wire-protocol contract tests: `make integration`.
   Both: `make check`.
 - Integration (Python) tests: `cd integrations/claude-code && make test`.
-- **Gotcha:** the `Makefile` does not track header dependencies — run
-  `make clean && make` after editing any header in `include/`, or stale objects
-  can produce silent struct/ABI mismatches.
+- Header dependencies **are** tracked (the `Makefile` compiles with `-MMD -MP`;
+  CMake does it natively), so editing a header rebuilds every object that
+  included it. `make clean` is not needed for that.
+- **Gotcha:** objects are *not* keyed by build flags, so switching `CFLAGS`
+  between runs (e.g. into or out of a `-fsanitize=...` build) reuses the objects
+  from the previous flags and fails at link with missing `__asan_*`/`__ubsan_*`
+  symbols. Run `make clean` when changing `CFLAGS`/`LDFLAGS`.
 
 ## Run
 
