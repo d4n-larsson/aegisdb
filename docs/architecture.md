@@ -69,7 +69,8 @@ checkpoint (CRC-checked) falls back to a full scan from offset 0.
 The checkpoint is refreshed by the maintenance thread every `--checkpoint-sec`
 (default 60; `0` disables) and on clean shutdown, and is invalidated by
 compaction (which rewrites every log offset). It only carries the hash index;
-the time/tag/embedding indexes are still rebuilt by reading the live records
+the time/tag/lexical/embedding indexes are still rebuilt by reading the live
+records
 (their payloads and vectors are needed anyway), so recovery is `O(live records +
 tail)` rather than `O(entire log)`.
 
@@ -126,6 +127,7 @@ also checkpoints to `memory.sem` to skip the rebuild), and guarded by a
 | Hash | `get` by id | Open-addressing hash map, id → log location; snapshotted to `memory.index` |
 | Time | `search` by time range | Sorted `(created, id)` array, range-scanned |
 | Tag | `search` by tags | Inverted index: tag → sorted id list; `all` intersects, `any` unions |
+| Lexical | `search` by `query` text | Inverted index: term → postings `(id, term frequency)`, plus per-document lengths for BM25. Omitted entirely under `--no-lexical-index` |
 | Semantic | `search` by embedding | Exact cosine scan while small; above `--ann-threshold` an HNSW graph for sublinear approximate top-K |
 
 Semantic results are ranked by cosine similarity weighted by
@@ -135,6 +137,28 @@ are held only by the HNSW graph, optionally int8-quantized (`--ann-quantize`,
 ~4× less memory for a small recall cost). Embedding length must equal the
 server's `--embedding-dim` (default 384) or the request is rejected with
 `INVALID_REQUEST`.
+
+### Lexical retrieval and fusion
+
+The lexical index answers `search` with a `query` string, ranked by Okapi BM25
+(`k1=1.2`, `b=0.75`). Its tokenizer deliberately preserves identifier shape —
+`_ - . : / + #` and any byte ≥ `0x80` stay *inside* a term — so
+`--tenant-max-records` and `hnsw.c:214` are indexed whole rather than shredded
+into unsearchable fragments; a compound term additionally contributes its
+alphanumeric sub-parts, so one word still finds the flag. This is the retrieval
+path for rare tokens, which dense embeddings average away, and the only
+content-based path at all on a server with no embedding provider.
+
+When a query carries both `query` and `embedding`, the two ranked lists are fused
+by **reciprocal rank** (`Σ 1/(60 + rank)`) rather than by score: a cosine in
+[-1,1] and an unbounded BM25 score share no scale, and normalising them per query
+would make one record's score depend on the rest of the batch. A fused query is
+not additionally weighted by `importance × confidence` or recency — RRF scores
+differ by under 2% between adjacent ranks, so a wider multiplier would become the
+primary sort key rather than a modifier (see `wire-protocol.md`).
+
+Unlike the semantic graph the lexical index is never checkpointed: it is cheap to
+rebuild and derived entirely from payloads recovery already reads.
 
 The graph is built off the write path by the maintenance thread (a threshold
 crossing never blocks readers or writers), and at scale it is split into

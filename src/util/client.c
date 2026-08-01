@@ -122,7 +122,7 @@ static void client_usage(void) {
         "      --session S    --ttl-ms N          (working memory)\n"
         "  search [opts]                     search records\n"
         "      --type T  --tags a,b,c  --match all|any  --top-k N\n"
-        "      --start MS  --end MS\n"
+        "      --start MS  --end MS  --query TEXT (keyword/BM25)\n"
         "\n"
         "Host/port/token default to $AEGIS_HOST / $AEGIS_PORT / $AEGIS_TOKEN\n"
         "(127.0.0.1 / 9470 / none). Exit code is 0 on an ok response.\n");
@@ -222,6 +222,7 @@ static cJSON *build_request(const char *cmd, int argc, char **argv) {
         const char *type = NULL;
         const char *tags = NULL;
         const char *match = NULL;
+        const char *query = NULL;
         uint64_t top_k = 0;
         uint64_t start = 0;
         uint64_t end = 0;
@@ -241,6 +242,10 @@ static cJSON *build_request(const char *cmd, int argc, char **argv) {
             } else if (!strcmp(a, "--match") && i + 1 < argc) {
                 {
                     match = argv[++i];
+                }
+            } else if (!strcmp(a, "--query") && i + 1 < argc) {
+                {
+                    query = argv[++i];
                 }
             } else if (!strcmp(a, "--top-k") && i + 1 < argc) {
                 if (parse_u64(argv[++i], &top_k)) {
@@ -272,6 +277,9 @@ static cJSON *build_request(const char *cmd, int argc, char **argv) {
         }
         if (match) {
             cJSON_AddStringToObject(r, "match", match);
+        }
+        if (query) {
+            cJSON_AddStringToObject(r, "query", query);
         }
         cJSON_AddNumberToObject(r, "top_k", (double)(has_top ? top_k : 10));
         if (has_start) {

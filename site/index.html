@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AegisDB — memory that outlives the context window</title>
-  <meta name="description" content="AegisDB is a small, fast, self-hosted C database that gives AI agents durable memory — episodic, semantic, and working — with HNSW vector search over a one-line-of-JSON protocol. Multi-tenant, so a whole team's coding agents share one memory on your own box.">
+  <meta name="description" content="AegisDB is a small, fast, self-hosted C database that gives AI agents durable memory — episodic, semantic, and working — with hybrid keyword + HNSW vector search over a one-line-of-JSON protocol. Multi-tenant, so a whole team's coding agents share one memory on your own box.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%2314110E'/%3E%3Ctext x='12' y='17' font-family='monospace' font-size='13' font-weight='700' fill='%23C9A24B' text-anchor='middle'%3E%E2%96%8D%3C/text%3E%3C/svg%3E">
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -382,12 +382,16 @@
             <p>A per-session ring buffer with a <b>TTL</b>. Keep scratch context close, then promote what proves worth keeping.</p>
           </div>
           <div class="feat" data-k="0x02F0">
-            <h3><span class="bar"></span>Recall, three ways</h3>
-            <p>Search by <b>vector similarity</b>, by tags (<span class="mono">all</span>/<span class="mono">any</span>), or by time range — each on a purpose-built index, not a scan.</p>
+            <h3><span class="bar"></span>Recall, four ways</h3>
+            <p>Search by <b>vector similarity</b>, by <b>keyword</b>, by tags (<span class="mono">all</span>/<span class="mono">any</span>), or by time range — each on a purpose-built index, not a scan.</p>
           </div>
           <div class="feat se" data-k="0x0320">
             <h3><span class="bar"></span>Vector search that scales</h3>
             <p>Exact cosine while a set is small; past a threshold it switches to an <b>HNSW graph</b> for sublinear approximate-nearest-neighbour search. The graph is <b>checkpointed</b> — a restart reloads it instead of rebuilding — and vectors can be <b>int8-quantized</b> to cut its memory ~4×.</p>
+          </div>
+          <div class="feat se" data-k="0x0340">
+            <h3><span class="bar"></span>Keywords, for the things vectors miss</h3>
+            <p>Embeddings average rare tokens away, so <span class="mono">--tenant-max-records</span> or <span class="mono">hnsw.c:214</span> can be unfindable by the exact string you remember. A <b>BM25</b> index keeps identifiers intact and finds them verbatim. Send a keyword and a vector together and the two result lists are <b>fused by reciprocal rank</b> — exact matches and topical ones both surface. No embedding provider configured? Keyword search still works.</p>
           </div>
           <div class="feat" data-k="0x0360">
             <h3><span class="bar"></span>A graph of context</h3>
@@ -429,11 +433,11 @@
           </div>
           <div class="feat" data-k="0x0430">
             <h3><span class="bar"></span>Explainable recall</h3>
-            <p>Ask <span class="mono">search</span> to <span class="mono">explain</span> and every hit returns its ranking breakdown — <b>similarity × weight × recency = score</b> — so you can see why a memory surfaced, or why it didn't.</p>
+            <p>Ask <span class="mono">search</span> to <span class="mono">explain</span> and every hit returns its ranking breakdown — <b>relevance × weight × recency = score</b>, plus which path found it — so you can see why a memory surfaced, or why it didn't.</p>
           </div>
           <div class="feat" data-k="0x0440">
             <h3><span class="bar"></span>Prove it, don't guess</h3>
-            <p><span class="mono">make eval</span> scores recall@k / MRR against a labelled corpus — including the dedup and decay policies — so a memory-quality change is gated on numbers, not vibes.</p>
+            <p><span class="mono">make eval</span> scores recall@k / MRR against a labelled corpus — the dedup and decay policies, and keyword vs vector vs fused retrieval — so a memory-quality change is gated on numbers, not vibes.</p>
           </div>
         </div>
       </div>
@@ -532,6 +536,10 @@ recall quality       <span class="ar">→</span> recall@k / MRR gate</pre>
 
 <span class="c"># recall it by tag</span>
 {<span class="key">"operation"</span>:<span class="op">"search"</span>, <span class="key">"tags"</span>:[<span class="s">"user"</span>], <span class="key">"top_k"</span>:5}
+<span class="ar">→</span> {<span class="key">"ok"</span>:true, <span class="key">"total"</span>:1, <span class="key">"records"</span>:[ … ]}
+
+<span class="c"># or by keyword — add "embedding" too and the two are fused</span>
+{<span class="key">"operation"</span>:<span class="op">"search"</span>, <span class="key">"query"</span>:<span class="s">"dark mode"</span>, <span class="key">"top_k"</span>:5}
 <span class="ar">→</span> {<span class="key">"ok"</span>:true, <span class="key">"total"</span>:1, <span class="key">"records"</span>:[ … ]}</pre>
         <p class="opsline">operations &nbsp;·&nbsp; <b>ping insert get update delete search count promote relate traverse stats</b></p>
         <p class="opsline"><b>insert</b> takes a batch of records in one call; <b>delete</b> and <b>count</b> work by id or by filter (tags / type / time range).</p>

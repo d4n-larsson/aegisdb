@@ -77,6 +77,7 @@ aegisdb client ping
 aegisdb client put --type semantic --tags user,preference "User likes coffee"
 aegisdb client get 1
 aegisdb client search --tags user --top-k 10
+aegisdb client search --query "likes coffee" --top-k 10
 aegisdb client stats
 ```
 
@@ -133,6 +134,20 @@ echo '{"operation":"search","tags":["user"],"match":"all","top_k":10}' | nc -q 1
 ```bash
 echo '{"operation":"search","start_time":0,"end_time":9999999999999,"top_k":10}' | nc -q 1 localhost 9470
 ```
+
+**Search by keyword** (BM25 over the payload text). Identifiers keep their shape,
+so a flag or a `file.c:line` reference is findable by its exact spelling — no
+embeddings required:
+
+```bash
+echo '{"operation":"search","query":"--tenant-max-records","top_k":5}' | nc -q 1 localhost 9470
+```
+
+Pass `query` *and* `embedding` together for hybrid retrieval: the keyword and
+vector result lists are fused by reciprocal rank, so an exact term match and a
+topical match both surface. See
+[`wire-protocol.md`](wire-protocol.md) for the ranking details and the `explain`
+breakdown.
 
 When auth is enabled, add a `"token"` field to every request except `ping`:
 

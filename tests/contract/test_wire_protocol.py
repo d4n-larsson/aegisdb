@@ -511,6 +511,16 @@ def test_cli(binary, port):
         check(r.returncode == 0 and json.loads(r.stdout)["total"] >= 1,
               "client search finds the record")
 
+        # --query is the CLI path to lexical search (ROADMAP 4.1); without it the
+        # feature would only be reachable by hand-writing JSON.
+        r = _cli(binary, "--port", p, "search", "--query", "dark mode")
+        check(r.returncode == 0
+              and [m["id"] for m in json.loads(r.stdout)["records"]] == [rid],
+              "client search --query finds the record by keyword")
+        r = _cli(binary, "--port", p, "search", "--query", "zzz_absent")
+        check(r.returncode == 0 and json.loads(r.stdout)["total"] == 0,
+              "client search --query with no match -> empty, exit 0")
+
     # gen-token -> token-file line + plaintext token that authenticates
     g = subprocess.run([binary, "gen-token", "--namespace", "acme", "--scope",
                         "rw"], capture_output=True, text=True)
