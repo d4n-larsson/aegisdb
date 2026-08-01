@@ -1127,6 +1127,246 @@ def test_search_explain(binary, port):
               "recency_factor < 1 under an aggressive half_life_ms")
 
 
+def test_lexical_search(binary, port):
+    print("[search: lexical (BM25) keyword query (ROADMAP 4.1)]")
+    with Server(binary, port, phase=4) as srv:
+        docs = [
+            "per-tenant quotas are set with --tenant-max-records at startup",
+            "the CRC framing bug was fixed in hnsw.c:214 last release",
+            "the build needs a clean rebuild after editing any header",
+            "we rejected the blue-green migration approach as too costly",
+        ]
+        ids = []
+        for d in docs:
+            r = srv.req({"operation": "insert", "type": "semantic", "data": d,
+                         "tags": ["note"], "importance": 0.8})
+            ids.append(r["record"]["id"])
+
+        # The point of the feature: an exact identifier is retrievable. These are
+        # precisely the terms a dense embedding averages away.
+        for q, want in (("--tenant-max-records", ids[0]),
+                        ("hnsw.c:214", ids[1]),
+                        ("tenant-max-records", ids[0])):
+            r = srv.req({"operation": "search", "query": q, "top_k": 3})
+            got = [rec["id"] for rec in r.get("records", [])]
+            check(got[:1] == [want], f"query {q!r} ranks its record first")
+
+        # A compound identifier is also findable by one of its words.
+        r = srv.req({"operation": "search", "query": "quotas", "top_k": 3})
+        check(ids[0] in [rec["id"] for rec in r["records"]],
+              "compound term findable by a sub-word")
+
+        # A miss is an empty result, not an error.
+        r = srv.req({"operation": "search", "query": "zzz_nonexistent", "top_k": 3})
+        check(r.get("ok") is True and r.get("records") == [],
+              "unmatched query returns an empty result set")
+
+        # Ordinary filters still compose with a text query.
+        r = srv.req({"operation": "search", "query": "quotas",
+                     "tags": ["absent-tag"], "top_k": 3})
+        check(r.get("records") == [], "tag filter still applies to a text query")
+        r = srv.req({"operation": "search", "query": "quotas",
+                     "type": "episodic", "top_k": 3})
+        check(r.get("records") == [], "type filter still applies to a text query")
+
+        # explain reports the BM25 contribution and the score identity.
+        r = srv.req({"operation": "search", "query": "clean rebuild header",
+                     "top_k": 1, "explain": True})
+        e = r["records"][0]["explain"]
+        check(e.get("lexical") is True, "explain marks a lexical hit")
+        check(e.get("semantic") is False, "lexical-only hit is not marked semantic")
+        check(e.get("bm25", 0) > 0, "explain reports a positive bm25 score")
+        check("similarity" not in e, "no cosine reported for a lexical-only hit")
+        expect = e["weight"] * e["bm25"] * e["recency_factor"]
+        check(abs(e["score"] - expect) < 1e-4,
+              "explain score == weight * bm25 * recency_factor")
+
+        # An update re-indexes: the superseded text stops matching.
+        srv.req({"operation": "update", "id": ids[3],
+                 "data": "we adopted the canary rollout plan instead"})
+        r = srv.req({"operation": "search", "query": "blue-green", "top_k": 3})
+        check(r.get("records") == [], "updated-away text no longer matches")
+        r = srv.req({"operation": "search", "query": "canary rollout", "top_k": 3})
+        check([rec["id"] for rec in r["records"]] == [ids[3]],
+              "replacement text matches after update")
+
+        # A delete unindexes.
+        srv.req({"operation": "delete", "id": ids[2]})
+        r = srv.req({"operation": "search", "query": "clean rebuild", "top_k": 3})
+        check(r.get("records") == [], "deleted record no longer matches")
+
+        # stats expose the index size so its RAM can be watched like the others.
+        s = srv.req({"operation": "stats"})
+        check(s["indexes"]["lexical_docs"] == 3,
+              "stats reports live indexed documents")
+        check(s["indexes"]["lexical_terms"] > 0, "stats reports distinct terms")
+        check(s["memory"]["lexical_bytes"] > 0, "stats reports lexical index bytes")
+
+
+def test_lexical_hybrid(binary, port):
+    print("[search: hybrid lexical + semantic fusion (ROADMAP 4.1)]")
+    with Server(binary, port, phase=4) as srv:  # default --embedding-dim 384
+        dim = 384
+        va = [1.0] + [0.0] * (dim - 1)
+        vb = [0.0, 1.0] + [0.0] * (dim - 2)
+        # Three records covering the three ways a hybrid query can match:
+        #   near  - the closest vector, but no query term    (semantic only)
+        #   both  - a weaker vector AND the query term       (both sources)
+        #   exact - the query term, no embedding at all      (lexical only)
+        # `exact` is the case an embeddings-only server cannot retrieve at all.
+        near = srv.req({"operation": "insert", "type": "semantic",
+                        "data": "notes about vectors and similarity",
+                        "importance": 0.9, "embedding": va})["record"]["id"]
+        both = srv.req({"operation": "insert", "type": "semantic",
+                        "data": "raise --tenant-rate-qps for the busy tenant",
+                        "importance": 0.9, "embedding": vb})["record"]["id"]
+        exact = srv.req({"operation": "insert", "type": "semantic",
+                         "data": "the flag is --tenant-rate-qps in the docs",
+                         "importance": 0.9})["record"]["id"]
+
+        # Semantic alone cannot retrieve the embedding-less record at all.
+        r = srv.req({"operation": "search", "embedding": va, "top_k": 5,
+                     "include_embeddings": False})
+        got = [rec["id"] for rec in r["records"]]
+        check(exact not in got,
+              "semantic-only cannot retrieve the embedding-less record")
+        check(got[0] == near, "semantic-only ranks the nearest vector first")
+
+        # The core RRF property: agreeing with both sources outranks matching one,
+        # even though `both` is only the *second*-nearest vector.
+        r = srv.req({"operation": "search", "query": "--tenant-rate-qps",
+                     "embedding": va, "top_k": 5, "explain": True,
+                     "include_embeddings": False})
+        recs = r["records"]
+        check(recs[0]["id"] == both,
+              "hybrid ranks the record both sources found first")
+        check(exact in [rec["id"] for rec in recs],
+              "hybrid retrieves the lexical-only record the vectors cannot see")
+
+        top = recs[0]["explain"]
+        check(top.get("semantic") is True and top.get("lexical") is True,
+              "the fused hit is marked as found by both sources")
+        check(top.get("lexical_rank") == 1 and top.get("semantic_rank") == 2,
+              "the fused hit reports its rank in each source list")
+        check(top.get("rrf", 0) > 0, "hybrid hit carries a fused rrf score")
+        expect = top["weight"] * top["rrf"] * top["recency_factor"]
+        check(abs(top["score"] - expect) < 1e-4,
+              "explain score == weight * rrf * recency_factor")
+
+        by_id = {rec["id"]: rec["explain"] for rec in recs}
+        lex_only = by_id[exact]
+        check(lex_only.get("lexical") is True and lex_only.get("semantic") is False,
+              "the embedding-less record is marked lexical-only")
+        check(lex_only.get("semantic_rank") == 0,
+              "a lexical-only hit reports semantic_rank 0, not an absent field")
+        sem_only = by_id[near]
+        check(sem_only.get("semantic") is True and sem_only.get("lexical") is False,
+              "the term-less record is marked semantic-only")
+        check(sem_only.get("lexical_rank") == 0,
+              "a semantic-only hit reports lexical_rank 0")
+
+        # min_score still gates on the cosine in a hybrid query. Query with a
+        # vector at 45 degrees to `near` (cosine ~0.707) and set the floor above
+        # it: the semantic side is emptied while the lexical hit is untouched.
+        vq = [1.0, 1.0] + [0.0] * (dim - 2)
+        r = srv.req({"operation": "search", "query": "--tenant-rate-qps",
+                     "embedding": vq, "top_k": 5, "min_score": 0.9,
+                     "include_embeddings": False})
+        got = [rec["id"] for rec in r["records"]]
+        check(near not in got, "min_score drops the semantic side of a hybrid query")
+        check(exact in got, "the lexical side survives min_score")
+        # Without the floor the same query returns both.
+        r = srv.req({"operation": "search", "query": "--tenant-rate-qps",
+                     "embedding": vq, "top_k": 5, "include_embeddings": False})
+        check(near in [rec["id"] for rec in r["records"]],
+              "the semantic hit returns once the floor is removed")
+
+
+def test_lexical_disabled(binary, port):
+    print("[search: --no-lexical-index opt-out]")
+    with Server(binary, port, phase=4,
+                extra_args=["--no-lexical-index"]) as srv:
+        srv.req({"operation": "insert", "type": "semantic",
+                 "data": "quotas via --tenant-max-records", "tags": ["note"]})
+        # A text query must fail loudly rather than silently degrade to an
+        # unranked filter scan that looks like a legitimate empty result.
+        r = srv.req({"operation": "search", "query": "quotas", "top_k": 3})
+        check(r.get("ok") is False, "query rejected when the index is disabled")
+        check(r.get("error", {}).get("code") == "NOT_READY",
+              "disabled lexical index reports NOT_READY")
+        check("lexical" in r.get("error", {}).get("message", "").lower(),
+              "the error names the lexical index as the cause")
+        # Everything else is unaffected, and the index costs no RAM.
+        r = srv.req({"operation": "search", "tags": ["note"], "top_k": 3})
+        check(len(r.get("records", [])) == 1, "tag search unaffected")
+        s = srv.req({"operation": "stats"})
+        check(s["indexes"]["lexical_terms"] == 0 and s["memory"]["lexical_bytes"] == 0,
+              "disabled index reports zero terms and zero bytes")
+
+
+def test_lexical_recovery(binary, port):
+    print("[search: lexical index rebuilds from the log on restart]")
+    datadir = tempfile.mkdtemp(prefix="aegis_lexrec_")
+    with Server(binary, port, phase=4, datadir=datadir) as srv:
+        keep = srv.req({"operation": "insert", "type": "semantic",
+                        "data": "quotas via --tenant-max-records",
+                        "tags": ["note"]})["record"]["id"]
+        gone = srv.req({"operation": "insert", "type": "semantic",
+                        "data": "this mentions blue-green deploys",
+                        "tags": ["note"]})["record"]["id"]
+        changed = srv.req({"operation": "insert", "type": "semantic",
+                           "data": "original wording about zebras",
+                           "tags": ["note"]})["record"]["id"]
+        srv.req({"operation": "delete", "id": gone})
+        srv.req({"operation": "update", "id": changed,
+                 "data": "revised wording about giraffes"})
+        srv.graceful_stop()
+
+    # The index is derived and never checkpointed, so recovery must rebuild it
+    # from the log — including honouring tombstones and superseded versions.
+    with Server(binary, port, phase=4, datadir=datadir) as srv:
+        r = srv.req({"operation": "search", "query": "--tenant-max-records",
+                     "top_k": 3})
+        check([rec["id"] for rec in r.get("records", [])] == [keep],
+              "indexed term still matches after restart")
+        r = srv.req({"operation": "search", "query": "blue-green", "top_k": 3})
+        check(r.get("records") == [], "deleted record not reindexed on recovery")
+        r = srv.req({"operation": "search", "query": "zebras", "top_k": 3})
+        check(r.get("records") == [], "superseded text not reindexed on recovery")
+        r = srv.req({"operation": "search", "query": "giraffes", "top_k": 3})
+        check([rec["id"] for rec in r.get("records", [])] == [changed],
+              "current version reindexed on recovery")
+        s = srv.req({"operation": "stats"})
+        check(s["indexes"]["lexical_docs"] == 2,
+              "rebuilt index holds exactly the live documents")
+
+
+def test_lexical_isolation(binary, port):
+    print("[search: lexical results respect namespace isolation]")
+    tokens = ["tok_a alice rw", "tok_b bob rw"]
+    with Server(binary, port, phase=4, token_lines=tokens) as srv:
+        srv.req({"operation": "insert", "type": "semantic", "token": "tok_a",
+                 "data": "alice knows the --tenant-max-records value"})
+        srv.req({"operation": "insert", "type": "semantic", "token": "tok_b",
+                 "data": "bob also wrote --tenant-max-records somewhere"})
+
+        # The lexical index is global, so the namespace filter must be what keeps
+        # a tenant's text out of another tenant's results.
+        ra = srv.req({"operation": "search", "token": "tok_a",
+                      "query": "--tenant-max-records", "top_k": 10})
+        check(len(ra["records"]) == 1 and "alice" in ra["records"][0]["data"],
+              "alice's query returns only alice's record")
+        rb = srv.req({"operation": "search", "token": "tok_b",
+                      "query": "--tenant-max-records", "top_k": 10})
+        check(len(rb["records"]) == 1 and "bob" in rb["records"][0]["data"],
+              "bob's query returns only bob's record")
+        # A spoofed agent_id cannot widen a namespaced token's view.
+        rs = srv.req({"operation": "search", "token": "tok_a", "agent_id": "bob",
+                      "query": "--tenant-max-records", "top_k": 10})
+        check(len(rs["records"]) == 1 and "alice" in rs["records"][0]["data"],
+              "a spoofed agent_id does not cross tenants")
+
+
 def test_replication_encrypted(binary, port):
     print("[read replica: encrypted primary -> encrypted replica (shared key)]")
     repl_port = port + 1
@@ -2035,6 +2275,11 @@ def main():
     test_multivector(binary, 19482)
     test_include_embeddings(binary, 19487)
     test_search_explain(binary, 19498)
+    test_lexical_search(binary, 19530)
+    test_lexical_hybrid(binary, 19531)
+    test_lexical_disabled(binary, 19532)
+    test_lexical_recovery(binary, 19533)
+    test_lexical_isolation(binary, 19534)
     test_tenant_quota(binary, 19488)
     test_tenant_rate_limit(binary, 19489)
     test_token_admin(binary, 19490)

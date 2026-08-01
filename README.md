@@ -119,9 +119,14 @@ tells you whether recall quality is holding.
 - **Retrieval** — lookup by ID, time-range search, tag search (`all`/`any`),
   semantic (embedding) search ranked by cosine similarity weighted by
   importance × confidence, plus `count` over the same filters
+- **Keyword + hybrid search** — BM25 over payloads that keeps identifiers intact,
+  so `--tenant-max-records`, `hnsw.c:214` and `AEGIS_RECALL_TOP_K` are findable by
+  their exact spelling — the rare tokens embeddings average away. Pass `query`
+  alongside `embedding` and the two ranked lists fuse by reciprocal rank; pass it
+  alone and a server with no embedding provider still answers content queries
 - **Explainable ranking** — `search` with `explain:true` returns a per-hit
-  breakdown (similarity × weight × recency = score), so retrieval is inspectable,
-  not a black box
+  breakdown (relevance × weight × recency = score, plus which retrieval path
+  found it), so retrieval is inspectable, not a black box
 - **Semantic scale** — exact cosine while small; past `--ann-threshold` an HNSW
   graph for sublinear approximate top-K, built off the write path and sharded so
   the build parallelizes (`--ann-shard-target`), optionally int8-quantized

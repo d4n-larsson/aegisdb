@@ -224,13 +224,13 @@ behind the provider seam.*
 
 ---
 
-## Horizon 4 — Next: retrieval that finds identifiers, not just topics
+## Horizon 4 — Now: retrieval that finds identifiers, not just topics  ✅ *complete*
 
 *Theme: close the recall gap dense vectors structurally cannot. Horizons 1–2 made
 the memory-quality layer coherent and measurable; this is the retrieval side of
 the same bet, and it needs no model on the hot path.*
 
-### 4.1 Lexical search + hybrid fusion
+### 4.1 Lexical search + hybrid fusion — *shipped (`search` `query`, BM25 + RRF)*
 - **Why now:** `search` has no text matching at all — the filters are time, tags,
   type, and an embedding vector, so a memory cannot be found by the words it
   contains. That is a structural miss for the coding-agent wedge, whose memories
@@ -255,6 +255,37 @@ the same bet, and it needs no model on the hot path.*
 - **Done when:** an identifier-heavy query set added to the `make eval` dataset
   scores materially better hybrid than semantic-only, and a server with no
   embedding provider configured still answers content queries.
+- **Shipped:** `lexical_index.h/.c` — an inverted term→postings index with the
+  per-document stats BM25 needs, plus an identifier-preserving tokenizer (`_ - .
+  : / + #` and non-ASCII stay inside a term; a compound also yields its parts, so
+  `--tenant-max-records` is findable whole *and* by `records`). `search` takes a
+  `query` string; with `embedding` too, the two ranked lists fuse by reciprocal
+  rank (`RRF_K = 60`). `explain` gains `lexical`/`bm25`/`semantic_rank`/
+  `lexical_rank`/`rrf`, reported **per hit**, so a one-sided match is visible
+  rather than inferred. Derived and never checkpointed: recovery rebuilds it from
+  the log like time/tag. `--no-lexical-index` opts out (a `query` then gets
+  `NOT_READY`); `stats` reports `lexical_terms`/`lexical_docs`/`lexical_bytes` so
+  its RAM is watchable like every other index.
+- **Measured:** `make eval EVAL_ARGS='--lexical --dataset
+  eval/datasets/identifiers.json'` compares semantic-only / lexical-only / hybrid
+  over one corpus and gates on *both* aggregate recall and per-query regressions.
+  It paid for itself immediately by catching the fused ranking being dominated by
+  the `importance × confidence` multiplier (recall@1 62% vs 92% semantic-only):
+  RRF scores differ by under 2% between adjacent ranks, so any wider multiplier
+  becomes the primary sort key. Hybrid now ranks on the fusion alone (92% → 96%
+  recall@1, MRR 0.788 → 0.979).
+- **Caveat on the numbers:** the eval's default `hashing` embedder is itself
+  token-based, so it behaves like a lexical matcher and scores far better on
+  identifier queries (92% recall@1) than a real dense model would. With that
+  embedder the comparison is a **regression gate, not a demonstration of the
+  gap** — sizing the real gap needs `--embedder command` against an actual model.
+  The unambiguous win is structural and already covered by a contract test: a
+  record with no embedding at all is retrievable by its terms, which an
+  embeddings-only server cannot do.
+- **Deferred:** fusing *weighted* per-source ranks (so importance and recency
+  shape a hybrid query without swamping it) needs the records loaded before
+  fusion rather than after — a real restructure of the candidate path, and the
+  reason hybrid currently reports `weight`/`recency_factor` as `1.0`.
 
 ---
 
@@ -270,7 +301,7 @@ the same bet, and it needs no model on the hot path.*
         │
 3.1 temporal ─ 3.2 forget/export ─ 3.3 hosted tier
         │
-4.1 lexical + hybrid retrieval
+4.1 lexical + hybrid retrieval  ✅
         (validated against 1.1; graded by the same recall@k/MRR)
 ```
 

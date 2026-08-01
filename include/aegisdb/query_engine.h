@@ -58,6 +58,11 @@ typedef struct {
     int match_all;
     const float *embedding;
     size_t embedding_dim;
+    /* Lexical (BM25) query text (ROADMAP 4.1); NULL/empty = no lexical ranking.
+     * Combined with `embedding` the two ranked lists are fused by reciprocal
+     * rank, which is what makes an identifier-bearing query work: the exact term
+     * is found lexically while the semantic list still contributes topicality. */
+    const char *query;
     int has_type;
     MemoryType type;
     const char *agent_id;
@@ -75,11 +80,22 @@ typedef struct {
 
 /* Per-hit ranking explanation (ROADMAP 1.2), one entry parallel to each returned
  * record, in the same order. Explains why a hit ranked where it did:
- *   score = weight * similarity * recency_factor   (semantic queries)
- * so a client/operator can see the contribution of each factor. */
+ *   score = weight * relevance * recency_factor
+ * where `relevance` is the cosine similarity (semantic), the BM25 score
+ * (lexical), or the fused reciprocal-rank score (hybrid) — so a client/operator
+ * can see the contribution of each factor, including which retrieval path
+ * actually surfaced the record. */
 typedef struct {
-    int semantic;     /* 1 if ranked by semantic similarity, 0 otherwise */
-    float similarity; /* raw cosine similarity [-1,1]; 0 for non-semantic */
+    int semantic;     /* 1 if semantic similarity contributed */
+    int lexical;      /* 1 if a BM25 match contributed (ROADMAP 4.1) */
+    float similarity; /* raw cosine similarity [-1,1]; 0 if not semantic */
+    float bm25;       /* raw BM25 score (unbounded, >=0); 0 if not lexical */
+    /* 1-based rank in each source list, or 0 when that source did not return the
+     * record. The pair is the whole story for a hybrid hit: `lexical_rank: 1,
+     * semantic_rank: 0` says the exact term found it and the vectors missed it. */
+    int semantic_rank;
+    int lexical_rank;
+    float rrf;        /* fused reciprocal-rank score; 0 unless hybrid */
     float importance; /* record importance */
     float confidence; /* record confidence */
     float weight;     /* importance*confidence applied (1.0 if that was <=0) */

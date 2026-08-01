@@ -305,6 +305,7 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
         for (size_t i = 0; i < rec->tag_count; i++) {
             tag_index_add(db->tags, rec->tags[i], rec->id);
         }
+        lexical_index_add(db->lex, rec->id, rec->data, rec->data_len);
         if (rec->embedding_dim && rec->vec_count) {
             semantic_index_add(db->sem, rec->id, rec->embedding, rec->vec_count,
                                rec->embedding_dim);
@@ -371,6 +372,12 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
     }
 
     /* old tags for index diff */
+    /* Detach (rather than free) the superseded payload: the lexical index is
+     * keyed on the exact bytes that were indexed, so unindexing the old version
+     * needs them — and, like the tag swing below, that must not happen until the
+     * append has committed. */
+    void *old_data = NULL;
+    size_t old_data_len = 0;
     if (patch->has_data) {
         void *nd = NULL;
         if (patch->data_len) {
@@ -382,7 +389,8 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
             }
             memcpy(nd, patch->data, patch->data_len);
         }
-        free(cur.data);
+        old_data = cur.data;
+        old_data_len = cur.data_len;
         cur.data = nd;
         cur.data_len = patch->data_len;
     }
@@ -429,6 +437,12 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
             tag_index_add(db->tags, cur.tags[i], cur.id);
         }
     }
+    if (st == AEGIS_OK && patch->has_data) {
+        /* Same discipline for the payload text: unindex the version that just
+         * stopped being current, then index the one that replaced it. */
+        lexical_index_remove(db->lex, cur.id, old_data, old_data_len);
+        lexical_index_add(db->lex, cur.id, cur.data, cur.data_len);
+    }
     pthread_rwlock_unlock(&db->index_lock);
     if (st == AEGIS_OK && durably_flush(db) != 0) {
         st = AEGIS_ERR_INTERNAL; /* not durable: do not acknowledge the write */
@@ -438,6 +452,7 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
         free(old_tags[i]);
     }
     free(old_tags);
+    free(old_data);
 
     if (st != AEGIS_OK) {
         record_free(&cur);
@@ -470,6 +485,7 @@ aegis_status_t qe_delete(AegisDB *db, uint64_t id, const char *ns) {
     for (size_t i = 0; i < cur.tag_count; i++) {
         tag_index_remove(db->tags, cur.tags[i], cur.id);
     }
+    lexical_index_remove(db->lex, cur.id, cur.data, cur.data_len);
     if (cur.embedding_dim) {
         semantic_index_remove(db->sem, cur.id);
     }

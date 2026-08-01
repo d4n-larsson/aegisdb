@@ -104,13 +104,19 @@ def record_count(srv):
     return r.get("records", 0)
 
 
-def run_query(srv, q, embed, max_k):
+def run_query(srv, q, embed, max_k, retrieval="semantic"):
+    """Rank a query's results. `retrieval` selects the path under test (ROADMAP
+    4.1): "semantic" sends only the embedding, "lexical" only the query text, and
+    "hybrid" both (which the server fuses by reciprocal rank)."""
     payload = {
         "operation": "search",
-        "embedding": embed(q["text"]),
         "top_k": max_k,
         "include_embeddings": False,
     }
+    if retrieval in ("semantic", "hybrid"):
+        payload["embedding"] = embed(q["text"])
+    if retrieval in ("lexical", "hybrid"):
+        payload["query"] = q["text"]
     if q.get("tags"):
         payload["tags"] = q["tags"]
         payload["match"] = q.get("match", "all")
@@ -139,12 +145,12 @@ def score(ranked_ids, relevant_labels, label_to_ids, ks):
     return recall, rr
 
 
-def measure(srv, queries, embed, label_to_ids, ks, max_k):
+def measure(srv, queries, embed, label_to_ids, ks, max_k, retrieval="semantic"):
     """Run every query and aggregate mean recall@k and MRR + per-query rows."""
     id_to_label = {i: lbl for lbl, ids in label_to_ids.items() for i in ids}
     per = []
     for q in queries:
-        ranked = run_query(srv, q, embed, max_k)
+        ranked = run_query(srv, q, embed, max_k, retrieval)
         recall, rr = score(ranked, q["relevant"], label_to_ids, ks)
         per.append({
             "query": q["text"], "recall": recall, "rr": rr,
@@ -286,6 +292,84 @@ def run_decay_eval(args, ds, embed, ks, max_k):
     return 0
 
 
+def run_lexical_eval(args, ds, embed, ks, max_k):
+    """Compare the three retrieval paths on one corpus (ROADMAP 4.1).
+
+    Seeds the dataset once, then measures semantic-only, lexical-only, and hybrid
+    over the same records and queries. On an identifier-heavy dataset the semantic
+    column is the gap this feature exists to close, and hybrid is the number that
+    has to beat it — printed side by side so a scoring change is visible rather
+    than argued about."""
+    modes = ("semantic", "lexical", "hybrid")
+    results = {}
+    with Server(args.binary, args.port, ds.get("embedding_dim", 256)) as srv:
+        label_to_ids = seed(srv, ds["memories"], embed)
+        for mode in modes:
+            mean, mrr, per = measure(srv, ds["queries"], embed, label_to_ids, ks,
+                                     max_k, retrieval=mode)
+            results[mode] = {"mean_recall": mean, "mrr": mrr, "per_query": per}
+
+    gate_k = args.gate_recall_at or max_k
+    sem = results["semantic"]["mean_recall"].get(gate_k, 0.0)
+    hyb = results["hybrid"]["mean_recall"].get(gate_k, 0.0)
+
+    # Which queries each mode answers, computed before reporting so the JSON and
+    # human paths (and the gate) all agree.
+    sem_per = {p["query"]: p for p in results["semantic"]["per_query"]}
+    hyb_per = {p["query"]: p for p in results["hybrid"]["per_query"]}
+    fixed = [q for q in sem_per if not sem_per[q]["hit"] and hyb_per[q]["hit"]]
+    broke = [q for q in sem_per if sem_per[q]["hit"] and not hyb_per[q]["hit"]]
+
+    if args.json:
+        print(json.dumps({
+            "dataset": ds["name"], "embedder": args.embedder,
+            "n_queries": len(ds["queries"]), "mode": "lexical-comparison",
+            "gate_k": gate_k, "semantic_recall": sem, "hybrid_recall": hyb,
+            "hybrid_only_hits": fixed, "hybrid_regressions": broke,
+            "results": results,
+        }, indent=2))
+    else:
+        print(f"\nAegisDB retrieval-mode comparison — dataset '{ds['name']}', "
+              f"embedder '{args.embedder}', {len(ds['memories'])} memories, "
+              f"{len(ds['queries'])} queries\n")
+        kcols = "  ".join(f"R@{k}" for k in ks)
+        print(f"  {'mode':<10}  {kcols}  MRR")
+        print(f"  {'-'*10}  {'-'*len(kcols)}  -----")
+        for mode in modes:
+            r = results[mode]
+            rc = "  ".join(f"{r['mean_recall'][k]:>3.0%}" for k in ks)
+            print(f"  {mode:<10}  {rc}  {r['mrr']:.3f}")
+
+        # Per-query detail for the queries semantic-only cannot answer — the
+        # concrete evidence, not just an aggregate.
+        if fixed:
+            print(f"\n  {len(fixed)} query(ies) hybrid answers that semantic-only "
+                  f"misses entirely:")
+            for q in fixed[:12]:
+                print(f"    + {q[:66]}")
+        if broke:
+            print(f"\n  {len(broke)} REGRESSION(S) — semantic-only hit, hybrid misses:")
+            for q in broke:
+                print(f"    - {q[:66]}")
+        print(f"\n  semantic R@{gate_k}={sem:.2%}   hybrid R@{gate_k}={hyb:.2%}   "
+              f"delta={hyb - sem:+.2%}\n")
+
+    # The roadmap's bar for 4.1: on an identifier-heavy set hybrid must not do
+    # worse than semantic-only, and must not lose a query semantic-only answered.
+    # Regressions are the interesting failure — fusion trading old wins for new
+    # ones would look fine in the aggregate.
+    failed = False
+    if hyb < sem:
+        print(f"GATE FAILED: hybrid recall@{gate_k} {hyb:.2%} < semantic-only "
+              f"{sem:.2%}", file=sys.stderr)
+        failed = True
+    if broke:
+        print(f"GATE FAILED: hybrid lost {len(broke)} query(ies) that "
+              f"semantic-only answered: {broke}", file=sys.stderr)
+        failed = True
+    return 1 if failed else 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="AegisDB recall-quality eval")
     ap.add_argument("binary", nargs="?", default="./build/aegisdb")
@@ -312,6 +396,13 @@ def main():
                     help="low-importance episodic records to inject in --decay mode")
     ap.add_argument("--min-retention", type=float, default=0.05,
                     help="retention floor passed to forget (importance*recency)")
+    ap.add_argument("--lexical", action="store_true",
+                    help="retrieval-mode comparison (ROADMAP 4.1): measure "
+                         "semantic-only vs lexical-only vs hybrid over one corpus; "
+                         "pair with --dataset eval/datasets/identifiers.json")
+    ap.add_argument("--retrieval", default="semantic",
+                    choices=["semantic", "lexical", "hybrid"],
+                    help="retrieval path for a normal (non---lexical) run")
     args = ap.parse_args()
 
     ks = sorted(int(x) for x in args.k.split(","))
@@ -325,11 +416,13 @@ def main():
         return run_consolidate_eval(args, ds, embed, ks, max_k)
     if args.decay:
         return run_decay_eval(args, ds, embed, ks, max_k)
+    if args.lexical:
+        return run_lexical_eval(args, ds, embed, ks, max_k)
 
     with Server(args.binary, args.port, dim) as srv:
         label_to_ids = seed(srv, ds["memories"], embed)
         mean_recall, mrr, per_query = measure(
-            srv, ds["queries"], embed, label_to_ids, ks, max_k)
+            srv, ds["queries"], embed, label_to_ids, ks, max_k, args.retrieval)
 
     n = len(per_query)
 

@@ -28,6 +28,9 @@
 #define MIN_HALF_LIFE_MS                                                       \
     1000 /* floor recency half-life at 1s (avoid absurd decay) */
 #define MAX_AGENT_ID 128
+#define RRF_K                                                                  \
+    60 /* reciprocal-rank fusion damping (the value from the original
+                   * Cormack et al. result, and the de-facto default since) */
 
 /* Phase gating: fail with NOT_READY when the server runs below the phase a
  * feature needs. Defined in query_engine.c; used by every engine TU. */
@@ -44,11 +47,16 @@ int record_expired(const MemoryRecord *r, uint64_t now);
 
 /* A scored candidate record. Produced/ranked in qe_search.c; also used as a
  * (record, score) accumulator by the graph traversal in query_engine.c. The
- * ranking-breakdown fields are only meaningful for semantic search. */
+ * ranking-breakdown fields are only meaningful for a ranked (semantic and/or
+ * lexical) search; a plain filter query leaves them zeroed. */
 typedef struct {
     MemoryRecord rec;
     float score;
-    float sim; /* raw cosine similarity [-1,1] */
+    float sim;      /* raw cosine similarity [-1,1] */
+    float bm25;     /* raw BM25 score (ROADMAP 4.1) */
+    float rrf;      /* fused reciprocal-rank score (hybrid only) */
+    uint32_t srank; /* 1-based rank in the semantic list; 0 = absent */
+    uint32_t lrank; /* 1-based rank in the lexical list; 0 = absent */
     float
         weight; /* importance*confidence actually applied (1.0 if that was <=0) */
     float

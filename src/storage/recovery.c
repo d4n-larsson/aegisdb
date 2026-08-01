@@ -155,6 +155,9 @@ long recovery_run(AegisDB *db) {
             for (size_t k = 0; k < r.tag_count; k++) {
                 tag_index_add(db->tags, r.tags[k], r.id);
             }
+            /* The lexical index is derived and never checkpointed, so it is
+             * always rebuilt in full here — like time/tag, unlike semantic. */
+            lexical_index_add(db->lex, r.id, r.data, r.data_len);
             /* Seed per-tenant usage from the surviving live set so quotas are
              * accurate immediately after a restart (matches append_and_hash's
              * accounting unit: +1 record, +frame-payload bytes). Only under
