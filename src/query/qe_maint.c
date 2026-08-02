@@ -521,8 +521,8 @@ aegis_status_t qe_consolidate(AegisDB *db, const char *ns, float min_similarity,
  * caller opts them in) and to `ns`. dry_run counts without deleting. */
 aegis_status_t qe_forget(AegisDB *db, const char *ns, MemoryType type,
                          uint64_t half_life_ms, float min_retention,
-                         int dry_run, size_t max_forget, size_t *out_scanned,
-                         size_t *out_forgotten) {
+                         float usage_weight, int dry_run, size_t max_forget,
+                         size_t *out_scanned, size_t *out_forgotten) {
     aegis_status_t st = require_phase(db, 1);
     if (st != AEGIS_OK) {
         return st;
@@ -554,10 +554,36 @@ aegis_status_t qe_forget(AegisDB *db, const char *ns, MemoryType type,
             continue;
         }
         (*out_scanned)++;
-        double age = now > r.updated ? (double)(now - r.updated) : 0.0;
+        /* Usage feedback changes retention in two ways, both gated on
+         * usage_weight so `usage_weight: 0` reproduces the original scoring
+         * exactly:
+         *
+         * 1. Recency is measured from the last *use*, not just the last write. A
+         *    fact written a year ago and recalled yesterday is live knowledge;
+         *    ageing it by write time would delete it.
+         * 2. Frequently-recalled records resist forgetting, via a saturating
+         *    boost — 1 + w·(1 − 1/(1+n)). Bounded on purpose: an unbounded
+         *    multiplier would pin whatever happens to be hot forever, and n is
+         *    evidence of use, not proof of value. */
+        uint64_t basis = r.updated;
+        double use_boost = 1.0;
+        if (usage_weight > 0.0f && db->usage) {
+            uint32_t recalls = 0;
+            uint64_t last = 0;
+            if (usage_index_get(db->usage, r.id, &recalls, &last) == 0) {
+                if (last > basis) {
+                    basis = last;
+                }
+                if (recalls) {
+                    use_boost = 1.0 + ((double)usage_weight *
+                                       (1.0 - (1.0 / (1.0 + (double)recalls))));
+                }
+            }
+        }
+        double age = now > basis ? (double)(now - basis) : 0.0;
         /* 0.5^(age/half_life) == exp(-ln2 * age/half_life) */
         double recency = exp(-0.6931471805599453 * age / (double)half_life_ms);
-        double retention = (double)r.importance * recency;
+        double retention = (double)r.importance * recency * use_boost;
         record_free(&r);
         if (retention >= (double)min_retention) {
             continue; /* still worth keeping */

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "aegisdb/ckpt_crypt.h"
 #include "aegisdb/hash_index.h"
 #include "aegisdb/logging.h"
 #include "aegisdb/record.h"
@@ -158,6 +159,10 @@ long recovery_run(AegisDB *db) {
             /* The lexical index is derived and never checkpointed, so it is
              * always rebuilt in full here — like time/tag, unlike semantic. */
             lexical_index_add(db->lex, r.id, r.data, r.data_len);
+            /* Establish the slot; its counters are restored from the usage
+             * checkpoint below, which only writes onto slots that exist here —
+             * so a record deleted since the checkpoint stays gone. */
+            usage_index_track(db->usage, r.id);
             /* Seed per-tenant usage from the surviving live set so quotas are
              * accurate immediately after a restart (matches append_and_hash's
              * accounting unit: +1 record, +frame-payload bytes). Only under
@@ -182,6 +187,30 @@ long recovery_run(AegisDB *db) {
      * any semantic id the final hash no longer reports live. */
     if (sem_loaded) {
         semantic_index_reconcile(db->sem, recover_keep, db->hash);
+    }
+
+    /* Usage feedback is the one index the log cannot reconstruct, so restore it
+     * from its checkpoint now that every live slot exists. A missing or
+     * unreadable file just means "no history yet": the counters are a heuristic
+     * for `forget`, never correctness. */
+    if (db->usage) {
+        uint8_t *ubuf = NULL;
+        size_t ulen = 0;
+        if (ckpt_read(db->path_usage, ckey, &ubuf, &ulen) == 0) {
+            if (usage_index_load_buf(db->usage, ubuf, ulen) == 0) {
+                LOG_DEBUG(
+                    "recovery: restored usage feedback (%llu recalls over "
+                    "%zu records)",
+                    (unsigned long long)usage_index_total_recalls(db->usage),
+                    usage_index_count(db->usage));
+            } else {
+                LOG_WARN(
+                    "recovery: usage checkpoint %s is unreadable; starting "
+                    "with no recall history",
+                    db->path_usage);
+            }
+            free(ubuf);
+        }
     }
 
     LOG_DEBUG("recovery: secondary indexes populated from %ld live record(s)",

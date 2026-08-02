@@ -1377,6 +1377,139 @@ def test_lexical_isolation(binary, port):
               "a spoofed agent_id does not cross tenants")
 
 
+def test_usage_feedback(binary, port):
+    print("[usage feedback: recall counts on records]")
+    with Server(binary, port, phase=4) as srv:
+        a = srv.req({"operation": "insert", "type": "semantic", "tags": ["n"],
+                     "data": "alpha about deployment"})["record"]["id"]
+        b = srv.req({"operation": "insert", "type": "semantic", "tags": ["n"],
+                     "data": "beta about watering plants"})["record"]["id"]
+
+        # A fresh record is tracked with a real zero — distinguishable from an
+        # untracked one, which omits the field entirely.
+        rec = srv.req({"operation": "get", "id": a})["record"]
+        check(rec.get("recall_count") == 0, "a fresh record reports zero recalls")
+        check("last_recalled" not in rec,
+              "never-recalled record omits last_recalled")
+
+        for _ in range(3):
+            srv.req({"operation": "search", "query": "deployment", "top_k": 5})
+        rec = srv.req({"operation": "get", "id": a})["record"]
+        check(rec.get("recall_count") == 3, "search hits increment the count")
+        check(rec.get("last_recalled", 0) > 0, "last_recalled is set")
+        check(srv.req({"operation": "get", "id": b})["record"]["recall_count"] == 0,
+              "a record the search did not return is untouched")
+
+        # `get` reports but must not increment: walking ids with a tool would
+        # otherwise inflate every record's apparent value.
+        for _ in range(3):
+            srv.req({"operation": "get", "id": a})
+        check(srv.req({"operation": "get", "id": a})["record"]["recall_count"] == 3,
+              "get reports usage without incrementing it")
+
+        # Opt-out, which is how a browser of memories avoids polluting the signal.
+        srv.req({"operation": "search", "query": "deployment", "top_k": 5,
+                 "track_usage": False})
+        check(srv.req({"operation": "get", "id": a})["record"]["recall_count"] == 3,
+              "track_usage:false does not increment")
+
+        # Counters ride along on search results too.
+        recs = srv.req({"operation": "search", "query": "deployment",
+                        "top_k": 5})["records"]
+        hit = [r for r in recs if r["id"] == a][0]
+        check(hit.get("recall_count") == 4,
+              "search results carry the count, including the current recall")
+
+        s = srv.req({"operation": "stats"})
+        check(s["indexes"]["usage_tracked"] == 2, "stats reports tracked records")
+        check(s["memory"]["usage_bytes"] > 0, "stats reports usage index bytes")
+
+
+def test_usage_feedback_forget(binary, port):
+    print("[usage feedback: forget weighs recall history]")
+    with Server(binary, port, phase=4) as srv:
+        # Two records identical but for their recall history.
+        used = srv.req({"operation": "insert", "type": "episodic",
+                        "importance": 0.4,
+                        "data": "widget rotation notes"})["record"]["id"]
+        cold = srv.req({"operation": "insert", "type": "episodic",
+                        "importance": 0.4,
+                        "data": "sprocket alignment notes"})["record"]["id"]
+        srv.req({"operation": "search", "query": "widget rotation", "top_k": 3})
+
+        # min_retention above importance: both would go on importance alone, and
+        # only the recall boost can save one of them.
+        base = {"operation": "forget", "type": "episodic",
+                "half_life_ms": 1000000, "min_retention": 0.5, "dry_run": True}
+        r = srv.req(base)
+        check(r["scanned"] == 2 and r["forgotten"] == 1,
+              "the recalled record is spared, the unused one is not")
+        check(r.get("usage_weight") == 1, "forget echoes the usage weight")
+
+        r0 = srv.req({**base, "usage_weight": 0})
+        check(r0["forgotten"] == 2,
+              "usage_weight:0 reproduces the pre-feature scoring exactly")
+
+        r2 = srv.req({"operation": "forget", "usage_weight": -1})
+        check(r2.get("ok") is False, "a negative usage_weight is rejected")
+
+        # For real this time.
+        srv.req({k: v for k, v in base.items() if k != "dry_run"})
+        check(srv.req({"operation": "get", "id": used}).get("ok") is True,
+              "the recalled record survives a real forget")
+        check(srv.req({"operation": "get", "id": cold})["error"]["code"]
+              == "NOT_FOUND", "the unused record is forgotten")
+
+
+def test_usage_feedback_persists(binary, port):
+    print("[usage feedback: counters survive a restart]")
+    datadir = tempfile.mkdtemp(prefix="aegis_usage_")
+    with Server(binary, port, phase=4, datadir=datadir) as srv:
+        rid = srv.req({"operation": "insert", "type": "semantic", "tags": ["n"],
+                       "data": "alpha about deployment"})["record"]["id"]
+        gone = srv.req({"operation": "insert", "type": "semantic", "tags": ["n"],
+                        "data": "gamma about deployment"})["record"]["id"]
+        for _ in range(4):
+            srv.req({"operation": "search", "query": "deployment", "top_k": 5})
+        srv.req({"operation": "delete", "id": gone})
+        srv.graceful_stop()  # clean shutdown writes the checkpoint
+
+    # Unlike every other index this one cannot be rebuilt from the log, so the
+    # checkpoint is its only durability.
+    with Server(binary, port, phase=4, datadir=datadir) as srv:
+        rec = srv.req({"operation": "get", "id": rid})["record"]
+        check(rec.get("recall_count") == 4, "recall counts survive a restart")
+        check(rec.get("last_recalled", 0) > 0, "last_recalled survives a restart")
+        s = srv.req({"operation": "stats"})
+        check(s["indexes"]["usage_tracked"] == 1,
+              "a record deleted before the restart is not resurrected")
+
+
+def test_usage_feedback_disabled(binary, port):
+    print("[usage feedback: --no-usage-feedback opt-out]")
+    with Server(binary, port, phase=4,
+                extra_args=["--no-usage-feedback"]) as srv:
+        rid = srv.req({"operation": "insert", "type": "episodic",
+                       "importance": 0.4, "tags": ["n"],
+                       "data": "widget rotation notes"})["record"]["id"]
+        srv.req({"operation": "search", "query": "widget", "top_k": 5})
+
+        # Absent, not zero: the server keeps no counters at all, and a client can
+        # tell that apart from "tracked but never recalled".
+        rec = srv.req({"operation": "get", "id": rid})["record"]
+        check("recall_count" not in rec, "no counters reported when disabled")
+        s = srv.req({"operation": "stats"})
+        check(s["indexes"]["usage_tracked"] == 0 and s["memory"]["usage_bytes"] == 0,
+              "disabled index reports zero tracked and zero bytes")
+
+        # forget still works and scores as it did before the feature.
+        r = srv.req({"operation": "forget", "type": "episodic",
+                     "half_life_ms": 1000000, "min_retention": 0.5,
+                     "dry_run": True})
+        check(r.get("ok") is True and r["forgotten"] == 1,
+              "forget falls back to importance x recency alone")
+
+
 def test_recall_latency_histogram(binary, port):
     print("[stats: recall-latency histogram (ROADMAP 3.3)]")
     with Server(binary, port, phase=4) as srv:
@@ -2345,6 +2478,10 @@ def main():
     test_lexical_recovery(binary, 19533)
     test_lexical_isolation(binary, 19534)
     test_recall_latency_histogram(binary, 19535)
+    test_usage_feedback(binary, 19536)
+    test_usage_feedback_forget(binary, 19537)
+    test_usage_feedback_persists(binary, 19538)
+    test_usage_feedback_disabled(binary, 19539)
     test_tenant_quota(binary, 19488)
     test_tenant_rate_limit(binary, 19489)
     test_token_admin(binary, 19490)

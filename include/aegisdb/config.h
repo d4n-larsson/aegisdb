@@ -87,6 +87,11 @@ typedef struct {
      * (amplification DoS). Selective filters (tags) are unaffected. Default
      * 100000; 0 = unlimited. */
     size_t query_scan_cap;
+    /* Track per-record usage feedback (recall count + last-recalled time) and
+     * let `forget` weigh it. On by default; --no-usage-feedback turns it off,
+     * which drops the counters, their checkpoint, and the retention boost — a
+     * `forget` then scores exactly as it did before the feature. */
+    int usage_feedback;
     /* Build the lexical (BM25) index over record payloads, enabling `search`
      * with a `query` string (ROADMAP 4.1). On by default; --no-lexical-index
      * turns it off, which trades keyword search for the index RAM a text index

@@ -13,6 +13,7 @@
 #include "aegisdb/tag_index.h"
 #include "aegisdb/tenant.h"
 #include "aegisdb/time_index.h"
+#include "aegisdb/usage_index.h"
 #include "aegisdb/working_buffer.h"
 
 /* Per-operation index for the metrics counters. Order defines the JSON keys in
@@ -83,6 +84,8 @@ typedef struct {
     LexicalIndex *lex;     /* term -> postings, BM25 (ROADMAP 4.1); NULL when
                             * --no-lexical-index disabled it */
     SemanticIndex *sem;    /* embedding ANN (Phase 3) */
+    UsageIndex *usage;     /* id -> recall count/recency; NULL when
+                            * --no-usage-feedback disabled it */
     WorkingStore *working; /* volatile sessions (Phase 4) */
     TenantTable
         *tenants; /* per-namespace usage + rate limiting (multi-tenant) */
@@ -122,7 +125,8 @@ typedef struct {
     char path_log[AEGIS_PATH_MAX];
     char path_index[AEGIS_PATH_MAX];
     char path_meta[AEGIS_PATH_MAX];
-    char path_sem[AEGIS_PATH_MAX]; /* HNSW graph checkpoint */
+    char path_sem[AEGIS_PATH_MAX];   /* HNSW graph checkpoint */
+    char path_usage[AEGIS_PATH_MAX]; /* usage-feedback checkpoint */
 
     volatile int running;
 } AegisDB;

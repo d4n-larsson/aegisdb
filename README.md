@@ -134,8 +134,12 @@ tells you whether recall quality is holding.
   agent-namespace isolation
 - **Memory that curates itself** — `consolidate` collapses near-duplicate
   semantic facts (recording a `supersedes` provenance link, not silent loss);
-  `forget` ages out low-value records by importance × recency decay so a
-  long-running corpus and its RAM plateau — both measurable via `make eval`
+  `forget` ages out low-value records so a long-running corpus and its RAM
+  plateau — both measurable via `make eval`
+- **Forgetting informed by what you actually use** — every record carries a
+  recall count and a last-recalled time, so `forget` scores on evidence rather
+  than a write-time importance guess: a fact recalled yesterday survives even if
+  it was written a year ago, and one nothing ever retrieves ages out
 - **Time travel** — `history` returns every version of a record with validity
   intervals, and `get` with `as_of` reconstructs it as of a past time ("what did
   the agent know at T?") from the append-only log

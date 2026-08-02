@@ -219,7 +219,11 @@ async function run(){
   const type = document.getElementById("type").value;
   const tags = document.getElementById("tags").value.split(",").map(s=>s.trim()).filter(Boolean);
   const match = document.getElementById("match").value;
-  const req = {operation:"search", top_k:topk, include_embeddings:false};
+  // track_usage:false — inspecting memories is not an agent recalling them.
+  // Without this, browsing the corpus would mark everything as used and protect
+  // it from `forget`, i.e. looking at the data would change it.
+  const req = {operation:"search", top_k:topk, include_embeddings:false,
+               track_usage:false};
   if(ns) req.agent_id = ns;
   if(type) req.type = type;
   if(tags.length){ req.tags = tags; req.match = match; }

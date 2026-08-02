@@ -73,6 +73,13 @@ typedef struct {
     uint64_t half_life_ms; /* semantic only: recency half-life; 0 = no decay */
     int has_max_importance; /* filter: keep only records with importance <= max */
     float max_importance;
+    /* Count the returned records as recalled, feeding the usage-feedback
+     * counters `forget` weighs (ROADMAP: usage feedback). Off in a zeroed
+     * SearchParams so an internal caller never inflates the signal by accident;
+     * the wire layer defaults it ON for `search` and lets a client opt out with
+     * "track_usage": false — which the inspector does, so browsing memories does
+     * not mark them all as used. */
+    int track_usage;
     int oldest_first; /* non-semantic: when a bounded time scan truncates, keep
                          * the OLDEST rather than the most recent (candidate
                          * selection for summarization). Ignored for semantic. */
@@ -174,11 +181,17 @@ aegis_status_t qe_consolidate(AegisDB *db, const char *ns, float min_similarity,
  * forgotten when retention < min_retention. Scoped to one `type` (episodic is the
  * intended default — curated semantic facts should be protected) and to `ns`.
  * `dry_run` counts what would be forgotten without deleting; `max_forget` (0 =
- * unbounded) caps deletions. Reports *out_scanned (examined) and *out_forgotten. */
+ * unbounded) caps deletions. Reports *out_scanned (examined) and *out_forgotten.
+ *
+ * `usage_weight` folds in per-record usage feedback: recency is measured from the
+ * last recall rather than the last write, and a frequently-recalled record gets a
+ * saturating retention boost of up to 1 + usage_weight. 0 disables both, scoring
+ * exactly as before the feature (and is implied when the server runs with
+ * --no-usage-feedback, which keeps no counters). */
 aegis_status_t qe_forget(AegisDB *db, const char *ns, MemoryType type,
                          uint64_t half_life_ms, float min_retention,
-                         int dry_run, size_t max_forget, size_t *out_scanned,
-                         size_t *out_forgotten);
+                         float usage_weight, int dry_run, size_t max_forget,
+                         size_t *out_scanned, size_t *out_forgotten);
 
 /* Promote a working record to a persisted one. When `ns` is non-NULL the new
  * record is pinned to that namespace (agent_id). */

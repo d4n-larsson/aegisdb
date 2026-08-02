@@ -306,6 +306,7 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
             tag_index_add(db->tags, rec->tags[i], rec->id);
         }
         lexical_index_add(db->lex, rec->id, rec->data, rec->data_len);
+        usage_index_track(db->usage, rec->id);
         if (rec->embedding_dim && rec->vec_count) {
             semantic_index_add(db->sem, rec->id, rec->embedding, rec->vec_count,
                                rec->embedding_dim);
@@ -486,6 +487,7 @@ aegis_status_t qe_delete(AegisDB *db, uint64_t id, const char *ns) {
         tag_index_remove(db->tags, cur.tags[i], cur.id);
     }
     lexical_index_remove(db->lex, cur.id, cur.data, cur.data_len);
+    usage_index_untrack(db->usage, cur.id);
     if (cur.embedding_dim) {
         semantic_index_remove(db->sem, cur.id);
     }
