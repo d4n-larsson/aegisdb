@@ -70,9 +70,10 @@ The checkpoint is refreshed by the maintenance thread every `--checkpoint-sec`
 (default 60; `0` disables) and on clean shutdown, and is invalidated by
 compaction (which rewrites every log offset). It only carries the hash index;
 the time/tag/lexical/embedding indexes are still rebuilt by reading the live
-records
-(their payloads and vectors are needed anyway), so recovery is `O(live records +
-tail)` rather than `O(entire log)`.
+records (their payloads and vectors are needed anyway), so recovery is
+`O(live records + tail)` rather than `O(entire log)`. Usage counters are the
+exception: they are restored from their own checkpoint, being the one index the
+log cannot reconstruct.
 
 Either way, recovery validates each scanned frame's header and payload CRCs and
 rebuilds the in-memory indexes. Two failure modes are distinguished:
@@ -87,9 +88,12 @@ rebuilds the in-memory indexes. Two failure modes are distinguished:
   left in place (it is skipped again on every boot until the next compaction
   rewrites the log without it).
 
-Recovery then reports `INFO … recovery complete: N records loaded`. Because every
-index is derived from the log, the log alone is sufficient to reconstruct full
-state.
+Recovery then reports `INFO … recovery complete: N records loaded`. Every index
+that describes the *records* is derived from the log, so the log alone is
+sufficient to reconstruct full state. The one exception is the usage-feedback
+index (see [Usage feedback](#usage-feedback)), which records what retrieval
+surfaced rather than what was written — losing it costs `forget` its ranking
+signal, never data.
 
 ### Compaction
 
@@ -112,15 +116,17 @@ rather than by the total size of the database.
 ├── memory.log     # append-only, magic + CRC framed record log (source of truth)
 ├── memory.index   # index checkpoint: id → log location + covered offset + next_id
 ├── memory.sem     # HNSW graph checkpoint (skips the semantic rebuild on startup)
+├── usage.db       # per-record recall counts (the one index the log cannot rebuild)
 ├── metadata.db    # persisted counters (e.g. next id)
 └── snapshots/     # online backups written by the `snapshot` operation
 ```
 
 ## Indexes
 
-All indexes are in-memory, rebuilt from the log on startup (the semantic graph
-also checkpoints to `memory.sem` to skip the rebuild), and guarded by a
-`pthread_rwlock_t` (see [Concurrency](#concurrency)).
+All indexes are in-memory and guarded by a `pthread_rwlock_t` (see
+[Concurrency](#concurrency)). All but one are rebuilt from the log on startup —
+the semantic graph also checkpoints to `memory.sem` to skip the rebuild, and the
+usage index checkpoints because it *cannot* be rebuilt.
 
 | Index | Purpose | Structure |
 |-------|---------|-----------|
@@ -128,6 +134,7 @@ also checkpoints to `memory.sem` to skip the rebuild), and guarded by a
 | Time | `search` by time range | Sorted `(created, id)` array, range-scanned |
 | Tag | `search` by tags | Inverted index: tag → sorted id list; `all` intersects, `any` unions |
 | Lexical | `search` by `query` text | Inverted index: term → postings `(id, term frequency)`, plus per-document lengths for BM25. Omitted entirely under `--no-lexical-index` |
+| Usage | `forget` retention weighting | id → recall count + last-recalled time (atomics, so the read path bumps them under a read lock). Omitted under `--no-usage-feedback` |
 | Semantic | `search` by embedding | Exact cosine scan while small; above `--ann-threshold` an HNSW graph for sublinear approximate top-K |
 
 Semantic results are ranked by cosine similarity weighted by
@@ -137,6 +144,28 @@ are held only by the HNSW graph, optionally int8-quantized (`--ann-quantize`,
 ~4× less memory for a small recall cost). Embedding length must equal the
 server's `--embedding-dim` (default 384) or the request is rejected with
 `INVALID_REQUEST`.
+
+### Usage feedback
+
+Every other index here is *derived*: delete it and recovery rebuilds it from the
+log. The usage index is not. It records what retrieval actually surfaced —
+information the log never contained — so it is the one index with its own
+checkpoint (`usage.db`, written by `db_checkpoint` and restored during recovery
+after the live slots exist). Losing it would not lose data, but it would silently
+change what `forget` deletes after every restart.
+
+Two properties make it cheap enough to sit on the read path:
+
+- Counters are atomics, so a search bumps them while holding only the index
+  **read** lock.
+- The table's *structure* changes only on the write path (insert, delete,
+  recovery) under the write lock. A search never inserts and never allocates; an
+  untracked id is simply not counted.
+
+`search` counts the records it returns — being a candidate is not being used —
+and `get` reports the counters without incrementing them, so a tool walking ids
+cannot inflate them. Clients that browse rather than recall pass
+`track_usage: false`; the bundled inspector does.
 
 ### Lexical retrieval and fusion
 

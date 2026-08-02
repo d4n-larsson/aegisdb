@@ -770,7 +770,7 @@ static void test_forget(void) {
     /* dry_run: reports would-forget, deletes nothing */
     TEST_ASSERT_EQUAL_INT(AEGIS_OK,
                           qe_forget(&g_db, NULL, MEM_EPISODIC, half_life, 0.05f,
-                                    1, 0, &scanned, &forgotten));
+                                    0.0f, 1, 0, &scanned, &forgotten));
     TEST_ASSERT_EQUAL_size_t(4, scanned);   /* 3 noise + keep */
     TEST_ASSERT_EQUAL_size_t(3, forgotten); /* the 3 low-value */
     MemoryRecord r;
@@ -781,7 +781,7 @@ static void test_forget(void) {
     scanned = forgotten = 0;
     TEST_ASSERT_EQUAL_INT(AEGIS_OK,
                           qe_forget(&g_db, NULL, MEM_EPISODIC, half_life, 0.05f,
-                                    0, 0, &scanned, &forgotten));
+                                    0.0f, 0, 0, &scanned, &forgotten));
     TEST_ASSERT_EQUAL_size_t(3, forgotten);
     for (int i = 0; i < 3; i++)
         TEST_ASSERT_EQUAL_INT(AEGIS_ERR_NOT_FOUND,
@@ -797,7 +797,7 @@ static void test_forget(void) {
     scanned = forgotten = 0;
     TEST_ASSERT_EQUAL_INT(AEGIS_OK,
                           qe_forget(&g_db, NULL, MEM_EPISODIC, half_life, 0.05f,
-                                    0, 0, &scanned, &forgotten));
+                                    0.0f, 0, 0, &scanned, &forgotten));
     TEST_ASSERT_EQUAL_size_t(0, forgotten);
 }
 

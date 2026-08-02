@@ -12,6 +12,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include "aegisdb/ckpt_crypt.h"
 #include "aegisdb/fsutil.h"
 #include "aegisdb/logging.h"
 #include "aegisdb/record.h"
@@ -69,10 +70,10 @@ int db_save_metadata(AegisDB *db) {
 
 uint64_t db_index_bytes(AegisDB *db) {
     pthread_rwlock_rdlock(&db->index_lock);
-    uint64_t total = (uint64_t)hash_index_bytes(db->hash) +
-                     time_index_bytes(db->time) + tag_index_bytes(db->tags) +
-                     lexical_index_bytes(db->lex) +
-                     semantic_index_bytes(db->sem);
+    uint64_t total =
+        (uint64_t)hash_index_bytes(db->hash) + time_index_bytes(db->time) +
+        tag_index_bytes(db->tags) + lexical_index_bytes(db->lex) +
+        usage_index_bytes(db->usage) + semantic_index_bytes(db->sem);
     pthread_rwlock_unlock(&db->index_lock);
     return total;
 }
@@ -95,7 +96,20 @@ int db_checkpoint(AegisDB *db) {
      * and replay only the tail. No-op (drops any stale file) below the ANN
      * threshold, where search is the exact scan. */
     int rv2 = semantic_index_save(db->sem, db->path_sem, covered, key);
+    /* Usage counters are the one index NOT derivable from the log, so this
+     * checkpoint is their only durability. Serialize under the read lock, write
+     * outside it. A failure here is logged by the caller but must not fail the
+     * checkpoint: losing recall counts degrades `forget`'s ranking, it does not
+     * lose data. */
+    size_t ulen = 0;
+    uint8_t *ubuf = usage_index_serialize(db->usage, &ulen);
     pthread_rwlock_unlock(&db->index_lock);
+    if (ubuf) {
+        if (ckpt_write(db->path_usage, key, ubuf, ulen) != 0) {
+            LOG_WARN("failed to persist usage feedback to %s", db->path_usage);
+        }
+        free(ubuf);
+    }
     return (rv == 0 && rv2 == 0) ? 0 : -1;
 }
 
@@ -224,6 +238,7 @@ int db_replica_apply(AegisDB *db, uint64_t offset, const uint8_t *payload,
                     tag_index_remove(db->tags, p.tags[i], p.id);
                 }
                 lexical_index_remove(db->lex, p.id, p.data, p.data_len);
+                usage_index_untrack(db->usage, p.id);
                 if (p.embedding_dim && p.vec_count) {
                     semantic_index_remove(db->sem, p.id);
                 }
@@ -244,6 +259,7 @@ int db_replica_apply(AegisDB *db, uint64_t offset, const uint8_t *payload,
             tag_index_add(db->tags, r.tags[i], r.id);
         }
         lexical_index_add(db->lex, r.id, r.data, r.data_len);
+        usage_index_track(db->usage, r.id);
         if (r.embedding_dim == db->config.embedding_dimensions && r.embedding &&
             r.vec_count) {
             semantic_index_add(db->sem, r.id, r.embedding, r.vec_count,
@@ -269,11 +285,13 @@ int db_reset_replica(AegisDB *db) {
     TagIndex *ntag = tag_index_create();
     /* Only replace the lexical index if this server builds one at all. */
     LexicalIndex *nlex = db->lex ? lexical_index_create() : NULL;
-    if (!nh || !nt || !ntag || (db->lex && !nlex)) {
+    UsageIndex *nusage = db->usage ? usage_index_create() : NULL;
+    if (!nh || !nt || !ntag || (db->lex && !nlex) || (db->usage && !nusage)) {
         hash_index_free(nh);
         time_index_free(nt);
         tag_index_free(ntag);
         lexical_index_free(nlex);
+        usage_index_free(nusage);
         return -1;
     }
     hash_index_free(db->hash);
@@ -285,6 +303,10 @@ int db_reset_replica(AegisDB *db) {
     if (db->lex) {
         lexical_index_free(db->lex);
         db->lex = nlex;
+    }
+    if (db->usage) {
+        usage_index_free(db->usage);
+        db->usage = nusage;
     }
     semantic_index_clear(db->sem);
     pthread_mutex_lock(&db->id_lock);
@@ -607,6 +629,8 @@ int db_open(AegisDB *db, const Config *cfg) {
              cfg->data_dir);
     snprintf(db->path_sem, sizeof(db->path_sem), "%s/memory.sem",
              cfg->data_dir);
+    snprintf(db->path_usage, sizeof(db->path_usage), "%s/usage.db",
+             cfg->data_dir);
 
     if (init_db_locks(db) != 0) {
         return -1;
@@ -631,6 +655,7 @@ int db_open(AegisDB *db, const Config *cfg) {
     /* Opt-out (--no-lexical-index) leaves db->lex NULL; every call site treats
      * NULL as "no lexical index", and `search` with a query reports NOT_READY. */
     db->lex = cfg->lexical_index ? lexical_index_create() : NULL;
+    db->usage = cfg->usage_feedback ? usage_index_create() : NULL;
     db->sem = semantic_index_create(cfg->embedding_dimensions,
                                     cfg->ann_threshold, cfg->ann_ef_search,
                                     cfg->ann_quantize, cfg->ann_shard_target);
@@ -638,7 +663,8 @@ int db_open(AegisDB *db, const Config *cfg) {
         working_store_create(cfg->working_capacity, cfg->default_ttl_ms);
     db->tenants = tenant_table_create();
     if (!db->hash || !db->time || !db->tags || !db->sem || !db->working ||
-        !db->tenants || (cfg->lexical_index && !db->lex)) {
+        !db->tenants || (cfg->lexical_index && !db->lex) ||
+        (cfg->usage_feedback && !db->usage)) {
         LOG_ERROR("index allocation failed");
         goto fail_indexes;
     }
@@ -672,6 +698,7 @@ fail_indexes:
     time_index_free(db->time);
     tag_index_free(db->tags);
     lexical_index_free(db->lex);
+    usage_index_free(db->usage);
     semantic_index_free(db->sem);
     working_store_free(db->working);
     tenant_table_free(db->tenants);
@@ -695,6 +722,7 @@ void db_close(AegisDB *db) {
     time_index_free(db->time);
     tag_index_free(db->tags);
     lexical_index_free(db->lex);
+    usage_index_free(db->usage);
     semantic_index_free(db->sem);
     working_store_free(db->working);
     tenant_table_free(db->tenants);

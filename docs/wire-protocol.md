@@ -138,6 +138,17 @@ is what you later pass to `promote` as `working_id`.
 |-------|------|----------|-------|
 | `type` | string | Yes | `episodic` \| `semantic` \| `working` |
 | `data` | string | Yes | Payload |
+
+Records returned by `get` and `search` additionally carry **usage feedback** when
+the server tracks it (it does unless started with `--no-usage-feedback`):
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `recall_count` | integer | Times this record has been returned by a `search` that did not opt out. `0` means tracked but never recalled; the field is **absent** when the server keeps no counters at all, so the two cases are distinguishable |
+| `last_recalled` | integer | Unix ms of the most recent recall; absent until the first one |
+
+`get` reports these but does not increment them — fetching a known id is not
+retrieval, and counting it would let a tool that walks ids inflate every record.
 | `tags` | string[] | No | |
 | `importance` | number | No | 0.0–1.0 |
 | `confidence` | number | No | 0.0–1.0 |
@@ -367,11 +378,25 @@ records so a long-running corpus (and its in-RAM indexes) plateaus instead of
 growing without bound. A record's **retention** is
 
 ```
-retention = importance × 0.5^(age / half_life_ms)      age measured from `updated`
+retention = importance × 0.5^(age / half_life_ms) × use_boost
+
+age        measured from the last recall, or `updated` if never recalled
+use_boost  1 + usage_weight × (1 − 1 / (1 + recall_count))     (saturating)
 ```
 
 and it is forgotten when `retention < min_retention`. High-importance and
-recently-touched records survive; old, low-importance ones age out. Requires `rw`
+recently-touched records survive; old, low-importance ones age out.
+
+**Usage feedback** is what the last two terms add: `importance` is a number the
+writer guessed once, while a record's recall history is evidence of what is
+actually being used. So recency is measured from the last *recall* rather than
+the last write — a fact written a year ago and recalled yesterday is live
+knowledge — and a frequently-recalled record earns a bounded retention boost, at
+most `1 + usage_weight`. The boost saturates on purpose: recall count is evidence
+of use, not proof of value, and an unbounded multiplier would pin whatever
+happens to be hot. Set `usage_weight: 0` to ignore usage entirely and score
+exactly as this op did before the feature; a server started with
+`--no-usage-feedback` keeps no counters, so it always behaves that way. Requires `rw`
 scope; a namespaced token forgets only its own tenant. Idempotent. Forgotten
 records reclaim disk on the next compaction, exactly like TTL expiry.
 
@@ -386,6 +411,7 @@ records reclaim disk on the next compaction, exactly like TTL expiry.
 | `min_retention` | number | Forget when `retention` falls below this; default `0.05` |
 | `type` | string | Which type to sweep; **default `episodic`** — the high-volume, low-individual-value events. Curated `semantic` facts are protected unless you name the type explicitly |
 | `dry_run` | boolean | Default `false`. When `true`, counts what *would* be forgotten and tombstones nothing — preview a policy before applying it |
+| `usage_weight` | number | How much recall history protects a record; default `1.0` (a well-used record can be worth up to twice an equivalent unused one). `0` disables usage weighting. Negative is rejected |
 | `max_forget` | integer | Safety cap on deletions this pass (`0`/absent = unbounded) |
 
 `scanned` is how many records of the target type were examined; `forgotten` is
@@ -490,6 +516,7 @@ when **both** `start_time` and `end_time` are present.
 | `half_life_ms` | integer | Semantic only: recency half-life — multiply each score by `0.5^(age/half_life)`, age measured from `updated`; 0/absent = no decay |
 | `max_importance` | number | Keep only records with `importance` ≤ this value (candidate selection) |
 | `order` | string | `oldest` \| `recent` (default). Non-semantic only: when a bounded time scan truncates, `oldest` keeps the aging tail instead of the most-recent records — so a large namespace still surfaces its oldest candidates |
+| `track_usage` | boolean | Defaults to `true`. Counts the returned records as recalled, feeding the usage counters `forget` weighs. Set `false` when the caller is inspecting rather than recalling — the bundled inspector does, so browsing memories does not protect them from `forget` |
 | `explain` | boolean | Defaults to `false`. When `true`, each returned record gains an `explain` object with the per-hit ranking breakdown (see below) so a client/inspection UI can show *why* a memory surfaced |
 
 `max_importance` combined with `type` + a time range and `order: "oldest"` is how
@@ -741,6 +768,7 @@ authentication when enabled (unlike `ping`). Available at every phase.
 | `uptime_ms` | Milliseconds since the database finished recovery at startup |
 | `durability` | Active durability mode (`sync`, `batch`, or `interval`) |
 | `fsync_batch` / `fsync_interval_ms` | The tuning value for the active mode (only the relevant one is present; `sync` has neither) |
+| `indexes.usage_tracked` / `memory.usage_bytes` | Records with usage counters, and their resident bytes. Both `0` under `--no-usage-feedback` |
 | `metrics.recall_latency` | Latency distribution of the `search` (recall) operation — absent until the first search, so a fresh server reports no distribution rather than an all-zero one. `count`, `micros_total`, `mean_micros`, interpolated `p50_micros`/`p95_micros`/`p99_micros`, and `buckets` keyed by upper bound in microseconds. Bucket counts are **cumulative** (Prometheus `le` semantics — each includes every faster bucket, and `+Inf` equals `count`), so a scraper can pass them straight through. Recall sits in an agent's inner loop, so this is the tail to alert on; `dispatch_micros` is a cumulative mean over *all* operations and hides it. |
 | `records` | Live (non-deleted) persisted records |
 | `tombstones` | Deleted-but-not-yet-compacted records still in the log |

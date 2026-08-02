@@ -695,6 +695,21 @@ aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
         }
     }
     free(ranked);
+
+    /* Usage feedback: the records actually handed back are the ones that were
+     * recalled. Counted here rather than over the candidate set, because being a
+     * candidate is not being used. The index read lock pins the table's structure
+     * while the counters (atomics) are bumped; a concurrent writer growing the
+     * table holds the write lock, so it cannot rehash underneath this. */
+    if (p->track_usage && db->usage && rn) {
+        uint64_t now = db_now_ms();
+        pthread_rwlock_rdlock(&db->index_lock);
+        for (size_t i = 0; i < rn; i++) {
+            usage_index_record(db->usage, res[i].id, now);
+        }
+        pthread_rwlock_unlock(&db->index_lock);
+    }
+
     *out_records = res;
     if (out_explain) {
         *out_explain = exp;

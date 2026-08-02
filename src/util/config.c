@@ -64,6 +64,7 @@ void config_defaults(Config *cfg) {
     cfg->query_scan_cap = 100000; /* cap broad/filterless search+count loads */
     cfg->max_index_bytes = 0;     /* 0 = unlimited index RAM */
     cfg->lexical_index = 1;       /* BM25 keyword index on by default */
+    cfg->usage_feedback = 1;      /* per-record recall feedback on by default */
     cfg->enabled_phase = 4;       /* all features enabled by default */
     cfg->log_level = AEGIS_LOG_INFO;
 
@@ -357,6 +358,10 @@ static void usage(const char *prog) {
         "payloads,\n"
         "                           saving its RAM; `search` with a `query`\n"
         "                           then returns NOT_READY\n"
+        "  --no-usage-feedback      stop tracking per-record recall counts, "
+        "so\n"
+        "                           `forget` scores on importance x recency\n"
+        "                           alone (as before the feature)\n"
         "  --encryption-key-file <path>  encrypt the log at rest with the "
         "32-byte\n"
         "                           key (64 hex chars) in <path>. On a NEW "
@@ -514,6 +519,8 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
             SIZE_OPT(cfg->max_index_bytes, "max-index-bytes");
         } else if (strcmp(a, "--no-lexical-index") == 0) {
             cfg->lexical_index = 0;
+        } else if (strcmp(a, "--no-usage-feedback") == 0) {
+            cfg->usage_feedback = 0;
         } else if (strcmp(a, "--encryption-key-file") == 0) {
             NEXT("--encryption-key-file");
             if (load_key_file(val, cfg->encryption_key) != 0) {

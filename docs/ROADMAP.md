@@ -159,9 +159,22 @@ behind the provider seam.*
   recall@10 held at 93%).
 - **Done when:** a long-running agent's recall size and index RAM plateau instead
   of growing linearly, with recall@k held (measured by 1.1). ✅
+- **Shipped (usage feedback):** the policy scored on `importance` — a number the
+  writer guessed once and never revisited — while discarding the strongest signal
+  available: what retrieval actually surfaces. Every record now carries a recall
+  count and a last-recalled time (`usage_index.h/.c`), and `forget` measures
+  recency from the last *use* rather than the last write, plus a saturating
+  boost of up to `1 + usage_weight` for frequently-recalled records.
+  `usage_weight: 0` reproduces the old scoring exactly. Counters are atomics
+  bumped under the index *read* lock, so recall stays allocation- and
+  lock-upgrade-free; the table's structure only changes on the write path. This
+  is the one index the log cannot rebuild, so it checkpoints to `usage.db`.
+  `--no-usage-feedback` opts out. `get` reports the counters without
+  incrementing them, and a browsing client (the inspector) passes
+  `track_usage: false`, so looking at memories does not protect them.
 - **Deferred:** model-driven "is this still relevant?" judgment (beyond the
-  mechanical importance×recency policy) belongs in a maintenance job on top,
-  alongside the LLM distiller.
+  mechanical importance×recency×usage policy) belongs in a maintenance job on
+  top, alongside the LLM distiller.
 
 ---
 

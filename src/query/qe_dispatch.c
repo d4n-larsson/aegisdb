@@ -55,6 +55,29 @@ static cJSON *search_explain_json(const SearchExplain *e) {
     return o;
 }
 
+/* Attach usage feedback to a record's JSON. The counters live in a side index,
+ * not in the record, so they are added here where `db` is in scope rather than
+ * inside json_record. Omitted entirely when the server keeps no counters
+ * (--no-usage-feedback) or the id is untracked, so a client can tell "never
+ * recalled" (0) from "not tracked" (absent). */
+static void add_usage(cJSON *jr, AegisDB *db, uint64_t id) {
+    if (!jr || !db->usage) {
+        return;
+    }
+    uint32_t count = 0;
+    uint64_t last = 0;
+    pthread_rwlock_rdlock(&db->index_lock);
+    int found = usage_index_get(db->usage, id, &count, &last);
+    pthread_rwlock_unlock(&db->index_lock);
+    if (found != 0) {
+        return;
+    }
+    cJSON_AddNumberToObject(jr, "recall_count", (double)count);
+    if (last) {
+        cJSON_AddNumberToObject(jr, "last_recalled", (double)last);
+    }
+}
+
 static cJSON *resp_record(const MemoryRecord *r, int include_embeddings) {
     cJSON *o = json_ok();
     if (!o) {
@@ -229,6 +252,8 @@ static void stats_add_storage(cJSON *o, AegisDB *db) {
                                 (double)lexical_index_terms(db->lex));
         cJSON_AddNumberToObject(idx, "lexical_docs",
                                 (double)lexical_index_docs(db->lex));
+        cJSON_AddNumberToObject(idx, "usage_tracked",
+                                (double)usage_index_count(db->usage));
         cJSON_AddNumberToObject(idx, "semantic",
                                 (double)semantic_index_count(db->sem));
         cJSON_AddNumberToObject(idx, "working",
@@ -244,14 +269,16 @@ static void stats_add_storage(cJSON *o, AegisDB *db) {
         size_t tb = time_index_bytes(db->time);
         size_t gb = tag_index_bytes(db->tags);
         size_t lb = lexical_index_bytes(db->lex);
+        size_t ub = usage_index_bytes(db->usage);
         size_t sb = semantic_index_bytes(db->sem);
         cJSON_AddNumberToObject(mem, "hash_bytes", (double)hb);
         cJSON_AddNumberToObject(mem, "time_bytes", (double)tb);
         cJSON_AddNumberToObject(mem, "tag_bytes", (double)gb);
         cJSON_AddNumberToObject(mem, "lexical_bytes", (double)lb);
+        cJSON_AddNumberToObject(mem, "usage_bytes", (double)ub);
         cJSON_AddNumberToObject(mem, "semantic_bytes", (double)sb);
         cJSON_AddNumberToObject(mem, "index_bytes_total",
-                                (double)(hb + tb + gb + lb + sb));
+                                (double)(hb + tb + gb + lb + ub + sb));
         /* The configured backpressure cap (0 = unlimited), so a scraper can
          * alert on index_bytes_total approaching it. */
         cJSON_AddNumberToObject(mem, "index_bytes_limit",
@@ -634,6 +661,10 @@ static cJSON *handle_get(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
         return json_error_status(st);
     }
     cJSON *r = resp_record(&out, want_embeddings(req));
+    /* `get` reports the counters but does not increment them: fetching a known id
+     * is not retrieval, and counting it would let a tool that walks ids inflate
+     * every record's apparent value. */
+    add_usage(cJSON_GetObjectItem(r, "record"), db, id);
     record_free(&out);
     return r;
 }
@@ -900,6 +931,10 @@ static cJSON *handle_consolidate(AegisDB *db, const cJSON *req,
 
 #define FORGET_DEFAULT_HALF_LIFE_MS 604800000ull /* 7 days */
 #define FORGET_DEFAULT_MIN_RETENTION 0.05f
+/* A recalled record can be worth at most twice an equivalent never-recalled one.
+ * Enough to visibly protect what is in use, small enough that importance still
+ * decides between two records with similar histories. */
+#define FORGET_DEFAULT_USAGE_WEIGHT 1.0f
 
 static cJSON *handle_forget(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     const char *ns = ctx->ns;
@@ -920,11 +955,21 @@ static cJSON *handle_forget(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     }
     int dry_run = jr_bool(req, "dry_run", 0);
     size_t max_forget = (jr_u64(req, "max_forget", &v) == 0) ? (size_t)v : 0;
+    /* How much a record's recall history protects it. Defaults on, since scoring
+     * on a write-time importance guess while ignoring what is actually retrieved
+     * is the weakness this exists to fix; 0 restores the pre-feature scoring. */
+    float usage_weight = (jr_f64(req, "usage_weight", &d) == 0)
+                             ? (float)d
+                             : FORGET_DEFAULT_USAGE_WEIGHT;
+    if (usage_weight < 0.0F) {
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
 
     size_t scanned = 0;
     size_t forgotten = 0;
-    aegis_status_t st = qe_forget(db, ns, type, half_life, min_ret, dry_run,
-                                  max_forget, &scanned, &forgotten);
+    aegis_status_t st =
+        qe_forget(db, ns, type, half_life, min_ret, usage_weight, dry_run,
+                  max_forget, &scanned, &forgotten);
     if (st != AEGIS_OK) {
         return json_error_status(st);
     }
@@ -932,6 +977,7 @@ static cJSON *handle_forget(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     cJSON_AddNumberToObject(o, "scanned", (double)scanned);
     cJSON_AddNumberToObject(o, "forgotten", (double)forgotten);
     cJSON_AddBoolToObject(o, "dry_run", dry_run);
+    cJSON_AddNumberToObject(o, "usage_weight", usage_weight);
     return o;
 }
 
@@ -977,6 +1023,10 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     /* Lexical (BM25) query text; fused with `embedding` when both are present
      * (ROADMAP 4.1). Borrows the cJSON string for the life of the call. */
     p.query = jr_str(req, "query", NULL);
+    /* Count these hits as recalls (usage feedback). Defaults on so the signal
+     * accrues without every client opting in; a browser of memories — the
+     * inspector — passes false so paging through them does not mark them used. */
+    p.track_usage = jr_bool(req, "track_usage", 1);
     /* qe_search_ex also rejects this, but with the generic NOT_READY message
      * about phases — which points at the wrong cause. Say what actually needs
      * changing, since the operator has to restart the server to fix it. */
@@ -1021,6 +1071,7 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     cJSON *arr = cJSON_AddArrayToObject(o, "records");
     for (size_t i = 0; i < n; i++) {
         cJSON *jr = json_record(&recs[i], inc_emb);
+        add_usage(jr, db, recs[i].id);
         if (explain && expl) {
             cJSON_AddItemToObject(jr, "explain", search_explain_json(&expl[i]));
         }
