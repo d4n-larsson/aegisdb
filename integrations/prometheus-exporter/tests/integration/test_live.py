@@ -83,6 +83,33 @@ class TestLive(unittest.TestCase):
         self.assertIn("aegisdb_records", text)
         self.assertIn("# TYPE aegisdb_requests_total counter", text)
 
+    def test_recall_histogram_appears_after_a_search(self):
+        """End-to-end: the server must actually populate the histogram, and the
+        exporter must carry it through. A unit test with a hand-written stats
+        dict cannot catch the server emitting a different shape."""
+        stats = fetch_stats(self.cfg)
+        before = (stats.get("metrics") or {}).get("recall_latency")
+
+        for _ in range(3):
+            r = _send(self.port, {"operation": "search", "tags": ["none"],
+                                  "top_k": 1})
+            self.assertTrue(r.get("ok"), r)
+
+        stats = fetch_stats(self.cfg)
+        rl = (stats.get("metrics") or {}).get("recall_latency")
+        self.assertIsNotNone(rl, "searches must populate recall_latency")
+        expected = 3 + ((before or {}).get("count") or 0)
+        self.assertEqual(rl["count"], expected)
+        # +Inf is the observation count by definition, and buckets are cumulative.
+        self.assertEqual(rl["buckets"]["+Inf"], rl["count"])
+        cums = [rl["buckets"][k] for k in rl["buckets"] if k != "+Inf"]
+        self.assertEqual(cums, sorted(cums), "buckets must be cumulative")
+
+        text = render(stats, up=True, scrape_seconds=0.0)
+        self.assertIn("# TYPE aegisdb_recall_latency_seconds histogram", text)
+        self.assertIn('aegisdb_recall_latency_seconds_bucket{le="+Inf"} '
+                      f'{rl["count"]}', text)
+
     def test_metrics_http_endpoint(self):
         exp_port = _free_port()
         httpd = ThreadingHTTPServer(("127.0.0.1", exp_port),

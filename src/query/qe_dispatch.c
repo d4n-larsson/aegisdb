@@ -260,6 +260,96 @@ static void stats_add_storage(cJSON *o, AegisDB *db) {
     pthread_rwlock_unlock(&db->index_lock);
 }
 
+/* Recall-latency distribution (ROADMAP 3.3). Emitted under `metrics` as
+ * `recall_latency`, with **cumulative** bucket counts keyed by their upper bound
+ * in microseconds — Prometheus `le` semantics, so a scraper can pass them
+ * straight through — plus the count, the summed latency, and interpolated
+ * percentile estimates for operators reading `stats` by hand rather than through
+ * Prometheus.
+ *
+ * The percentiles are estimates: within the chosen bucket the position is
+ * interpolated linearly, which is the same approximation Prometheus'
+ * histogram_quantile makes. A value in the overflow bucket has no upper bound to
+ * interpolate toward, so it reports the last finite bound (i.e. "at least this
+ * slow"). Omitted entirely until the first search, so a fresh server does not
+ * report a misleading 0. */
+static void stats_add_recall_latency(cJSON *m, Metrics *mt) {
+    uint64_t count =
+        (uint64_t)atomic_load_explicit(&mt->recall_count, memory_order_relaxed);
+    if (!count) {
+        return;
+    }
+    uint64_t buckets[RECALL_HIST_N];
+    for (size_t i = 0; i < RECALL_HIST_N; i++) {
+        buckets[i] = (uint64_t)atomic_load_explicit(&mt->recall_hist[i],
+                                                    memory_order_relaxed);
+    }
+    cJSON *rl = cJSON_AddObjectToObject(m, "recall_latency");
+    if (!rl) {
+        return;
+    }
+    uint64_t total_micros = (uint64_t)atomic_load_explicit(
+        &mt->recall_micros, memory_order_relaxed);
+    cJSON_AddNumberToObject(rl, "count", (double)count);
+    cJSON_AddNumberToObject(rl, "micros_total", (double)total_micros);
+    cJSON_AddNumberToObject(rl, "mean_micros",
+                            (double)total_micros / (double)count);
+
+    /* Cumulative buckets. The bucket totals are sampled independently above, so
+     * a concurrent search can leave the last bucket short of `count`; clamp so
+     * the series stays monotone and never exceeds the reported count. */
+    cJSON *bk = cJSON_AddObjectToObject(rl, "buckets");
+    uint64_t cum = 0;
+    uint64_t cums[RECALL_HIST_N];
+    char key[32];
+    for (size_t i = 0; i < RECALL_HIST_N; i++) {
+        cum += buckets[i];
+        cums[i] = cum > count ? count : cum;
+        if (!bk) {
+            continue;
+        }
+        if (i + 1 < RECALL_HIST_N) {
+            snprintf(key, sizeof(key), "%llu",
+                     (unsigned long long)recall_hist_bounds[i]);
+        } else {
+            snprintf(key, sizeof(key), "+Inf");
+        }
+        cJSON_AddNumberToObject(bk, key, (double)cums[i]);
+    }
+    /* The +Inf bucket is the observation count by definition. */
+    if (bk) {
+        cJSON_SetNumberValue(cJSON_GetObjectItem(bk, "+Inf"), (double)count);
+    }
+    cums[RECALL_HIST_N - 1] = count;
+
+    static const struct {
+        const char *name;
+        double q;
+    } quantiles[] = {
+        {"p50_micros", 0.50}, {"p95_micros", 0.95}, {"p99_micros", 0.99}};
+    for (size_t qi = 0; qi < sizeof(quantiles) / sizeof(quantiles[0]); qi++) {
+        double target = quantiles[qi].q * (double)count;
+        double est = (double)recall_hist_bounds[RECALL_HIST_N - 2];
+        for (size_t i = 0; i < RECALL_HIST_N; i++) {
+            if ((double)cums[i] < target) {
+                continue;
+            }
+            double lo = (i == 0) ? 0.0 : (double)recall_hist_bounds[i - 1];
+            if (i + 1 >= RECALL_HIST_N) {
+                est = (double)recall_hist_bounds[RECALL_HIST_N - 2];
+                break; /* overflow: no upper bound to interpolate toward */
+            }
+            double hi = (double)recall_hist_bounds[i];
+            double below = (i == 0) ? 0.0 : (double)cums[i - 1];
+            double in_bucket = (double)cums[i] - below;
+            double frac = in_bucket > 0 ? (target - below) / in_bucket : 1.0;
+            est = lo + ((hi - lo) * frac);
+            break;
+        }
+        cJSON_AddNumberToObject(rl, quantiles[qi].name, est);
+    }
+}
+
 /* Monotonic operational counters, for scraping (rates = successive diffs). */
 static void stats_add_metrics(cJSON *o, AegisDB *db) {
     static const char *const op_names[MOP__N] = {
@@ -300,6 +390,7 @@ static void stats_add_metrics(cJSON *o, AegisDB *db) {
                                         &mt->by_op[i], memory_order_relaxed));
         }
     }
+    stats_add_recall_latency(m, mt);
 }
 
 /* Per-tenant usage against the configured caps (admin-only op, so this is
@@ -1402,6 +1493,27 @@ static MetricOp metric_op(const char *op) {
     return d ? d->metric : MOP_OTHER;
 }
 
+/* Finite bucket bounds in microseconds: 100µs … 250ms. Anything slower lands in
+ * the overflow bucket. Declared in db.h. */
+const uint64_t recall_hist_bounds[RECALL_HIST_N - 1] = {
+    100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000, 250000,
+};
+
+/* Record one recall observation. Linear scan over 11 bounds — cheaper than the
+ * branch misprediction of anything cleverer, and it runs once per search. */
+static void recall_observe(Metrics *m, uint64_t micros) {
+    size_t b = RECALL_HIST_N - 1; /* overflow unless a bound claims it */
+    for (size_t i = 0; i < RECALL_HIST_N - 1; i++) {
+        if (micros <= recall_hist_bounds[i]) {
+            b = i;
+            break;
+        }
+    }
+    atomic_fetch_add_explicit(&m->recall_hist[b], 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&m->recall_micros, micros, memory_order_relaxed);
+    atomic_fetch_add_explicit(&m->recall_count, 1, memory_order_relaxed);
+}
+
 static uint64_t monotonic_micros(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -1431,12 +1543,16 @@ cJSON *query_engine_dispatch(AegisDB *db, const cJSON *req) {
     uint64_t elapsed = monotonic_micros() - t0;
 
     Metrics *m = &db->metrics;
+    MetricOp op = metric_op(jr_str(req, "operation", NULL));
     atomic_fetch_add_explicit(&m->requests, 1, memory_order_relaxed);
-    atomic_fetch_add_explicit(
-        &m->by_op[metric_op(jr_str(req, "operation", NULL))], 1,
-        memory_order_relaxed);
+    atomic_fetch_add_explicit(&m->by_op[op], 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&m->dispatch_micros, elapsed,
                               memory_order_relaxed);
+    /* `search` is the recall path — the one in the agent's inner loop, and the
+     * only one whose tail latency is worth a histogram. */
+    if (op == MOP_SEARCH) {
+        recall_observe(m, elapsed);
+    }
     const char *code = NULL;
     if (resp && resp_is_error(resp, &code)) {
         atomic_fetch_add_explicit(&m->errors, 1, memory_order_relaxed);

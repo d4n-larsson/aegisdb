@@ -38,6 +38,17 @@ typedef enum {
     MOP__N
 } MetricOp;
 
+/* Upper bounds (microseconds) of the recall-latency histogram's finite buckets,
+ * plus an implicit overflow bucket for anything slower (ROADMAP 3.3).
+ *
+ * Recall sits in an agent's inner loop, so the interesting range is sub-
+ * millisecond to tens of milliseconds — a cumulative mean (dispatch_micros)
+ * hides exactly the tail an operator needs to alert on. The bounds are dense
+ * where recall should live and sparse past the point where it is already too
+ * slow to matter. */
+#define RECALL_HIST_N 12 /* 11 finite buckets + 1 overflow */
+extern const uint64_t recall_hist_bounds[RECALL_HIST_N - 1];
+
 /* Monotonic operational counters, incremented per request from the io-threads;
  * lock-free atomics. Exposed via the stats op for external scraping. */
 typedef struct {
@@ -52,6 +63,14 @@ typedef struct {
     atomic_uint_fast64_t memories_merged; /* records consolidate merged away */
     atomic_uint_fast64_t memories_forgotten; /* records forget aged out */
     atomic_uint_fast64_t memories_purged;    /* records purge erased (RTBF) */
+    /* Recall-latency histogram (ROADMAP 3.3): the distribution of `search`
+     * dispatch time, so p95/p99 are observable rather than averaged away. Counts
+     * are per-bucket (not cumulative); the stats op accumulates them into
+     * Prometheus `le` semantics on the way out. */
+    atomic_uint_fast64_t recall_hist[RECALL_HIST_N];
+    atomic_uint_fast64_t recall_micros; /* summed latency, for the mean/_sum */
+    atomic_uint_fast64_t
+        recall_count; /* observations (== sum of the buckets) */
 } Metrics;
 
 typedef struct {

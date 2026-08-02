@@ -103,6 +103,7 @@ plus an `aegisdb_scrape_error{error="…"}` sample, so you alert on
 | `aegisdb_requests_total`, `aegisdb_errors_total`, `aegisdb_unauthorized_total` | counter | use `rate()` for QPS / error-rate |
 | `aegisdb_dispatch_seconds_total` | counter | cumulative in-dispatch time |
 | `aegisdb_requests_by_op_total{op}` | counter | per operation |
+| `aegisdb_recall_latency_seconds` | histogram | distribution of `search` (recall) latency; `_bucket{le}` / `_sum` / `_count`. Absent until the server has served a search |
 | `aegisdb_memories_merged_total` | counter | records merged away by `consolidate` (dedup) |
 | `aegisdb_memories_forgotten_total` | counter | records aged out by `forget` (decay) |
 | `aegisdb_memories_purged_total` | counter | records erased by `purge` (right-to-be-forgotten) |
@@ -116,6 +117,10 @@ aegisdb_up == 0                                            # server down or unau
 rate(aegisdb_requests_total[5m])                           # request rate
 rate(aegisdb_errors_total[5m]) / rate(aegisdb_requests_total[5m])   # error ratio
 aegisdb_index_bytes_total / aegisdb_index_bytes_limit > 0.9 and aegisdb_index_bytes_limit > 0   # near the memory cap
+# recall p99 — the number to alert on, since recall is in the agent's inner loop
+histogram_quantile(0.99, sum(rate(aegisdb_recall_latency_seconds_bucket[5m])) by (le))
+# mean recall latency (an average hides the tail; pair it with the quantile above)
+rate(aegisdb_recall_latency_seconds_sum[5m]) / rate(aegisdb_recall_latency_seconds_count[5m])
 aegisdb_replication_lag_bytes > 1e7                        # replica falling behind
 ```
 
