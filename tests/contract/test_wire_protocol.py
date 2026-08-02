@@ -1377,6 +1377,60 @@ def test_lexical_isolation(binary, port):
               "a spoofed agent_id does not cross tenants")
 
 
+def test_recall_latency_histogram(binary, port):
+    print("[stats: recall-latency histogram (ROADMAP 3.3)]")
+    with Server(binary, port, phase=4) as srv:
+        # Absent before the first search, so a fresh server does not report a
+        # misleading all-zero distribution.
+        m = srv.req({"operation": "stats"})["metrics"]
+        check("recall_latency" not in m,
+              "no histogram before the first search")
+
+        srv.req({"operation": "insert", "type": "semantic", "data": "a memory",
+                 "tags": ["t"]})
+        for _ in range(20):
+            srv.req({"operation": "search", "tags": ["t"], "top_k": 1})
+        # Other operations must not be counted — this is recall latency, not
+        # request latency (dispatch_micros already covers everything).
+        for _ in range(5):
+            srv.req({"operation": "get", "id": 1})
+
+        rl = srv.req({"operation": "stats"})["metrics"].get("recall_latency")
+        check(isinstance(rl, dict), "stats reports recall_latency")
+        check(rl.get("count") == 20, "only search observations are counted")
+        for f in ("micros_total", "mean_micros", "p50_micros", "p95_micros",
+                  "p99_micros", "buckets"):
+            check(f in rl, f"recall_latency reports {f}")
+
+        b = rl["buckets"]
+        check("+Inf" in b, "histogram has an overflow bucket")
+        check(b["+Inf"] == rl["count"], "+Inf bucket equals the count")
+        finite = [k for k in b if k != "+Inf"]
+        check(finite == sorted(finite, key=float),
+              "finite buckets are emitted in ascending bound order")
+        vals = [b[k] for k in finite] + [b["+Inf"]]
+        check(vals == sorted(vals),
+              "bucket counts are cumulative (Prometheus le semantics)")
+        check(all(v <= rl["count"] for v in vals),
+              "no bucket exceeds the observation count")
+
+        # Percentiles must be ordered and inside the observed range.
+        check(rl["p50_micros"] <= rl["p95_micros"] <= rl["p99_micros"],
+              "percentile estimates are ordered p50 <= p95 <= p99")
+        check(rl["mean_micros"] > 0, "mean latency is positive")
+        check(abs(rl["mean_micros"] - rl["micros_total"] / rl["count"]) < 1e-6,
+              "mean == micros_total / count")
+
+        # The histogram is cumulative like every other counter: it keeps
+        # accumulating rather than resetting per scrape.
+        for _ in range(5):
+            srv.req({"operation": "search", "tags": ["t"], "top_k": 1})
+        rl2 = srv.req({"operation": "stats"})["metrics"]["recall_latency"]
+        check(rl2["count"] == 25, "observations accumulate across scrapes")
+        check(rl2["micros_total"] >= rl["micros_total"],
+              "summed latency is monotonic")
+
+
 def test_replication_encrypted(binary, port):
     print("[read replica: encrypted primary -> encrypted replica (shared key)]")
     repl_port = port + 1
@@ -2290,6 +2344,7 @@ def main():
     test_lexical_disabled(binary, 19532)
     test_lexical_recovery(binary, 19533)
     test_lexical_isolation(binary, 19534)
+    test_recall_latency_histogram(binary, 19535)
     test_tenant_quota(binary, 19488)
     test_tenant_rate_limit(binary, 19489)
     test_token_admin(binary, 19490)

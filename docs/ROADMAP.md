@@ -137,10 +137,10 @@ behind the provider seam.*
   `make eval EVAL_ARGS='--consolidate'`: seed duplicate clusters, assert the
   corpus shrinks without losing recall (starter run: 66 → 22 records, recall@10
   held at 93%).
-- **Remaining:** *semantic* contradiction detection ("prefers X, not Y" — vector-
-  similar but opposite) needs a model, so it belongs in the integration's write
-  path behind the provider seam (with 2.1 extraction), calling this server-side
-  supersession mechanism. Deferred, like LLM distillation was.
+- **Closed:** *semantic* contradiction detection ("prefers X, not Y" — vector-
+  similar but opposite) was the open thread here. It shipped in 2.1 as
+  `judge_supersedes` in the integration's write path, behind the provider seam,
+  calling this server-side supersession mechanism — see the 2.1 entry above.
 
 ### 2.3 Decay & forgetting policy — *shipped (`forget` op)*
 - **Why now:** recall is injected every turn — its size is a recurring token cost,
@@ -219,8 +219,17 @@ behind the provider seam.*
   "Memory-quality activity" dashboard panel. So the Horizon-2/3 work (dedup, decay,
   erase) is now visible in production, not just in the eval harness — the roadmap's
   "eviction/decay rates".
+- **Shipped (recall latency):** `search` dispatch time is now bucketed into a
+  histogram (`metrics.recall_latency` in `stats`, `aegisdb_recall_latency_seconds`
+  from the exporter, a p50/p95/p99 dashboard panel). Recall runs in the agent's
+  inner loop, so the tail is what matters and `dispatch_micros` — a cumulative
+  mean over *all* operations — hid it. `stats` also reports interpolated
+  percentiles directly, so an operator without Prometheus gets the number from
+  `aegisdb client stats`. Prompted by 4.1: v0.6.0 added a whole new index to the
+  recall path and told operators to watch its cost, without giving them an
+  instrument to see it.
 - **Remaining:** a standalone, pip-installable client SDK and framework adapters
-  beyond MCP; recall-latency histogram + distillation-lag metrics.
+  beyond MCP; distillation-lag metrics.
 
 ---
 

@@ -741,6 +741,7 @@ authentication when enabled (unlike `ping`). Available at every phase.
 | `uptime_ms` | Milliseconds since the database finished recovery at startup |
 | `durability` | Active durability mode (`sync`, `batch`, or `interval`) |
 | `fsync_batch` / `fsync_interval_ms` | The tuning value for the active mode (only the relevant one is present; `sync` has neither) |
+| `metrics.recall_latency` | Latency distribution of the `search` (recall) operation — absent until the first search, so a fresh server reports no distribution rather than an all-zero one. `count`, `micros_total`, `mean_micros`, interpolated `p50_micros`/`p95_micros`/`p99_micros`, and `buckets` keyed by upper bound in microseconds. Bucket counts are **cumulative** (Prometheus `le` semantics — each includes every faster bucket, and `+Inf` equals `count`), so a scraper can pass them straight through. Recall sits in an agent's inner loop, so this is the tail to alert on; `dispatch_micros` is a cumulative mean over *all* operations and hides it. |
 | `records` | Live (non-deleted) persisted records |
 | `tombstones` | Deleted-but-not-yet-compacted records still in the log |
 | `log_bytes` | Current size of `memory.log` on disk |

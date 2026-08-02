@@ -119,18 +119,40 @@ class Exposition:
             return
         self.add(name, "counter", help_text, [(labels or {}, value)])
 
+    def histogram(self, name, help_text, buckets, count, total):
+        """Emit a Prometheus histogram: `_bucket{le=...}` samples followed by
+        `_sum` and `_count`, all under one HELP/TYPE header carrying the **base**
+        name — the exposition format puts the suffixes on samples only.
+
+        `buckets` maps an upper bound (in the metric's own unit) to a
+        **cumulative** count, which is the shape the server already reports."""
+        if count is None or not buckets:
+            return
+        # +Inf must sort last; the finite bounds ascend numerically.
+        finite = sorted((b for b in buckets if b != "+Inf"), key=float)
+        samples = [({"le": _fmt(float(b))}, buckets[b], "_bucket")
+                   for b in finite]
+        samples.append(({"le": "+Inf"}, buckets.get("+Inf", count), "_bucket"))
+        samples.append(({}, total, "_sum"))
+        samples.append(({}, count, "_count"))
+        self._families.append((name, "histogram", help_text, samples))
+
     def render(self) -> str:
         out = []
         for name, mtype, help_text, samples in self._families:
             out.append(f"# HELP {name} {help_text}")
             out.append(f"# TYPE {name} {mtype}")
-            for labels, value in samples:
+            for sample in samples:
+                # A sample may carry a third element: a name suffix, which a
+                # histogram uses for _bucket/_sum/_count under one header.
+                labels, value = sample[0], sample[1]
+                sname = name + (sample[2] if len(sample) > 2 else "")
                 if labels:
                     inner = ",".join(f'{k}="{_esc_label(v)}"'
                                      for k, v in labels.items())
-                    out.append(f"{name}{{{inner}}} {_fmt(value)}")
+                    out.append(f"{sname}{{{inner}}} {_fmt(value)}")
                 else:
-                    out.append(f"{name} {_fmt(value)}")
+                    out.append(f"{sname} {_fmt(value)}")
         return "\n".join(out) + "\n"
 
 
@@ -213,6 +235,20 @@ def render(stats: dict, *, up: bool = True, scrape_seconds: float | None = None,
     e.add("aegisdb_requests_by_op_total", "counter",
           "Requests per operation.",
           [({"op": op}, v) for op, v in by_op.items()])
+
+    # ---- recall latency distribution ----
+    # Absent until the server has served a search, so a fresh server reports no
+    # histogram rather than an all-zero one. Bounds are microseconds on the wire
+    # and converted to seconds here, which is the Prometheus base unit.
+    rl = m.get("recall_latency") or {}
+    if rl.get("count"):
+        buckets = {
+            "+Inf" if b == "+Inf" else str(float(b) / 1e6): v
+            for b, v in (rl.get("buckets") or {}).items()
+        }
+        e.histogram("aegisdb_recall_latency_seconds",
+                    "Latency distribution of the search (recall) operation.",
+                    buckets, rl["count"], rl.get("micros_total", 0) / 1e6)
 
     # ---- memory-quality outcomes (dedup / decay / erase) ----
     if "memories_merged" in m:

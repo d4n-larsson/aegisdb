@@ -201,10 +201,31 @@
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     },
     {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Recall latency percentiles (search)",
+      "description": "Quantiles estimated from the server's recall-latency histogram. Recall sits in the agent's inner loop, so p95/p99 are what to alert on — an average hides the tail. Absent until the server has served a search.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 44 },
+      "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum(rate(aegisdb_recall_latency_seconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p50", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum(rate(aegisdb_recall_latency_seconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p95", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum(rate(aegisdb_recall_latency_seconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p99", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } },
+        { "refId": "D", "expr": "rate(aegisdb_recall_latency_seconds_sum[$__rate_interval]) / rate(aegisdb_recall_latency_seconds_count[$__rate_interval])", "legendFormat": "mean", "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 0, "lineWidth": 2 } }, "overrides": [
+        { "matcher": { "id": "byName", "options": "p99" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "#B5532E" } } ] },
+        { "matcher": { "id": "byName", "options": "p95" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "#C9A24B" } } ] },
+        { "matcher": { "id": "byName", "options": "p50" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "#5E8C84" } } ] },
+        { "matcher": { "id": "byName", "options": "mean" }, "properties": [ { "id": "custom.lineStyle", "value": { "dash": [ 6, 6 ], "fill": "dash" } } ] }
+      ] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
       "id": 14,
       "type": "table",
       "title": "Server info",
-      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 44 },
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 52 },
       "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" },
       "targets": [
         { "refId": "A", "expr": "aegisdb_info", "format": "table", "instant": true, "datasource": { "type": "prometheus", "uid": "aegisdb-prometheus" } }

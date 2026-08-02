@@ -99,6 +99,49 @@ class TestRender(unittest.TestCase):
         self.assertEqual(_value(text, "aegisdb_memories_purged_total"), "2")
         self.assertIn("# TYPE aegisdb_memories_forgotten_total counter", text)
 
+    def test_recall_latency_histogram(self):
+        """The server reports cumulative buckets in microseconds; the exporter
+        must emit a well-formed Prometheus histogram in seconds."""
+        s = dict(SAMPLE, metrics=dict(SAMPLE["metrics"], recall_latency={
+            "count": 10, "micros_total": 2500, "mean_micros": 250.0,
+            "p50_micros": 200.0, "p95_micros": 900.0, "p99_micros": 900.0,
+            "buckets": {"100": 3, "250": 7, "500": 9, "1000": 10,
+                        "+Inf": 10},
+        }))
+        text = render(s, up=True)
+        # One HELP/TYPE header on the *base* name; suffixes live on samples only.
+        self.assertIn("# TYPE aegisdb_recall_latency_seconds histogram", text)
+        self.assertNotIn("# TYPE aegisdb_recall_latency_seconds_bucket", text)
+        # microseconds -> seconds
+        self.assertIn('aegisdb_recall_latency_seconds_bucket{le="0.0001"} 3', text)
+        self.assertIn('aegisdb_recall_latency_seconds_bucket{le="0.00025"} 7', text)
+        self.assertIn('aegisdb_recall_latency_seconds_bucket{le="+Inf"} 10', text)
+        self.assertEqual(
+            float(_value(text, "aegisdb_recall_latency_seconds_sum")), 0.0025)
+        self.assertEqual(_value(text, "aegisdb_recall_latency_seconds_count"), "10")
+
+    def test_recall_latency_buckets_are_ordered_with_inf_last(self):
+        """Prometheus requires ascending `le` with +Inf last; dict order from the
+        server must not be trusted for that."""
+        s = dict(SAMPLE, metrics=dict(SAMPLE["metrics"], recall_latency={
+            "count": 4, "micros_total": 400,
+            "buckets": {"+Inf": 4, "1000": 4, "100": 1, "250": 3},
+        }))
+        text = render(s, up=True)
+        les = [ln.split('le="')[1].split('"')[0] for ln in text.splitlines()
+               if ln.startswith("aegisdb_recall_latency_seconds_bucket")]
+        self.assertEqual(les, ["0.0001", "0.00025", "0.001", "+Inf"])
+
+    def test_recall_latency_absent_before_first_search(self):
+        """A server that has served no search omits the block; a zero-count one
+        must not render an all-zero histogram either."""
+        s = dict(SAMPLE, metrics=dict(SAMPLE["metrics"]))
+        self.assertNotIn("aegisdb_recall_latency_seconds", render(s, up=True))
+        s2 = dict(SAMPLE, metrics=dict(SAMPLE["metrics"],
+                                       recall_latency={"count": 0,
+                                                       "buckets": {}}))
+        self.assertNotIn("aegisdb_recall_latency_seconds", render(s2, up=True))
+
     def test_memory_quality_absent_when_missing(self):
         # older servers without these fields -> the metrics are simply omitted
         s = dict(SAMPLE, metrics={"requests": 1, "errors": 0, "unauthorized": 0})
