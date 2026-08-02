@@ -961,7 +961,7 @@ static cJSON *handle_forget(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     float usage_weight = (jr_f64(req, "usage_weight", &d) == 0)
                              ? (float)d
                              : FORGET_DEFAULT_USAGE_WEIGHT;
-    if (usage_weight < 0.0f) {
+    if (usage_weight < 0.0F) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     }
 

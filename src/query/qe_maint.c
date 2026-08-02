@@ -567,7 +567,7 @@ aegis_status_t qe_forget(AegisDB *db, const char *ns, MemoryType type,
          *    evidence of use, not proof of value. */
         uint64_t basis = r.updated;
         double use_boost = 1.0;
-        if (usage_weight > 0.0f && db->usage) {
+        if (usage_weight > 0.0F && db->usage) {
             uint32_t recalls = 0;
             uint64_t last = 0;
             if (usage_index_get(db->usage, r.id, &recalls, &last) == 0) {
