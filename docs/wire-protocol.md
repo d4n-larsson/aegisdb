@@ -156,6 +156,7 @@ retrieval, and counting it would let a tool that walks ids inflate every record.
 | `embeddings` | number[][] | No | Multiple vectors for one record (each `--embedding-dim` long, up to 64), stored and returned together. Use instead of `embedding`. Semantic search scores the record by its best-matching vector (best-of-N) and returns it once. |
 | `agent_id` | string | No | Namespace the record to an agent; scopes `get`/`search`/`traverse` |
 | `session_id` | string | Working only | Required to create working memory |
+| `fact` | object | No | A machine-readable assertion alongside the prose in `data`: `{"s": <record id>, "p": "<predicate>", "o": "<literal>" \| {"id": <record id>}}`. See below |
 | `ttl_ms` | integer | No | Time-to-live in ms. For episodic/semantic, an opt-in TTL: the record is archived (hidden from recall, then reclaimed) once `created + ttl_ms` passes; omit or `0` = never expires. For working memory, its buffer expiry. |
 
 **Response (success)**:
@@ -179,6 +180,41 @@ retrieval, and counting it would let a tool that walks ids inflate every record.
 A `MemoryRecord` also carries `agent_id`, `embedding`, and `relationships` (an
 array of `{ "from_id", "to_id", "kind" }`) when those are set. `relationships`
 is populated by `relate` and returned by `get`, `search`, and `traverse`.
+
+**Typed facts (`fact`)**: a record's `data` is prose, which can be searched by
+its words but not *asked* a question. An optional `fact` adds the same claim in a
+form a machine can match on — subject, predicate, object — without replacing the
+prose, which stays what a human or a model reads. Neither is derived from the
+other; a writer supplies both.
+
+```json
+{ "operation": "insert", "type": "semantic",
+  "data": "The recall hook defaults to embedding_mode=none.",
+  "fact": { "s": 42, "p": "defaults_to", "o": "none" } }
+```
+
+| Position | Notes |
+|----------|-------|
+| `s` | The **record id** the fact is about. Entities are records: to say something about "the recall hook", insert a record for it first (conventionally a `semantic` record tagged `entity`) and use its id |
+| `p` | The predicate, at most 64 bytes. A longer one is `INVALID_REQUEST` — it is the limit the fact indexes can intern, and an un-internable predicate would make the fact unreachable by any `pattern` naming it |
+| `o` | Either a **literal string**, or `{"id": N}` to reference another record. A bare number is rejected: it would be ambiguous between an id and a literal, and numeric literals do not exist |
+
+The fact is echoed back by `insert`, `get`, `search`, and `traverse` exactly as
+written, and **absent entirely** on a record that carries none.
+
+Three deliberate properties:
+
+- **A fact is immutable.** `update` changes tags and the payload and leaves the
+  fact untouched. Changing what a record asserts is a supersession, not an edit,
+  so it leaves an auditable chain rather than rewriting what the record used to
+  claim.
+- **The referenced ids need not exist.** A fact may name a subject or object
+  written later — or never. This keeps a batch that inserts an entity *and* a
+  fact about it in one request from being refused, and costs nothing in
+  isolation terms: the fact lives on the asserting record, so a `pattern` search
+  still returns only records the caller owns.
+- **The fact is stored even under `--no-fact-index`.** The record keeps what it
+  asserts; only the lookups go away.
 
 **Batch insert**: supply a `records` array (each element a record body as above,
 up to 1000) instead of a single record. Every element is validated first, so a
@@ -858,8 +894,8 @@ authentication when enabled (unlike `ping`). Available at every phase.
 | `tombstones` | Deleted-but-not-yet-compacted records still in the log |
 | `log_bytes` | Current size of `memory.log` on disk |
 | `log_flush_pending` | `true` if writes have not yet been `fsync`'d — the current durability lag |
-| `indexes` | Per-index entry counts (`semantic` is the brute-force vector count; watch it for scale). `lexical_terms`/`lexical_docs` are the distinct terms and indexed payloads in the BM25 index, both `0` under `--no-lexical-index`. `edges`/`edge_kinds` are the indexed incoming edges and the distinct kinds they carry, both `0` under `--no-edge-index` |
-| `memory` | Approximate resident bytes per in-RAM index — `hash_bytes`, `time_bytes`, `tag_bytes`, `lexical_bytes`, `edge_bytes`, `usage_bytes`, `semantic_bytes`, `index_bytes_total`, and `index_bytes_limit` (the configured `--max-index-bytes` cap; 0 = unlimited). Indexes are held in memory and grow with the dataset (the semantic vectors usually dominate), so this is the figure to monitor/alert on; past the limit inserts return `MEMORY_LIMIT`. Excludes allocator overhead. |
+| `indexes` | Per-index entry counts (`semantic` is the brute-force vector count; watch it for scale). `lexical_terms`/`lexical_docs` are the distinct terms and indexed payloads in the BM25 index, both `0` under `--no-lexical-index`. `edges`/`edge_kinds` are the indexed incoming edges and the distinct kinds they carry, both `0` under `--no-edge-index`. `facts`/`fact_predicates` are the indexed typed facts and the distinct predicates in use, both `0` under `--no-fact-index` |
+| `memory` | Approximate resident bytes per in-RAM index — `hash_bytes`, `time_bytes`, `tag_bytes`, `lexical_bytes`, `edge_bytes`, `fact_bytes`, `usage_bytes`, `semantic_bytes`, `index_bytes_total`, and `index_bytes_limit` (the configured `--max-index-bytes` cap; 0 = unlimited). Indexes are held in memory and grow with the dataset (the semantic vectors usually dominate), so this is the figure to monitor/alert on; past the limit inserts return `MEMORY_LIMIT`. Excludes allocator overhead. |
 | `next_id` | The id the next persisted insert will receive |
 | `metrics` | Monotonic operational counters since startup (below) |
 

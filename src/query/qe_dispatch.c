@@ -94,6 +94,64 @@ static int want_embeddings(const cJSON *req) {
     return jr_bool(req, "include_embeddings", 1);
 }
 
+/* Parse an optional `fact` (ROADMAP 5.2) onto the record being built.
+ *   "fact": { "s": <id>, "p": "<predicate>", "o": "<literal>" | {"id": <id>} }
+ * Returns 0 (including when absent) or -1 with *err set.
+ *
+ * The subject and an id-valued object are **not** checked for existence.
+ * Mirroring `relate` was tempting, but a batch that inserts an entity and a
+ * fact about it in one request would then be refused for referencing a record
+ * that is written moments later — and the extractor path this exists for wants
+ * exactly that shape. A dangling reference is also not a security question: the
+ * fact lives on the *asserting* record, which carries the caller's namespace, so
+ * a pattern search still only ever returns records the caller owns. Asserting
+ * something about an id you cannot see reveals nothing about it. */
+static int build_fact(const cJSON *req, MemoryRecord *in, aegis_status_t *err) {
+    const cJSON *f = cJSON_GetObjectItemCaseSensitive(req, "fact");
+    if (!f || cJSON_IsNull(f)) {
+        return 0;
+    }
+    if (!cJSON_IsObject(f)) {
+        *err = AEGIS_ERR_INVALID_REQUEST;
+        return -1;
+    }
+    uint64_t subject = 0;
+    const char *pred = jr_str(f, "p", NULL);
+    if (jr_u64(f, "s", &subject) != 0 || !pred || !*pred) {
+        *err = AEGIS_ERR_INVALID_REQUEST;
+        return -1;
+    }
+    /* Bounded so the fact indexes can always intern it. Past this the fact
+     * would be stored but unreachable by any pattern naming its predicate,
+     * which is a worse outcome than refusing the write. */
+    if (strlen(pred) > FACT_MAX_PREDICATE_LEN) {
+        *err = AEGIS_ERR_INVALID_REQUEST;
+        return -1;
+    }
+    const cJSON *jo = cJSON_GetObjectItemCaseSensitive(f, "o");
+    if (cJSON_IsString(jo) && jo->valuestring) {
+        if (record_set_fact(in, FACT_OBJ_STRING, subject, pred, 0,
+                            jo->valuestring) != 0) {
+            *err = AEGIS_ERR_INTERNAL;
+            return -1;
+        }
+        return 0;
+    }
+    uint64_t oid = 0;
+    if (cJSON_IsObject(jo) && jr_u64(jo, "id", &oid) == 0) {
+        if (record_set_fact(in, FACT_OBJ_ID, subject, pred, oid, NULL) != 0) {
+            *err = AEGIS_ERR_INTERNAL;
+            return -1;
+        }
+        return 0;
+    }
+    /* A bare number is deliberately not an object: it would be ambiguous
+     * between an id reference and a numeric literal, and numeric literals do
+     * not exist (see docs/typed-facts-design.md §5). */
+    *err = AEGIS_ERR_INVALID_REQUEST;
+    return -1;
+}
+
 static int build_input_record(AegisDB *db, const cJSON *req, MemoryRecord *in,
                               aegis_status_t *err) {
     record_init(in);
@@ -129,6 +187,9 @@ static int build_input_record(AegisDB *db, const cJSON *req, MemoryRecord *in,
             *err = AEGIS_ERR_INTERNAL;
             return -1;
         }
+    }
+    if (build_fact(req, in, err) != 0) {
+        return -1;
     }
     const char **tags = NULL;
     size_t tn = 0;
@@ -258,6 +319,12 @@ static void stats_add_storage(cJSON *o, AegisDB *db) {
                                 (double)edge_index_edges(db->edges));
         cJSON_AddNumberToObject(idx, "edge_kinds",
                                 (double)edge_index_kinds(db->edges));
+        /* Indexed facts and the distinct predicates they use; both 0 with
+         * --no-fact-index. */
+        cJSON_AddNumberToObject(idx, "facts",
+                                (double)fact_index_facts(db->facts));
+        cJSON_AddNumberToObject(idx, "fact_predicates",
+                                (double)fact_index_predicates(db->facts));
         cJSON_AddNumberToObject(idx, "usage_tracked",
                                 (double)usage_index_count(db->usage));
         cJSON_AddNumberToObject(idx, "semantic",
@@ -276,6 +343,7 @@ static void stats_add_storage(cJSON *o, AegisDB *db) {
         size_t gb = tag_index_bytes(db->tags);
         size_t lb = lexical_index_bytes(db->lex);
         size_t eb = edge_index_bytes(db->edges);
+        size_t fb = fact_index_bytes(db->facts);
         size_t ub = usage_index_bytes(db->usage);
         size_t sb = semantic_index_bytes(db->sem);
         cJSON_AddNumberToObject(mem, "hash_bytes", (double)hb);
@@ -283,10 +351,12 @@ static void stats_add_storage(cJSON *o, AegisDB *db) {
         cJSON_AddNumberToObject(mem, "tag_bytes", (double)gb);
         cJSON_AddNumberToObject(mem, "lexical_bytes", (double)lb);
         cJSON_AddNumberToObject(mem, "edge_bytes", (double)eb);
+        cJSON_AddNumberToObject(mem, "fact_bytes", (double)fb);
         cJSON_AddNumberToObject(mem, "usage_bytes", (double)ub);
         cJSON_AddNumberToObject(mem, "semantic_bytes", (double)sb);
-        cJSON_AddNumberToObject(mem, "index_bytes_total",
-                                (double)(hb + tb + gb + lb + eb + ub + sb));
+        cJSON_AddNumberToObject(
+            mem, "index_bytes_total",
+            (double)(hb + tb + gb + lb + eb + fb + ub + sb));
         /* The configured backpressure cap (0 = unlimited), so a scraper can
          * alert on index_bytes_total approaching it. */
         cJSON_AddNumberToObject(mem, "index_bytes_limit",

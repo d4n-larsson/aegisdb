@@ -277,9 +277,12 @@ the registry a *contract* the 5.4 extractor can be prompted against.
   in-RAM index; the write path already holds it exclusively at each site. No new
   lock, no change to the `index_lock` → `log_lock` order.
 - **Maintenance sites.** The same set 5.1 enumerated: `qe_insert` (a fact
-  arrives with the record here, unlike edges), `qe_update` (a fact is
-  immutable — see §13), `qe_delete`, `db_replica_apply`, and the `recovery.c`
-  rebuild. `qe_relate` is not among them.
+  arrives with the record here, unlike edges), `qe_update` (a no-op: a fact is
+  immutable, see §13), `qe_delete`, `db_replica_apply`, and the `recovery.c`
+  rebuild. `qe_relate` is not among them. All four live sites go through one
+  helper, `db_fact_index_apply`, so the argument order and the has-no-fact case
+  cannot drift apart between them — which is how 5.1's recovery-vs-replica
+  divergence happened.
 - **Recovery** rebuilds both indexes in the pass that already walks the live
   set. Unlike 5.1's edges, no target-liveness check is needed for the
   `(s,p)` side — a fact is a property of the record holding it. An `o` that is a
@@ -356,12 +359,22 @@ un-negotiated one, regardless of facts.
 
 ## 13. Open questions
 
-- **Is a fact immutable?** `update` today can change `data`, tags, importance,
-  confidence — but a semantic record's *meaning* changing while its triple stays
-  put would be worse than either. Leaning: a fact is set at insert and never
-  patched; changing what a record asserts means superseding it, which is the
-  mechanism 2.1/2.2 already provide and which leaves an auditable chain. That
-  also keeps the fact indexes out of the `update` path entirely.
+- ~~**Is a fact immutable?**~~ **Decided (PR 4): yes.** A fact is set at insert
+  and never patched. Changing what a record asserts is a supersession, not an
+  edit — that is the mechanism 2.1/2.2 already provide, and it leaves an
+  auditable chain instead of silently rewriting what the record used to claim.
+  It also keeps the fact indexes out of the `update` path entirely, so there is
+  no swing-the-index-on-patch case to get wrong (the shape that needed care for
+  tags and the payload).
+- ~~**Must the subject exist?**~~ **Decided (PR 4): no.** Mirroring `relate`'s
+  endpoint check was the obvious move and is wrong here: a batch inserting an
+  entity record *and* a fact about it — exactly the shape 5.4's extractor wants
+  — would be refused for referencing a record written moments later. It is also
+  not a security question, since the fact lives on the asserting record and
+  carries that record's namespace, so a pattern search still returns only what
+  the caller owns; asserting something about an id you cannot see reveals nothing
+  about it. Dangling references are the caller's to manage, consistent with how
+  §8 already treats a dangling id-valued object.
 - **Should `o` as an id-ref also create an edge?** It is tempting — the reverse
   edge index would then answer "what facts point at this record?" for free. But
   it doubles the write cost of a fact (a `relate` rewrites the record) and

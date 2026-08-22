@@ -7,6 +7,7 @@
 
 #include "aegisdb/config.h"
 #include "aegisdb/edge_index.h"
+#include "aegisdb/fact_index.h"
 #include "aegisdb/hash_index.h"
 #include "aegisdb/lexical_index.h"
 #include "aegisdb/log.h"
@@ -84,6 +85,8 @@ typedef struct {
     TagIndex *tags;        /* tag -> ids (Phase 2) */
     LexicalIndex *lex;     /* term -> postings, BM25 (ROADMAP 4.1); NULL when
                             * --no-lexical-index disabled it */
+    FactIndex *facts;      /* subject/object/predicate -> records (ROADMAP 5.2);
+                            * NULL when --no-fact-index disabled it */
     EdgeIndex *edges;      /* to_id -> incoming sources (ROADMAP 5.1); NULL when
                             * --no-edge-index disabled it. Only the *reverse*
                             * direction: a record is its own forward adjacency
@@ -139,6 +142,11 @@ typedef struct {
 /* Open the database: create data dir, open log, build indexes, run recovery. */
 int db_open(AegisDB *db, const Config *cfg);
 void db_close(AegisDB *db);
+
+/* Index (add != 0) or unindex a record's fact in the fact indexes. A no-op when
+ * the record carries none or --no-fact-index disabled them. Shared by the insert,
+ * delete, replica-apply and recovery paths so they cannot drift. */
+void db_fact_index_apply(AegisDB *db, const MemoryRecord *r, int add);
 
 /* Current wall-clock time in epoch milliseconds. */
 uint64_t db_now_ms(void);

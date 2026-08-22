@@ -103,6 +103,12 @@ typedef struct {
      * Disabled, a reverse `traverse` returns NOT_READY and the forward walk is
      * unaffected (the record is its own forward adjacency list). */
     int edge_index;
+    /* Build the fact indexes (ROADMAP 5.2), which is what lets `search` take a
+     * `pattern` filter. On by default; --no-fact-index turns it off, trading
+     * triple lookups for their RAM. Disabled, a `pattern` returns NOT_READY and
+     * a `fact` on `insert` is still stored durably — the record keeps what it
+     * asserts, it just is not indexed by it. */
+    int fact_index;
     /* Soft cap on total in-RAM index bytes (hash+time+tag+lexical+edge+semantic).
      * Inserts are
      * refused with MEMORY_LIMIT once the sampled index size reaches this, so a

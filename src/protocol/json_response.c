@@ -21,6 +21,26 @@ cJSON *json_record(const MemoryRecord *r, int include_embeddings) {
         cJSON_AddStringToObject(o, "agent_id", r->agent_id);
     }
 
+    /* The machine-readable assertion, when the record carries one (ROADMAP
+     * 5.2). An id-valued object is emitted as {"id": N} so it stays
+     * distinguishable from a literal that happens to look like a number. */
+    if (r->fact.kind != FACT_NONE && r->fact.predicate) {
+        cJSON *fact = cJSON_AddObjectToObject(o, "fact");
+        if (fact) {
+            cJSON_AddNumberToObject(fact, "s", (double)r->fact.subject);
+            cJSON_AddStringToObject(fact, "p", r->fact.predicate);
+            if (r->fact.kind == FACT_OBJ_ID) {
+                cJSON *obj = cJSON_AddObjectToObject(fact, "o");
+                if (obj) {
+                    cJSON_AddNumberToObject(obj, "id",
+                                            (double)r->fact.object_id);
+                }
+            } else if (r->fact.object_str) {
+                cJSON_AddStringToObject(fact, "o", r->fact.object_str);
+            }
+        }
+    }
+
     cJSON *tags = cJSON_AddArrayToObject(o, "tags");
     for (size_t i = 0; i < r->tag_count; i++) {
         cJSON_AddItemToArray(tags, cJSON_CreateString(r->tags[i]));

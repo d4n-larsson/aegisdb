@@ -1048,7 +1048,19 @@ def _fake_replica(repl_port, token, codec_version, want=2, timeout=5.0):
     if codec_version is not None:
         hs["codec_version"] = codec_version
     s.sendall((json.dumps(hs) + "\n").encode())
-    resp = json.loads(s.makefile().readline())
+
+    # Read the handshake line byte at a time, in binary. A buffered text-mode
+    # makefile() would read ahead past the newline into the binary frames that
+    # follow immediately — and those contain both 0x0a and invalid UTF-8, so it
+    # would either swallow a frame or fail to decode. (It did, intermittently,
+    # depending on how quickly the primary started streaming.)
+    line = b""
+    while not line.endswith(b"\n"):
+        ch = s.recv(1)
+        if not ch:
+            break
+        line += ch
+    resp = json.loads(line.decode())
 
     types = []
     try:
@@ -1114,6 +1126,193 @@ def test_replication_codec_gate(binary, port):
               "an unreadable frame yields MSG_INCOMPATIBLE, not the frame")
         check(MSG_FRAME not in kinds,
               "the undecodable frame is never sent")
+
+
+def test_typed_facts(binary, port):
+    print("[typed facts: stored, echoed, indexed, rebuilt (ROADMAP 5.2)]")
+    datadir = tempfile.mkdtemp(prefix="aegis_facts_")
+
+    def stats_facts(srv):
+        st = srv.req({"operation": "stats"})
+        return st["indexes"]["facts"], st["indexes"]["fact_predicates"]
+
+    with Server(binary, port, phase=4, datadir=datadir) as srv:
+        def ins(data, fact=None, **kw):
+            p = {"operation": "insert", "type": "semantic", "data": data}
+            if fact is not None:
+                p["fact"] = fact
+            p.update(kw)
+            return srv.req(p)
+
+        check(stats_facts(srv) == (0, 0), "a fresh server indexes no facts")
+
+        # entity records: the convention a fact's subject refers to
+        hook = ins("the recall hook")["record"]["id"]
+        storage = ins("the storage layer")["record"]["id"]
+
+        # a literal-object fact round-trips through the response
+        r = ins("The recall hook defaults to embedding_mode=none.",
+                {"s": hook, "p": "defaults_to", "o": "none"})
+        check(r.get("ok") is True, "insert with a literal-object fact")
+        f = r["record"].get("fact")
+        check(f == {"s": hook, "p": "defaults_to", "o": "none"},
+              "the fact is echoed as written")
+        lit = r["record"]["id"]
+
+        # an id-object fact uses {"id": N} so it cannot be confused with a
+        # literal that happens to look like a number
+        r = ins("hnsw.c is part of the storage layer",
+                {"s": hook, "p": "part_of", "o": {"id": storage}})
+        check(r["record"].get("fact") == {"s": hook, "p": "part_of",
+                                          "o": {"id": storage}},
+              "an id-valued object round-trips as {id: N}")
+        idf = r["record"]["id"]
+
+        check(stats_facts(srv) == (2, 2), "both facts indexed, two predicates")
+
+        # get echoes it too, not just insert
+        r = srv.req({"operation": "get", "id": lit})
+        check(r["record"].get("fact", {}).get("p") == "defaults_to",
+              "get echoes the fact")
+
+        # a record with no fact has no fact key at all
+        r = srv.req({"operation": "get", "id": hook})
+        check("fact" not in r["record"],
+              "a fact-less record carries no fact field")
+
+        # --- validation ---
+        bad = [
+            ({"p": "x", "o": "y"}, "missing subject"),
+            ({"s": hook, "o": "y"}, "missing predicate"),
+            ({"s": hook, "p": "", "o": "y"}, "empty predicate"),
+            ({"s": hook, "p": "x"}, "missing object"),
+            ({"s": hook, "p": "x", "o": 42}, "a bare number is not an object"),
+            ({"s": hook, "p": "x", "o": {"nope": 1}}, "an object without id"),
+            ({"s": hook, "p": "k" * 65, "o": "y"}, "an over-long predicate"),
+            ("not-an-object", "a non-object fact"),
+        ]
+        for fact, why in bad:
+            r = ins("bad", fact)
+            check(r.get("ok") is False
+                  and r["error"]["code"] == "INVALID_REQUEST",
+                  f"rejected: {why}")
+        check(stats_facts(srv) == (2, 2), "no rejected fact was indexed")
+
+        # a predicate at exactly the limit is fine
+        r = ins("at the limit", {"s": hook, "p": "k" * 64, "o": "y"})
+        check(r.get("ok") is True, "a 64-byte predicate is accepted")
+
+        # --- delete unindexes ---
+        srv.req({"operation": "delete", "id": idf})
+        check(stats_facts(srv)[0] == 2, "deleting a record drops its fact")
+
+        # --- update leaves the fact alone (it is immutable by design) ---
+        srv.req({"operation": "update", "id": lit, "data": "reworded"})
+        r = srv.req({"operation": "get", "id": lit})
+        check(r["record"].get("fact", {}).get("o") == "none",
+              "an update does not disturb the fact")
+        check(stats_facts(srv)[0] == 2, "nor the fact index")
+        before = stats_facts(srv)
+        srv.graceful_stop()
+
+    # derived and never checkpointed: recovery must rebuild all of it
+    with Server(binary, port, phase=4, datadir=datadir) as srv:
+        check(stats_facts(srv) == before,
+              f"restart rebuilds the same facts {before}")
+        r = srv.req({"operation": "get", "id": lit})
+        check(r["record"].get("fact", {}).get("p") == "defaults_to",
+              "the fact survives the restart durably, not just in the index")
+
+    # --no-fact-index: the fact is still stored, just not indexed
+    d2 = tempfile.mkdtemp(prefix="aegis_nofacts_")
+    with Server(binary, port, phase=4, datadir=d2,
+                extra_args=["--no-fact-index"]) as srv:
+        e = srv.req({"operation": "insert", "type": "semantic",
+                     "data": "e"})["record"]["id"]
+        r = srv.req({"operation": "insert", "type": "semantic", "data": "f",
+                     "fact": {"s": e, "p": "defaults_to", "o": "none"}})
+        check(r.get("ok") is True, "--no-fact-index still accepts a fact")
+        check(r["record"].get("fact", {}).get("o") == "none",
+              "and still stores it: the record keeps what it asserts")
+        st = srv.req({"operation": "stats"})
+        check(st["indexes"]["facts"] == 0 and st["memory"]["fact_bytes"] == 0,
+              "but indexes nothing and costs no fact RAM")
+
+
+def test_codec_gate_with_a_real_v3_frame(binary, port):
+    print("[replication: a real v3 frame is withheld from an older replica]")
+    repl_port = port + 1
+    tok = "repl-secret"
+    with Server(binary, port, extra_args=[
+            "--replication-port", str(repl_port),
+            "--replication-token", tok]) as primary:
+        subj = primary.req({"operation": "insert", "type": "semantic",
+                            "data": "subject"})["record"]["id"]
+        primary.req({"operation": "insert", "type": "semantic",
+                     "data": "a fact", "fact": {
+                         "s": subj, "p": "defaults_to", "o": "none"}})
+
+        # PR 2 could only exercise the gate with a contrived codec_version of 1,
+        # because nothing could write a v3 frame yet. Now one exists, so this is
+        # the real case: a replica that reads up to v2 must get the v2 frames
+        # and then be told, not handed the v3 one.
+        _, msgs = _fake_replica(repl_port, tok, codec_version=2, want=5)
+        kinds = [m[0] for m in msgs]
+        versions = [m[1][0] for m in msgs if m[0] == MSG_FRAME and m[1]]
+        check(2 in versions, "the fact-less frames still stream as v2")
+        check(3 not in versions, "the v3 frame is never sent to a v2 replica")
+        check(MSG_INCOMPATIBLE in kinds,
+              "the replica is told why the stream stopped")
+
+        # ...and a current replica receives it, v3 and all.
+        _, msgs = _fake_replica(repl_port, tok, codec_version=3, want=5)
+        versions = [m[1][0] for m in msgs if m[0] == MSG_FRAME and m[1]]
+        check(3 in versions, "a v3-capable replica receives the v3 frame")
+        check(MSG_INCOMPATIBLE not in [m[0] for m in msgs],
+              "and is not refused")
+
+
+def test_typed_facts_replica_parity(binary, port):
+    print("[typed facts: a replica indexes them identically]")
+    repl_port = port + 1
+    replica_port = port + 2
+    tok = "repl-secret"
+    with Server(binary, port, extra_args=[
+            "--replication-port", str(repl_port),
+            "--replication-token", tok]) as primary:
+        with Server(binary, replica_port, extra_args=[
+                "--replicate-from", f"127.0.0.1:{repl_port}",
+                "--replication-token", tok]) as replica:
+
+            def facts(srv):
+                return srv.req({"operation": "stats"})["indexes"]["facts"]
+
+            def wait_facts(want, tries=60):
+                for _ in range(tries):
+                    if facts(replica) == want:
+                        return True
+                    time.sleep(0.1)
+                return facts(replica) == want
+
+            subj = primary.req({"operation": "insert", "type": "semantic",
+                                "data": "subject"})["record"]["id"]
+            r = primary.req({"operation": "insert", "type": "semantic",
+                             "data": "a fact", "fact": {
+                                 "s": subj, "p": "defaults_to", "o": "none"}})
+            fid = r["record"]["id"]
+            check(facts(primary) == 1, "primary indexed the fact")
+            check(wait_facts(1), "replica indexed the replicated fact")
+
+            # This is also the first end-to-end exercise of the PR-2 codec gate:
+            # the frame carrying a fact is codec v3, and a same-version replica
+            # must accept it rather than be refused.
+            r = replica.req({"operation": "get", "id": fid})
+            check(r.get("record", {}).get("fact", {}).get("o") == "none",
+                  "the fact itself replicated, not just the count")
+
+            primary.req({"operation": "delete", "id": fid})
+            check(facts(primary) == 0, "primary dropped it")
+            check(wait_facts(0), "replica dropped it too")
 
 
 def test_consolidate(binary, port):
@@ -3023,7 +3222,10 @@ def main():
     test_tenant_rate_limit(binary, 19489)
     test_token_admin(binary, 19490)
     test_replication(binary, 19520)
-    test_replication_codec_gate(binary, 19527)  # uses port, +1  # uses port, +1 (repl stream), +2 (replica)
+    test_replication_codec_gate(binary, 19527)  # uses port, +1
+    test_typed_facts(binary, 19547)
+    test_codec_gate_with_a_real_v3_frame(binary, 19549)  # uses port, +1
+    test_typed_facts_replica_parity(binary, 19548)  # uses port, +1, +2  # uses port, +1 (repl stream), +2 (replica)
     test_replication_encrypted(binary, 19525)  # uses port, +1, +2, +12
     test_replication_preauth(binary, 19523)  # uses port, +1 (repl stream)
     test_snapshot(binary, 19483)
