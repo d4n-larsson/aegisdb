@@ -666,8 +666,15 @@ static aegis_status_t parse_pattern(AegisDB *db, const cJSON *req,
     const cJSON *js = cJSON_GetObjectItemCaseSensitive(pat, "s");
     if (js && !cJSON_IsNull(js)) {
         if (cJSON_IsNumber(js)) {
+            /* Through jr_u64, not a bare cast: converting a negative or
+             * >= 2^64 double to uint64_t is undefined, and in practice yields
+             * a garbage subject that silently matches the wrong facts (or
+             * traps, under a -fsanitize=float-cast-overflow build). The object
+             * position below already goes through it. */
+            if (jr_u64(pat, "s", &p->pat_subject) != 0) {
+                return AEGIS_ERR_INVALID_REQUEST;
+            }
             p->pat_has_subject = 1;
-            p->pat_subject = (uint64_t)js->valuedouble;
         } else if (!(cJSON_IsString(js) && js->valuestring &&
                      strcmp(js->valuestring, "*") == 0)) {
             return AEGIS_ERR_INVALID_REQUEST;

@@ -311,6 +311,8 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
         if (predicate_registry_check(db->predicates, rec->fact.predicate,
                                      rec->fact.kind, why, sizeof why) != 0) {
             LOG_DEBUG("insert refused: %s", why);
+            record_free(rec);
+            free(rec);
             return AEGIS_ERR_INVALID_REQUEST;
         }
     }

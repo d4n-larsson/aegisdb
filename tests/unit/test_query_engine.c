@@ -1200,6 +1200,62 @@ static void test_ns_scoped_writes(void) {
     TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_delete(&g_db, sid, "agent-A"));
 }
 
+/* A registry-rejected insert must free the record clone qe_insert has already
+ * made. The leak is invisible to a functional assertion — only LSan sees it —
+ * so this exists to give the sanitizer build something to trip over. Looped so
+ * a regression reports a run of blocks rather than one stray allocation. */
+static void test_insert_registry_reject_frees_clone(void) {
+    char dir[256];
+    char reg[300];
+    snprintf(dir, sizeof(dir), "/tmp/aegis_qereg_%d_%ld", (int)getpid(),
+             (long)random());
+    snprintf(reg, sizeof(reg), "%s.registry.json", dir);
+    char cmd[700];
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dir);
+    (void)!system(cmd);
+    FILE *rf = fopen(reg, "w");
+    TEST_ASSERT_NOT_NULL(rf);
+    fputs("{\"defaults_to\": {\"object\": \"string\"}}", rf);
+    fclose(rf);
+
+    Config cfg;
+    config_defaults(&cfg);
+    strncpy(cfg.data_dir, dir, sizeof(cfg.data_dir) - 1);
+    strncpy(cfg.predicate_registry, reg, sizeof(cfg.predicate_registry) - 1);
+    cfg.embedding_dimensions = 3;
+    AegisDB db;
+    TEST_ASSERT_EQUAL_INT(0, db_open(&db, &cfg));
+
+    for (int i = 0; i < 8; i++) {
+        MemoryRecord in = make_input(MEM_SEMANTIC, "refused");
+        const char *tags[] = {"entity"};
+        record_set_tags(&in, tags, 1);
+        TEST_ASSERT_EQUAL_INT(
+            0, record_set_fact(&in, FACT_OBJ_STRING, 1, "undeclared", 0, "x"));
+        MemoryRecord out;
+        TEST_ASSERT_EQUAL_INT(AEGIS_ERR_INVALID_REQUEST,
+                              qe_insert(&db, &in, NULL, 0, &out));
+        in.data = NULL; /* borrowed literal */
+        in.data_len = 0;
+        record_free(&in);
+    }
+
+    /* And the registry is not simply refusing everything. */
+    MemoryRecord ok_in = make_input(MEM_SEMANTIC, "accepted");
+    TEST_ASSERT_EQUAL_INT(0, record_set_fact(&ok_in, FACT_OBJ_STRING, 1,
+                                             "defaults_to", 0, "none"));
+    MemoryRecord ok_out;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&db, &ok_in, NULL, 0, &ok_out));
+    ok_in.data = NULL;
+    ok_in.data_len = 0;
+    record_free(&ok_in);
+    record_free(&ok_out);
+
+    db_close(&db);
+    (void)!system(cmd);
+    unlink(reg);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_insert_get_episodic);
@@ -1229,5 +1285,6 @@ int main(void) {
     RUN_TEST(test_relate_dedup_and_selfedge);
     RUN_TEST(test_agent_namespace_filter);
     RUN_TEST(test_ns_scoped_writes);
+    RUN_TEST(test_insert_registry_reject_frees_clone);
     return UNITY_END();
 }

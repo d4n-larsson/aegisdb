@@ -1540,6 +1540,17 @@ def test_pattern_search(binary, port):
         r = find({"s": "forty-two"})
         check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
               "a non-numeric subject is refused")
+        # Out of range for a uint64: converting such a double is undefined, so
+        # the parse has to reject it rather than let it through as a garbage
+        # subject that silently matches the wrong facts. Verified to fail
+        # against the unguarded cast.
+        for bad in (-1, 1e30):
+            r = find({"s": bad})
+            check(r.get("ok") is False
+                  and r["error"]["code"] == "INVALID_REQUEST",
+                  f"an out-of-range subject {bad!r} is refused")
+        check(srv.req({"operation": "ping"}).get("ok") is True,
+              "and the server is still up afterwards")
         r = find({"o": {"nope": 1}})
         check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
               "an object reference without an id is refused")
