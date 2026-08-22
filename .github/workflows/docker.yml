@@ -4,7 +4,8 @@ name: Publish Docker image
 # packages on a public repo are free to store and pull, and Actions minutes are
 # free for public repositories. Pull requests build the image (without pushing)
 # so a broken Dockerfile is caught before merge. Pushing a `v*` tag also cuts a
-# GitHub Release once its image is published.
+# GitHub Release once its image is published, with the body taken from the
+# checked-in notes in docs/versions/ (see the release job).
 on:
   push:
     branches: [main]
@@ -30,6 +31,12 @@ concurrency:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # Consumed by the release job below to name the images it just published.
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      version_image: ${{ steps.refs.outputs.version_image }}
+      sha_image: ${{ steps.refs.outputs.sha_image }}
+      digest_image: ${{ steps.refs.outputs.digest_image }}
     steps:
       - uses: actions/checkout@v5
 
@@ -66,6 +73,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -80,6 +88,38 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # The release body quotes these, so they are resolved here where the push
+      # actually happened rather than reconstructed later from the tag rules.
+      # The digest is the useful one: tags move, a digest does not.
+      - name: Record published image coordinates
+        id: refs
+        if: github.event_name != 'pull_request'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          version_image="${image}:${VERSION}"
+
+          # Assert the tag we are about to advertise is one metadata-action
+          # really produced. Without this, changing the tag rules above would
+          # quietly publish release notes pointing at an image nobody pushed.
+          if ! printf '%s\n' "${TAGS}" | grep -qxF "${version_image}"; then
+            echo "::error title=Image tag mismatch::${version_image} is not among the published tags"
+            printf '%s\n' "${TAGS}"
+            exit 1
+          fi
+
+          # Read the sha tag out of the list instead of rebuilding its format.
+          sha_image=$(printf '%s\n' "${TAGS}" | grep -m1 -- ':sha-' || true)
+
+          {
+            echo "version_image=${version_image}"
+            echo "sha_image=${sha_image}"
+            echo "digest_image=${image}@${DIGEST}"
+          } >> "$GITHUB_OUTPUT"
+
   # Cut a GitHub Release for a version tag once its image is published.
   release:
     needs: build-and-push
@@ -88,22 +128,79 @@ jobs:
     permissions:
       contents: write   # create the release
     steps:
+      # Checked out at the tag, so the notes published are the ones reviewed on
+      # the commit being released. Shallow is enough — the auto-generated
+      # changelog appended below is composed by GitHub server-side, not from
+      # local history.
+      - uses: actions/checkout@v5
+
       - name: Resolve version (strip leading v)
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      # Release notes are hand-written per version in docs/versions/ and checked
+      # in, so the published body is reviewed with the code rather than composed
+      # at tag time. The image coordinates are appended automatically. A missing notes
+      # file warns but does not fail: by this point the tag and the image are
+      # already published, so failing here would leave a release-less tag behind
+      # over prose that can be edited afterwards.
+      - name: Compose release body
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          VERSION_IMAGE: ${{ needs.build-and-push.outputs.version_image }}
+          SHA_IMAGE: ${{ needs.build-and-push.outputs.sha_image }}
+          DIGEST_IMAGE: ${{ needs.build-and-push.outputs.digest_image }}
+        run: |
+          notes=""
+          for candidate in "docs/versions/v${VERSION}.md" "docs/versions/${VERSION}.md"; do
+            if [ -f "${candidate}" ]; then
+              notes="${candidate}"
+              break
+            fi
+          done
+
+          if [ -n "${notes}" ]; then
+            echo "Using release notes from ${notes}"
+            cat "${notes}" > release-body.md
+            printf '\n\n---\n\n' >> release-body.md
+          else
+            echo "::warning title=No release notes::Expected docs/versions/v${VERSION}.md; publishing image details only."
+            : > release-body.md
+          fi
+
+          # printf with single-quoted formats keeps the Markdown backticks
+          # literal, without the escaping an expanding heredoc would need.
+          {
+            printf 'Published container images:\n'
+            if [ -n "${VERSION_IMAGE}" ]; then
+              printf -- '- `%s`\n' "${VERSION_IMAGE}"
+            fi
+            if [ -n "${SHA_IMAGE}" ]; then
+              printf -- '- `%s`\n' "${SHA_IMAGE}"
+            fi
+            if [ -n "${DIGEST_IMAGE}" ]; then
+              printf '\nImmutable digest — pin this to deploy a fixed build:\n'
+              printf -- '- `%s`\n' "${DIGEST_IMAGE}"
+            fi
+            printf '\n```sh\n'
+            printf 'docker run -p 9470:9470 -v aegis-data:/data \\\n  %s\n' \
+              "${VERSION_IMAGE:-ghcr.io/${GITHUB_REPOSITORY,,}:${VERSION}}"
+            printf '```\n'
+          } >> release-body.md
+
+          echo "--- composed release body ---"
+          cat release-body.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          # body_path, not a body threaded through $GITHUB_ENV: these notes are
+          # multi-KB Markdown, and an env round-trip needs a heredoc delimiter
+          # the notes must never happen to contain.
+          body_path: release-body.md
+          # Appended after body_path: contributors and the full commit range.
           generate_release_notes: true
           # A tag with a pre-release suffix (v*-beta.N / v*-rc.N) is flagged a
           # pre-release, so GitHub does not mark it "Latest" and it stays off the
           # default install path. softprops does not infer this from the tag.
           prerelease: ${{ contains(github.ref_name, '-') }}
-          body: |
-            Published container image:
-
-            ```sh
-            docker run -p 9470:9470 -v aegis-data:/data \
-              ghcr.io/${{ github.repository }}:${{ steps.ver.outputs.version }}
-            ```
