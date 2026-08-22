@@ -249,6 +249,13 @@ typedef struct {
      * TRAVERSE_BOTH, where an id can be reachable either way and (via_id,
      * via_kind) alone would not say which orientation was taken. */
     int via_incoming;
+    /* Reverse hops only: 1 when the reaching edge's kind could not be interned
+     * by the edge index, so `via_kind` is *unknown* rather than absent — and,
+     * if a kind filter was given, this hop is a candidate the index could not
+     * rule out rather than a confirmed match. Reachable only once a corpus
+     * exceeds EDGE_MAX_KINDS distinct kinds; reported rather than silently
+     * conflated with an unkinded edge. */
+    int via_kind_uncertain;
 } TraverseHop;
 
 /* Free `n` hops as returned by qe_traverse_ex (each via_kind, then the array).

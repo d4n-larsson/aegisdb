@@ -679,6 +679,28 @@ def test_traverse_kinds(binary, port):
                   and r["error"]["code"] == "INVALID_REQUEST",
                   f'direction "{bad}" rejected, not silently ignored')
 
+        # A `kind` longer than the reverse index can intern is refused rather
+        # than accepted-and-unlabelled: an un-internable kind would degrade a
+        # filtered reverse walk into a candidate set nobody asked for.
+        r = srv.req({"operation": "relate", "from_id": a, "to_id": c,
+                     "kind": "k" * 65})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "an over-long edge kind is rejected")
+        r = srv.req({"operation": "relate", "from_id": a, "to_id": c,
+                     "kind": "k" * 64})
+        check(r.get("ok") is True, "a kind at exactly the limit is accepted")
+
+        # A malformed `kinds` must not silently become an unfiltered walk — the
+        # same strictness `direction` gets. Asking to narrow and getting the
+        # widest possible result is the failure worth refusing.
+        for bad in ([123], ["derived_from", 5], "derived_from", {"a": 1}):
+            r = walk(a, depth=1, kinds=bad)
+            check(r.get("ok") is False
+                  and r["error"]["code"] == "INVALID_REQUEST",
+                  f"malformed kinds {bad!r} rejected, not silently widened")
+        r = walk(a, depth=1, kinds=[])
+        check(r.get("ok") is True, "an explicitly empty kinds list is allowed")
+
         # the kinds list is capped (MAX_TRAVERSE_KINDS = 16)
         r = walk(a, depth=1, kinds=[f"k{i}" for i in range(16)])
         check(r.get("ok") is True, "16 kinds accepted")
@@ -815,6 +837,20 @@ def test_edge_index_replica_parity(binary, port):
             check(edge_count(primary) == 0, "primary dropped b's indegree")
             check(wait_edges(0),
                   "replica dropped b's indegree on the tombstone")
+
+            # A record's relationships array outlives its targets: a tombstone
+            # never rewrites its peers, so `a` still names the deleted `b`.
+            # Relating a again re-ships the whole record, and a replica that
+            # re-indexes it blindly resurrects a->b — permanently, since nothing
+            # ever revisits it. This is the case the tombstone check above does
+            # NOT cover, and it diverged before the liveness guard was added.
+            d = ins("d")
+            primary.req({"operation": "relate", "from_id": a, "to_id": d,
+                         "kind": "mentions"})
+            check(edge_count(primary) == 1,
+                  "primary indexed only the edge to the live target")
+            check(wait_edges(1),
+                  "replica did not resurrect the edge to the deleted target")
 
 
 def test_traverse_reverse(binary, port):

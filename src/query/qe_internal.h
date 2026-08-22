@@ -23,6 +23,12 @@
 #define MAX_OFFSET                                                             \
     100000 /* clamp pagination offset to bound ranking work/allocs */
 #define MAX_VECS_PER_RECORD 64 /* cap embeddings per record (#85) */
+#define MAX_REL_KIND_LEN                                                       \
+    64 /* max bytes in a relationship `kind` (ROADMAP 5.1). Matches
+        * EDGE_MAX_KIND_LEN so every accepted kind is internable by the reverse
+        * index: an un-internable kind degrades a filtered reverse walk to a
+        * candidate set, and an unbounded client-supplied string is worth
+        * bounding regardless. */
 #define MAX_TRAVERSE_KINDS                                                     \
     16 /* max edge kinds one traverse may filter on (ROADMAP 5.1). The
         * vocabulary is low-cardinality by nature; the cap bounds the

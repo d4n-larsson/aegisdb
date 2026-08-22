@@ -1154,6 +1154,12 @@ static cJSON *traversal_json(const TraverseHop *h) {
          * inviting a client to match on the empty string. */
         if (h->via_kind) {
             cJSON_AddStringToObject(o, "via_kind", h->via_kind);
+        } else if (h->via_kind_uncertain) {
+            /* An absent via_kind means "this edge has no kind". This edge has
+             * one; the reverse index just could not intern it, so it cannot say
+             * what it is — and under a kind filter this hop is a candidate it
+             * could not rule out. Saying so beats letting it read as unkinded. */
+            cJSON_AddBoolToObject(o, "via_kind_unknown", 1);
         }
         /* Which way the edge was walked. Always reported, not just under
          * `direction: both`, so a client never has to remember what it asked
@@ -1196,6 +1202,18 @@ static cJSON *handle_traverse(AegisDB *db, const cJSON *req,
     const char **kinds = NULL;
     size_t kn = 0;
     if (jr_str_array(req, "kinds", &kinds, &kn, MAX_TRAVERSE_KINDS) != 0) {
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
+    /* jr_str_array skips non-string elements and treats a non-array as absent,
+     * both of which land on kn == 0 — which every filter downstream reads as
+     * "follow every kind". A caller that asked to narrow would silently get the
+     * widest possible walk, which is the same failure `direction` is strict
+     * about just above. So require the array to be an array and to have parsed
+     * whole. */
+    const cJSON *karr = cJSON_GetObjectItemCaseSensitive(req, "kinds");
+    if (karr && !cJSON_IsNull(karr) &&
+        (!cJSON_IsArray(karr) || (size_t)cJSON_GetArraySize(karr) != kn)) {
+        free(kinds);
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     }
 

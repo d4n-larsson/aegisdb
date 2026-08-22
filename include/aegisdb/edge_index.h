@@ -90,8 +90,14 @@ void edge_index_remove_target(EdgeIndex *e, uint64_t id);
  * A kind filter admits an edge whose kind is *unknown* (see
  * EdgeSource.kind_unknown) only when the filter itself names a kind this index
  * has never interned. If every requested kind resolved, an unknown edge is
- * provably not one of them and is excluded — so in any deployment that has not
- * exhausted EDGE_MAX_KINDS, a filtered result needs no confirmation at all. */
+ * provably not one of them and is excluded.
+ *
+ * Callers must still honour kind_unknown on the edges that survive: it means
+ * "candidate", not "match". An earlier version of this comment claimed a
+ * filtered result needed no confirmation below EDGE_MAX_KINDS, which was wrong —
+ * an over-long kind interns as unknown regardless of the cap. `relate` now
+ * refuses a kind longer than EDGE_MAX_KIND_LEN, so that door is shut for new
+ * writes, but a log written before that cap existed can still contain one. */
 int edge_index_sources(const EdgeIndex *e, uint64_t to_id,
                        const char *const *kinds, size_t n_kinds,
                        EdgeSource **out, size_t *out_n);

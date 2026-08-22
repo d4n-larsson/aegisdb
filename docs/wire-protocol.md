@@ -667,6 +667,11 @@ Add a relationship between two persisted records.
 }
 ```
 
+`kind` is optional and at most **64 bytes**; a longer one is rejected with
+`INVALID_REQUEST`. The limit is what the reverse edge index can intern, and an
+un-internable kind would quietly demote a filtered backward `traverse` from an
+answer to a candidate list.
+
 **Response**:
 
 ```json
@@ -703,7 +708,7 @@ the records reached within `depth` hops.
 | `id` | integer | Yes | Starting record |
 | `depth` | integer | No | Max hops to follow; default `1` |
 | `agent_id` | string | No | Restrict the walk to one namespace |
-| `kinds` | string[] | No | Follow only edges of these kinds (union); up to 16. Omit to follow every kind, as before |
+| `kinds` | string[] | No | Follow only edges of these kinds (union); up to 16. Omit to follow every kind, as before. Must be an array of strings — a malformed one is `INVALID_REQUEST` rather than a silent unfiltered walk |
 | `direction` | string | No | `out` (default) \| `in` \| `both`. `in`/`both` need the reverse edge index and return `NOT_READY` under `--no-edge-index`; any other value is `INVALID_REQUEST` |
 
 **Response**: Same shape as `search` — `{ "ok": true, "records": [ … ], "total": N }`.
@@ -742,6 +747,15 @@ and `via_id` alone would not distinguish them. Namespace scoping applies
 identically in reverse: a record you do not own never appears, so a backward
 walk cannot be used to discover that someone else's memory links to yours.
 
+**Caveat — consolidation lineage is not reachable this way.** `consolidate`
+records a `supersedes` edge from the survivor to each record it absorbs, and then
+tombstones those records. Deleting a record drops every edge pointing at it, so
+the lineage edge leaves the reverse index immediately, and a tombstoned record
+cannot start or appear in a walk in any case. Consolidation lineage is therefore
+visible only in the survivor's `relationships` array (via `get`/`search`), not
+through `traverse` in either direction. A backward `supersedes` walk works for
+links you wrote yourself with `relate` between records that both stay live.
+
 **Per-hop attribution (`traversal`)**: every returned record carries a
 `traversal` object saying how the walk reached it, so a result reads as a path
 rather than a set whose shape has to be inferred:
@@ -760,6 +774,7 @@ rather than a set whose shape has to be inferred:
 | `via_id` | The record at the other end of the reaching edge; absent at depth `0` |
 | `via_kind` | That edge's `kind`; absent at depth `0`, and absent for an unkinded edge |
 | `via_direction` | `out` if the edge was followed forwards (`via_id` points at this record), `in` if backwards (this record points at `via_id`); absent at depth `0` |
+| `via_kind_unknown` | Present and `true` only on a reverse hop whose edge kind the index could not determine, so `via_kind` is *unknown* rather than absent — and, under a `kinds` filter, this hop is a candidate rather than a confirmed match. Requires a corpus with more than 4096 distinct edge kinds; normally absent |
 
 The walk is breadth-first and records **first** discovery, so `via_*` describes
 the shortest path found; a record reachable by several edges reports whichever

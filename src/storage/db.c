@@ -266,9 +266,21 @@ int db_replica_apply(AegisDB *db, uint64_t offset, const uint8_t *payload,
             tag_index_add(db->tags, r.tags[i], r.id);
         }
         lexical_index_add(db->lex, r.id, r.data, r.data_len);
+        /* Only edges whose *target* is still live, exactly as recovery.c does
+         * when it rebuilds. A record's relationships array outlives its targets:
+         * a tombstone never rewrites its peers, so an applied record can still
+         * name an id this replica has already buried. Re-adding those would
+         * resurrect edges the primary dropped, and the divergence is permanent
+         * — the replica would also then disagree with its own recovery rebuild.
+         * Replication applies in log order, so the target's tombstone has
+         * already landed by the time we ask. */
         for (size_t i = 0; i < r.rel_count; i++) {
-            edge_index_add(db->edges, r.id, r.relationships[i].to_id,
-                           r.relationships[i].kind);
+            const HashEntry *te =
+                hash_index_get(db->hash, r.relationships[i].to_id);
+            if (te && !te->deleted) {
+                edge_index_add(db->edges, r.id, r.relationships[i].to_id,
+                               r.relationships[i].kind);
+            }
         }
         usage_index_track(db->usage, r.id);
         if (r.embedding_dim == db->config.embedding_dimensions && r.embedding &&

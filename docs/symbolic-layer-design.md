@@ -418,13 +418,21 @@ stops after PR 1, the tree is still better off.
 
 ## 12. Open questions
 
-- ~~**`EDGE_MAX_KINDS` and the fallback.**~~ **Decided (PR 2):** the fallback,
-  and for a firmer reason than the original "leaning weakly". The alternative —
-  refusing to index an edge whose kind will not intern — makes reverse results
-  *incomplete*, and an incomplete answer to "what depends on this?" is a
-  correctness bug, whereas an imprecise-but-labelled one is a caller-side
-  confirmation the caller was going to do anyway (it is already reading the
-  record). Same argument settles over-long kinds: flag, never truncate.
+- ~~**`EDGE_MAX_KINDS` and the fallback.**~~ **Decided (PR 2), then repaired
+  (review of #239):** the fallback, because refusing to index an edge whose kind
+  will not intern makes reverse results *incomplete*, and an incomplete answer to
+  "what depends on this?" is a correctness bug, whereas an imprecise-but-labelled
+  one is a confirmation the caller was going to do anyway. But "labelled" was the
+  part that did not ship: `EdgeSource.kind_unknown` was written and read nowhere,
+  so a filtered reverse walk returned unconfirmed candidates as if they were
+  matches, and reported them with `via_kind` absent — which the wire protocol
+  defines as *unkinded*. Two fixes: `relate` now caps `kind` at
+  `EDGE_MAX_KIND_LEN`, which shuts the door that made this reachable without
+  exhausting the cap at all; and the flag is threaded through to
+  `traversal.via_kind_unknown`, so the residual pathological case is reported
+  rather than conflated. The lesson worth keeping: a protocol whose correctness
+  depends on the caller checking a flag needs a caller that checks it, in the
+  same change.
 - **Dangling forward edges (§5.4).** Compaction already rewrites live records,
   so it *could* prune edges whose target is gone — cheap, and it would make the
   record agree with the index. But compaction currently only relocates bytes and
@@ -436,6 +444,17 @@ stops after PR 1, the tree is still better off.
   Deliberately deferred: it is the first step toward 5.2's `pattern`, and
   bundling it here would make 5.1 the thin end of a query language. Revisit when
   5.2 lands, not before.
+- **Where consolidation should record lineage.** `consolidate` writes
+  `supersedes` from survivor to absorbed record and then tombstones the latter,
+  and `qe_delete` drops every edge pointing at a tombstone — so the lineage edge
+  leaves the reverse index the moment it is created, and a tombstoned record
+  cannot appear in a walk anyway. The provenance is still in the survivor's
+  `relationships` array, so nothing is lost, but the backward `supersedes` walk
+  the docs lead with does not work for the one thing in-tree that writes
+  `supersedes`. Documented as a caveat for now. Fixing it properly means deciding
+  whether lineage should point *from* the tombstone (survivable, but a tombstone
+  is not walkable either) or live outside the record graph entirely — which is
+  really a 5.2/5.3 question about where derivation records belong.
 - **Shrinking the sparse case.** The table above says the cost is per *target*,
   not per edge, and that a single-incoming-edge target is the expensive shape —
   which is also the common one. Two levers, neither taken in PR 2: store the
