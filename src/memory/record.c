@@ -9,10 +9,12 @@
 
 /* v1: single embedding (dim + dim floats). v2 (#85): vec_count + dim +
  * vec_count*dim floats. v3 (ROADMAP 5.2): an optional typed fact between the
- * relationships and the payload.
+ * relationships and the payload. v4 (ROADMAP 5.3): an optional derivation
+ * between the fact and the payload.
  *
  * decode reads all three. encode writes the *lowest* version that can represent
- * the record: v3 only when a fact is present, v2 otherwise. That is the whole
+ * the record: v4 only when a derivation is present, v3 when a fact is but a
+ * derivation is not, v2 otherwise. That is the whole
  * compatibility story — an existing log stays readable, and a deployment that
  * never writes a fact keeps producing byte-identical frames, so nothing about
  * its on-disk or replication behaviour changes until it opts in.
@@ -52,6 +54,7 @@ void record_free(MemoryRecord *r) {
     free(r->relationships);
     free(r->fact.predicate);
     free(r->fact.object_str);
+    free(r->derivation.premises);
     free(r->data);
     memset(r, 0, sizeof(*r));
 }
@@ -147,6 +150,12 @@ MemoryRecord *record_clone(const MemoryRecord *src) {
                         src->fact.object_str) != 0) {
         goto fail;
     }
+    if (src->derivation.rule != DERIV_NONE &&
+        record_set_derivation(r, src->derivation.rule, src->derivation.depth,
+                              src->derivation.premises,
+                              src->derivation.premise_count) != 0) {
+        goto fail;
+    }
     if (src->embedding_dim && src->vec_count) {
         /* Overflow-safe: bound vec_count*dim and the *sizeof(float) allocation
          * before multiplying (division form, like record_decode). Records reach
@@ -220,6 +229,37 @@ int record_set_fact(MemoryRecord *r, FactKind kind, uint64_t subject,
     r->fact.predicate = pred;
     r->fact.object_id = (kind == FACT_OBJ_ID) ? object_id : 0;
     r->fact.object_str = obj;
+    return 0;
+}
+
+int record_set_derivation(MemoryRecord *r, DerivRule rule, uint16_t depth,
+                          const uint64_t *premises, size_t n) {
+    if (rule == DERIV_NONE) {
+        free(r->derivation.premises);
+        memset(&r->derivation, 0, sizeof(r->derivation));
+        return 0;
+    }
+    if (rule != DERIV_TRANSITIVE && rule != DERIV_SYMMETRIC &&
+        rule != DERIV_INVERSE) {
+        return -1;
+    }
+    /* A derivation with no premises is not a derivation — it would claim
+     * provenance while naming none, which is worse than claiming none. */
+    if (!premises || n == 0 || n > DERIV_MAX_PREMISES) {
+        return -1;
+    }
+    /* Copy before touching the record, so a failure halfway leaves the previous
+     * derivation intact rather than half-replaced (as record_set_fact does). */
+    uint64_t *copy = malloc(n * sizeof(*copy));
+    if (!copy) {
+        return -1;
+    }
+    memcpy(copy, premises, n * sizeof(*copy));
+    free(r->derivation.premises);
+    r->derivation.rule = rule;
+    r->derivation.depth = depth;
+    r->derivation.premises = copy;
+    r->derivation.premise_count = n;
     return 0;
 }
 
@@ -309,14 +349,30 @@ static void put_lenstr(Buf *b, const char *s, size_t n) {
 
 int record_encode(const MemoryRecord *r, uint8_t **out, size_t *out_len) {
     Buf b = {0};
-    /* Only a fact-bearing record needs v3; everything else stays v2 so its
-     * bytes are unchanged from before this field existed. */
+    /* Only a fact-bearing record needs v3 and only a derived one needs v4;
+     * everything else stays at the version whose bytes are unchanged from
+     * before the field existed. */
     int has_fact = r->fact.kind != FACT_NONE;
+    int has_deriv = r->derivation.rule != DERIV_NONE;
     if (has_fact &&
         (r->fact.kind != FACT_OBJ_ID && r->fact.kind != FACT_OBJ_STRING)) {
         return -1; /* an unknown kind has no defined encoding */
     }
-    put_u8(&b, has_fact ? RECORD_CODEC_V3 : RECORD_CODEC_V2);
+    if (has_deriv && (r->derivation.rule != DERIV_TRANSITIVE &&
+                      r->derivation.rule != DERIV_SYMMETRIC &&
+                      r->derivation.rule != DERIV_INVERSE)) {
+        return -1; /* an unknown rule has no defined encoding */
+    }
+    /* A derivation without a fact would be provenance for nothing: every rule
+     * in 5.3 concludes a triple, so the conclusion has to be present. Refusing
+     * keeps a meaningless frame out of the log rather than durably storing one
+     * no reader can interpret. */
+    if (has_deriv && !has_fact) {
+        return -1;
+    }
+    put_u8(&b, has_deriv  ? RECORD_CODEC_V4
+               : has_fact ? RECORD_CODEC_V3
+                          : RECORD_CODEC_V2);
     put_u64(&b, r->id);
     put_u8(&b, (uint8_t)r->type);
     put_u64(&b, r->created);
@@ -378,6 +434,25 @@ int record_encode(const MemoryRecord *r, uint8_t **out, size_t *out_len) {
         } else {
             put_lenstr(&b, r->fact.object_str,
                        r->fact.object_str ? strlen(r->fact.object_str) : 0);
+        }
+    }
+
+    /* v4 only: the derivation follows the fact it explains and still precedes
+     * the payload, so the variable-length payload stays last as it always has.
+     * The count is bounded well below its u16 width by DERIV_MAX_PREMISES;
+     * refuse rather than truncate, as every other count here does, since a
+     * truncated count desyncs decode into a durable undecodable frame. */
+    if (has_deriv) {
+        if (r->derivation.premise_count == 0 ||
+            r->derivation.premise_count > DERIV_MAX_PREMISES) {
+            free(b.p);
+            return -1;
+        }
+        put_u8(&b, (uint8_t)r->derivation.rule);
+        put_u16(&b, r->derivation.depth);
+        put_u16(&b, (uint16_t)r->derivation.premise_count);
+        for (size_t i = 0; i < r->derivation.premise_count; i++) {
+            put_u64(&b, r->derivation.premises[i]);
         }
     }
 
@@ -473,8 +548,9 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
     record_init(out);
 
     uint8_t ver = get_u8(&c);
-    if (ver != 1 && ver != RECORD_CODEC_V2 && ver != RECORD_CODEC_V3) {
-        goto fail; /* v1 (single vec), v2, v3 (typed fact) */
+    if (ver != 1 && ver != RECORD_CODEC_V2 && ver != RECORD_CODEC_V3 &&
+        ver != RECORD_CODEC_V4) {
+        goto fail; /* v1 (single vec), v2, v3 (fact), v4 (derivation) */
     }
     out->id = get_u64(&c);
     out->type = (MemoryType)get_u8(&c);
@@ -612,6 +688,35 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
         }
         free(pred);
         if (rv != 0) {
+            goto fail;
+        }
+    }
+
+    if (ver >= RECORD_CODEC_V4) {
+        uint8_t rule = get_u8(&c);
+        uint16_t depth = get_u16(&c);
+        uint16_t pc = get_u16(&c);
+        if (c.err) {
+            goto fail;
+        }
+        /* Refuse a rule this build cannot name. Unlike an unknown FactKind the
+         * framing is fixed, so this could be skipped over — but a derived
+         * record whose provenance is uninterpretable would be handed to a
+         * caller as if it were understood, and provenance nobody can read is
+         * the one thing this field exists to prevent. */
+        if (rule != DERIV_TRANSITIVE && rule != DERIV_SYMMETRIC &&
+            rule != DERIV_INVERSE) {
+            goto fail;
+        }
+        if (pc == 0 || pc > DERIV_MAX_PREMISES) {
+            goto fail;
+        }
+        uint64_t prem[DERIV_MAX_PREMISES];
+        for (uint16_t i = 0; i < pc; i++) {
+            prem[i] = get_u64(&c);
+        }
+        if (c.err ||
+            record_set_derivation(out, (DerivRule)rule, depth, prem, pc) != 0) {
             goto fail;
         }
     }

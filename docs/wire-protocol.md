@@ -246,6 +246,12 @@ become a property that silently does not apply. `stats` reports
 `indexes.registered_predicates` so a loaded vocabulary is confirmable from
 outside (`0` means none configured).
 
+**`derivation` is not a client field**: a record derived by the inference job
+(ROADMAP 5.3) carries one, and `insert` and `update` both refuse a request that
+supplies one, with `INVALID_REQUEST`. Provenance a client could author would be
+provenance nobody could trust. An explicit `null` is treated as absent, as
+elsewhere.
+
 **Batch insert**: supply a `records` array (each element a record body as above,
 up to 1000) instead of a single record. Every element is validated first, so a
 malformed element rejects the whole batch before anything is written; the

@@ -1251,6 +1251,27 @@ def test_typed_facts(binary, port):
                      "fact": None})
         check(r.get("ok") is True, "an explicit null fact is not a change")
 
+        # `derivation` is written by the inference job (ROADMAP 5.3) and by
+        # nothing else. A client that could supply one could manufacture
+        # provenance, so both write paths refuse it rather than dropping it.
+        d = {"rule": "transitive", "depth": 1, "premises": [hook]}
+        r = srv.req({"operation": "insert", "type": "semantic", "data": "forged",
+                     "fact": {"s": hook, "p": "defaults_to", "o": "x"},
+                     "derivation": d})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "insert refuses a client-supplied derivation")
+        r = srv.req({"operation": "insert", "records": [
+            {"type": "semantic", "data": "ok"},
+            {"type": "semantic", "data": "forged", "derivation": d}]})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "and a batch element carrying one rejects the whole batch")
+        r = srv.req({"operation": "update", "id": lit, "derivation": d})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "update refuses one too, the other way a client might author it")
+        r = srv.req({"operation": "insert", "type": "semantic", "data": "fine",
+                     "derivation": None})
+        check(r.get("ok") is True, "an explicit null derivation is not one")
+
         before = stats_facts(srv)
         srv.graceful_stop()
 

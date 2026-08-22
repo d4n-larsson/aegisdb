@@ -102,6 +102,14 @@ Codec **v4** adds an optional `Derivation`:
 derivation := { rule: u8, depth: u16, premise_count: u16, premises: u64[] }
 ```
 
+Encoded between the fact and the payload, so the variable-length payload stays
+last as it always has. **A derivation requires a fact**: every rule here
+concludes a triple, so a derivation without one would be provenance for
+nothing, and `record_encode` refuses it rather than putting an uninterpretable
+frame in the log. A rule byte the build cannot name is refused on decode —
+unlike an unknown `FactKind` the framing is fixed and could be skipped, but
+provenance nobody can read is the one thing this field exists to prevent.
+
 and the same compatibility rule that governed v3 governs this: **`record_encode`
 emits the lowest version that represents the record.** A record with no
 derivation still encodes as v3 if it has a fact and v2 if it does not, so a
@@ -116,8 +124,9 @@ tombstoned its incoming edge leaves the index (§2), so a derived record that
 kept its lineage only in the graph would lose the ability to explain itself at
 exactly the moment the explanation matters most — "this was derived from
 something that has since been retracted" is the single most useful thing
-`explain` can say. Sixteen bytes per premise, capped, is a cheap price for a
-record that stays self-describing after its context is gone.
+`explain` can say. Eight bytes per premise, capped at `DERIV_MAX_PREMISES`, is a
+cheap price for a record that stays self-describing after its context is gone.
+(This said "sixteen bytes" before the codec was written; a premise is one u64.)
 
 The payload is synthesized, because `insert` refuses an empty one and a derived
 record should be readable by a human who finds it in a `search` result: *"hnsw.c
