@@ -109,6 +109,10 @@ typedef struct {
      * a `fact` on `insert` is still stored durably — the record keeps what it
      * asserts, it just is not indexed by it. */
     int fact_index;
+    /* Path to the predicate registry (ROADMAP 5.2), or "" for none. With no
+     * registry any predicate is accepted; with one, a `fact` naming an
+     * undeclared predicate — or the wrong object kind for it — is refused. */
+    char predicate_registry[AEGIS_PATH_MAX];
     /* Soft cap on total in-RAM index bytes (hash+time+tag+lexical+edge+semantic).
      * Inserts are
      * refused with MEMORY_LIMIT once the sampled index size reaches this, so a

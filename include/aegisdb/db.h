@@ -11,6 +11,7 @@
 #include "aegisdb/hash_index.h"
 #include "aegisdb/lexical_index.h"
 #include "aegisdb/log.h"
+#include "aegisdb/predicate_registry.h"
 #include "aegisdb/semantic_index.h"
 #include "aegisdb/tag_index.h"
 #include "aegisdb/tenant.h"
@@ -80,13 +81,17 @@ typedef struct {
     Config config;
     LogFile log;
 
-    HashIndex *hash;       /* id -> log location (Phase 1) */
-    TimeIndex *time;       /* created -> ids (Phase 2) */
-    TagIndex *tags;        /* tag -> ids (Phase 2) */
-    LexicalIndex *lex;     /* term -> postings, BM25 (ROADMAP 4.1); NULL when
+    HashIndex *hash;   /* id -> log location (Phase 1) */
+    TimeIndex *time;   /* created -> ids (Phase 2) */
+    TagIndex *tags;    /* tag -> ids (Phase 2) */
+    LexicalIndex *lex; /* term -> postings, BM25 (ROADMAP 4.1); NULL when
                             * --no-lexical-index disabled it */
-    FactIndex *facts;      /* subject/object/predicate -> records (ROADMAP 5.2);
+    FactIndex *facts;  /* subject/object/predicate -> records (ROADMAP 5.2);
                             * NULL when --no-fact-index disabled it */
+    /* Declared fact vocabulary; NULL when --predicate-registry is unset, which
+     * accepts any predicate. Loaded once at startup and immutable, so readers
+     * need no lock. */
+    PredicateRegistry *predicates;
     EdgeIndex *edges;      /* to_id -> incoming sources (ROADMAP 5.1); NULL when
                             * --no-edge-index disabled it. Only the *reverse*
                             * direction: a record is its own forward adjacency

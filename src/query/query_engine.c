@@ -299,6 +299,22 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
     rec->expires_at =
         ttl_ms ? (ttl_ms > UINT64_MAX - now ? UINT64_MAX : now + ttl_ms) : 0;
 
+    /* The vocabulary is enforced here rather than at the wire layer so no
+     * writer can route around it — and *not* in validate_common, which `update`
+     * also calls: a registry edited between runs would then make an old
+     * record's existing fact block an unrelated edit to its tags. A fact is
+     * immutable, so checking it once at insert is checking it exactly when it
+     * can change. The replica path deliberately does not check: it applies what
+     * the primary already accepted, and re-judging would desync the two. */
+    if (rec->fact.kind != FACT_NONE && db->predicates) {
+        char why[256];
+        if (predicate_registry_check(db->predicates, rec->fact.predicate,
+                                     rec->fact.kind, why, sizeof why) != 0) {
+            LOG_DEBUG("insert refused: %s", why);
+            return AEGIS_ERR_INVALID_REQUEST;
+        }
+    }
+
     pthread_rwlock_wrlock(&db->index_lock);
     st = append_and_hash(db, rec);
     if (st == AEGIS_OK) {

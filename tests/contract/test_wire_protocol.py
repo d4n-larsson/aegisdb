@@ -1315,6 +1315,113 @@ def test_typed_facts_replica_parity(binary, port):
             check(wait_facts(0), "replica dropped it too")
 
 
+def test_predicate_registry(binary, port):
+    print("[predicate registry: the declared fact vocabulary (ROADMAP 5.2)]")
+    d = tempfile.mkdtemp(prefix="aegis_reg_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({
+            "defaults_to": {"object": "string", "cardinality": "one"},
+            "part_of": {"object": "id", "transitive": True,
+                        "inverse_of": "contains"},
+            "contains": {"object": "id", "inverse_of": "part_of"},
+        }, fh)
+
+    with Server(binary, port, phase=4,
+                extra_args=["--predicate-registry", reg]) as srv:
+        st = srv.req({"operation": "stats"})
+        check(st["indexes"]["registered_predicates"] == 3,
+              "stats reports the loaded vocabulary size")
+
+        subj = srv.req({"operation": "insert", "type": "semantic",
+                        "data": "subject"})["record"]["id"]
+
+        def ins(fact):
+            return srv.req({"operation": "insert", "type": "semantic",
+                            "data": "d", "fact": fact})
+
+        # declared predicate, declared object shape
+        r = ins({"s": subj, "p": "defaults_to", "o": "none"})
+        check(r.get("ok") is True, "a declared predicate is accepted")
+        r = ins({"s": subj, "p": "part_of", "o": {"id": subj}})
+        check(r.get("ok") is True, "an id-object predicate is accepted")
+
+        # this is the whole point: an invented predicate is refused, so the
+        # vocabulary cannot drift out from under whatever reads it later
+        r = ins({"s": subj, "p": "invented_by_the_model", "o": "x"})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "an undeclared predicate is refused")
+
+        # right predicate, wrong object shape — a literal where a record was
+        # declared, and the reverse
+        r = ins({"s": subj, "p": "defaults_to", "o": {"id": subj}})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "an id object for a string-declared predicate is refused")
+        r = ins({"s": subj, "p": "part_of", "o": "not-an-id"})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "a literal for an id-declared predicate is refused")
+
+        # a fact-less insert is unaffected by any of this
+        r = srv.req({"operation": "insert", "type": "semantic", "data": "plain"})
+        check(r.get("ok") is True, "a record with no fact is unaffected")
+
+    # with no registry, any predicate is accepted: a server that never opted in
+    # cannot be broken by this feature
+    with Server(binary, port, phase=4) as srv:
+        st = srv.req({"operation": "stats"})
+        check(st["indexes"]["registered_predicates"] == 0,
+              "no registry reports zero declared predicates")
+        subj = srv.req({"operation": "insert", "type": "semantic",
+                        "data": "s"})["record"]["id"]
+        r = srv.req({"operation": "insert", "type": "semantic", "data": "d",
+                     "fact": {"s": subj, "p": "anything_at_all", "o": "x"}})
+        check(r.get("ok") is True, "without a registry any predicate is fine")
+
+
+def test_predicate_registry_refuses_to_start(binary, port):
+    print("[predicate registry: a bad vocabulary fails startup]")
+    d = tempfile.mkdtemp(prefix="aegis_badreg_")
+
+    def try_start(name, content):
+        path = os.path.join(d, name)
+        with open(path, "w") as fh:
+            fh.write(content)
+        datadir = tempfile.mkdtemp(prefix="aegis_badreg_data_")
+        proc = subprocess.Popen(
+            [binary, "--data-dir", datadir, "--port", str(port),
+             "--predicate-registry", path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            _, errout = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return None, b""
+        return proc.returncode, errout
+
+    # An operator who configured a registry is relying on it; degrading to
+    # "accept everything" would be the opposite of what they asked for.
+    rc, errout = try_start("dangling.json",
+                           '{"p": {"object": "id", "inverse_of": "ghost"}}')
+    check(rc is not None and rc != 0,
+          "a dangling inverse_of refuses to start")
+    check(b"ghost" in errout,
+          "and the error names the offending predicate")
+
+    rc, errout = try_start("typo.json",
+                           '{"p": {"object": "id", "transative": true}}')
+    check(rc is not None and rc != 0, "an unknown key refuses to start")
+    check(b"transative" in errout, "naming the misspelt key")
+
+    rc, _ = try_start("notjson.json", "{ this is not json")
+    check(rc is not None and rc != 0, "malformed JSON refuses to start")
+
+    # ...and a valid one starts, so the checks above are not just "it never
+    # starts with a registry".
+    rc, _ = try_start("good.json", '{"p": {"object": "id"}}')
+    check(rc is None, "a valid registry starts and keeps running")
+
+
 def test_consolidate(binary, port):
     print("[consolidate: merge near-duplicate semantic memories]")
     with Server(binary, port, phase=4) as srv:
@@ -3224,6 +3331,8 @@ def main():
     test_replication(binary, 19520)
     test_replication_codec_gate(binary, 19527)  # uses port, +1
     test_typed_facts(binary, 19547)
+    test_predicate_registry(binary, 19550)
+    test_predicate_registry_refuses_to_start(binary, 19551)
     test_codec_gate_with_a_real_v3_frame(binary, 19549)  # uses port, +1
     test_typed_facts_replica_parity(binary, 19548)  # uses port, +1, +2  # uses port, +1 (repl stream), +2 (replica)
     test_replication_encrypted(binary, 19525)  # uses port, +1, +2, +12

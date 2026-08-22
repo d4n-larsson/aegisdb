@@ -723,6 +723,23 @@ int db_open(AegisDB *db, const Config *cfg) {
     /* Opt-out (--no-fact-index) leaves db->facts NULL; every call site treats
      * NULL as "no fact index", and `search` with a `pattern` reports NOT_READY. */
     db->facts = cfg->fact_index ? fact_index_create() : NULL;
+    /* A malformed vocabulary file fails startup rather than degrading to "no
+     * registry": an operator who configured one is relying on it, and silently
+     * accepting every predicate instead would be the opposite of what they
+     * asked for. The message names the offending predicate. */
+    if (cfg->predicate_registry[0]) {
+        char perr[256] = "";
+        db->predicates =
+            predicate_registry_load(cfg->predicate_registry, perr, sizeof perr);
+        if (!db->predicates) {
+            LOG_ERROR("predicate registry %s: %s", cfg->predicate_registry,
+                      perr);
+            goto fail_indexes;
+        }
+        LOG_INFO("predicate registry: %zu predicates from %s",
+                 predicate_registry_count(db->predicates),
+                 cfg->predicate_registry);
+    }
     db->usage = cfg->usage_feedback ? usage_index_create() : NULL;
     db->sem = semantic_index_create(cfg->embedding_dimensions,
                                     cfg->ann_threshold, cfg->ann_ef_search,
@@ -769,6 +786,7 @@ fail_indexes:
     lexical_index_free(db->lex);
     edge_index_free(db->edges);
     fact_index_free(db->facts);
+    predicate_registry_free(db->predicates);
     usage_index_free(db->usage);
     semantic_index_free(db->sem);
     working_store_free(db->working);
@@ -795,6 +813,7 @@ void db_close(AegisDB *db) {
     lexical_index_free(db->lex);
     edge_index_free(db->edges);
     fact_index_free(db->facts);
+    predicate_registry_free(db->predicates);
     usage_index_free(db->usage);
     semantic_index_free(db->sem);
     working_store_free(db->working);

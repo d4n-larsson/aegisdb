@@ -325,6 +325,11 @@ static void stats_add_storage(cJSON *o, AegisDB *db) {
                                 (double)fact_index_facts(db->facts));
         cJSON_AddNumberToObject(idx, "fact_predicates",
                                 (double)fact_index_predicates(db->facts));
+        /* Declared, not in use: 0 means no registry is configured, so every
+         * predicate is accepted. Worth being able to confirm from outside. */
+        cJSON_AddNumberToObject(
+            idx, "registered_predicates",
+            (double)predicate_registry_count(db->predicates));
         cJSON_AddNumberToObject(idx, "usage_tracked",
                                 (double)usage_index_count(db->usage));
         cJSON_AddNumberToObject(idx, "semantic",

@@ -248,7 +248,13 @@ A JSON file, `--predicate-registry <path>`, loaded at startup:
 }
 ```
 
-**Enforced in 5.2:**
+**Enforced in 5.2** (in `qe_insert`, not at the wire layer, so no writer can
+route around it — and not in `validate_common`, which `update` also calls: a
+registry edited between runs would otherwise let an old record's existing fact
+block an unrelated edit to its tags. A fact is immutable, so checking it once at
+insert checks it exactly when it can change. The replica path deliberately does
+not check, since it applies what the primary already accepted and re-judging
+would desync the two):
 
 - a `fact` whose predicate is absent from the registry is rejected
   (`INVALID_REQUEST`) — this is the controlled vocabulary, and it is the point;
@@ -256,6 +262,20 @@ A JSON file, `--predicate-registry <path>`, loaded at startup:
 - the file itself is validated at startup: unknown keys, an `inverse_of` naming
   an absent predicate, or an `inverse_of` that is not mutual is a startup
   failure, not a runtime surprise.
+
+Four checks the implementation added that this design did not call for, each
+because writing the parser made the failure concrete:
+
+- **`object` is required**, not defaulted. A predicate that accepted either an
+  id or a literal would make a `{p, o}` lookup mean two different things.
+- **`symmetric`/`transitive` require an `id` object.** Both relate a subject to
+  a subject, and subjects are records — so declaring either on a literal-valued
+  predicate describes a rule that could never fire. Better a startup error than
+  a closure that mysteriously produces nothing.
+- **An inverse pair must both take an `id` object**, for the same reason.
+- **A duplicate declaration is refused.** cJSON retains duplicate keys, so
+  without this one of them silently wins, and which one is not something a file
+  author can predict.
 
 **Declared but not yet acted on:** `cardinality`, `transitive`, `symmetric`,
 `inverse_of`, `mutex_with`. 5.3 consumes them.

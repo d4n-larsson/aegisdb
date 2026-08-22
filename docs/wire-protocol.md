@@ -196,7 +196,7 @@ other; a writer supplies both.
 | Position | Notes |
 |----------|-------|
 | `s` | The **record id** the fact is about. Entities are records: to say something about "the recall hook", insert a record for it first (conventionally a `semantic` record tagged `entity`) and use its id |
-| `p` | The predicate, at most 64 bytes. A longer one is `INVALID_REQUEST` — it is the limit the fact indexes can intern, and an un-internable predicate would make the fact unreachable by any `pattern` naming it |
+| `p` | The predicate, at most 64 bytes. A longer one is `INVALID_REQUEST` — it is the limit the fact indexes can intern, and an un-internable predicate would make the fact unreachable by any `pattern` naming it. When the server runs with `--predicate-registry`, it must also be **declared** there, with the matching object kind |
 | `o` | Either a **literal string**, or `{"id": N}` to reference another record. A bare number is rejected: it would be ambiguous between an id and a literal, and numeric literals do not exist |
 
 The fact is echoed back by `insert`, `get`, `search`, and `traverse` exactly as
@@ -215,6 +215,36 @@ Three deliberate properties:
   still returns only records the caller owns.
 - **The fact is stored even under `--no-fact-index`.** The record keeps what it
   asserts; only the lookups go away.
+
+**The predicate vocabulary (`--predicate-registry <file>`)**: optional, and off
+by default — with no registry, any predicate is accepted. With one, a `fact` is
+refused (`INVALID_REQUEST`) unless its predicate is declared *and* its object
+matches the declared kind. The point is that a write path which mints predicates
+freely produces a vocabulary nothing can reason over; the registry is the
+contract that prevents it.
+
+```json
+{
+  "defaults_to":    { "object": "string", "cardinality": "one" },
+  "part_of":        { "object": "id", "transitive": true, "inverse_of": "contains" },
+  "contains":       { "object": "id", "inverse_of": "part_of" },
+  "conflicts_with": { "object": "id", "symmetric": true }
+}
+```
+
+`object` (`"id"` or `"string"`) is **required** — a predicate that accepted
+either would make a `{p, o}` lookup mean two different things. `cardinality`,
+`symmetric`, `transitive`, `inverse_of` and `mutex_with` are declared here and
+validated for coherence, but nothing acts on them yet.
+
+The file is validated at **startup**, and a problem is a startup *failure* with
+the offending predicate named — not a fallback to accepting everything, which
+would be the opposite of what configuring a registry asks for. An unknown key, a
+duplicate declaration, a one-sided `inverse_of`, or `symmetric`/`transitive` on a
+literal-valued predicate are all refused: each is a typo that would otherwise
+become a property that silently does not apply. `stats` reports
+`indexes.registered_predicates` so a loaded vocabulary is confirmable from
+outside (`0` means none configured).
 
 **Batch insert**: supply a `records` array (each element a record body as above,
 up to 1000) instead of a single record. Every element is validated first, so a
