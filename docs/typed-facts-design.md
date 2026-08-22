@@ -161,17 +161,44 @@ failing frame 400,000 with a bare decode error.
 
 ## 5. The fact index
 
-Two inverted indexes, derived and in-RAM, in the established shape
-(`tag_index` → `lexical_index` → `edge_index`):
+**Three** tables, derived and in-RAM, in the established shape (`tag_index` →
+`lexical_index` → `edge_index`). This design first said two, keyed on
+`(subject, predicate)` and `(predicate, object)`; implementing §6 showed that
+does not cover the filter it exists to serve. A pattern may bind any non-empty
+subset of the three positions, and a composite `(subject, predicate)` key cannot
+answer `{s}` alone — everything about a subject — without scanning it, nor `{p}`
+alone at all. So the predicate moves into the postings instead of the key:
 
-- **`(subject, predicate)` → record ids** — answers "what does 42 default to?"
-- **`(predicate, object)` → record ids** — answers "what defaults to none?"
+| Table | Answers |
+|---|---|
+| `subject` → `[(predicate, record)]` | `{s}`, `{s,p}` |
+| `object` → `[(predicate, record)]` | `{o}`, `{p,o}` |
+| `predicate` → `[record]` | `{p}` |
 
-Both keyed on an interned predicate id, as `edge_index` interns edge kinds and
-for the same reasons (integer compares, fixed-width postings, a bounded table
-against an untrusted string). Never checkpointed; `recovery.c` rebuilds them
-from the live set alongside time/tag/lexical/edge. Keyed on ids and interned
-predicates, so compaction is a non-event.
+The first two mirror `edge_index`'s target table exactly — open-addressed,
+power-of-two, grown at a 3/4 load factor, tombstones dropped on rehash, postings
+sorted so a predicate's run within a slot is contiguous and found by binary
+search. The third is a flat array indexed by predicate id: predicates are capped
+and few, so it needs no hashing at all.
+
+Predicates are interned, as `edge_index` interns edge kinds and for the same
+reasons (integer compares, fixed-width postings, a bounded table against an
+untrusted string). **Objects are not**: an object literal is arbitrary caller
+text, so a table of them would grow without bound. The object table is keyed by
+the literal's hash and compares the stored text on a hit, so a collision costs a
+probe rather than a wrong answer.
+
+One deliberate difference from `edge_index`: an un-internable predicate is
+**refused**, where an un-internable edge kind was indexed-but-unlabelled. The
+reasoning inverts because the consequence does. An unlabelled edge is still
+reachable — the edge exists, only its filter precision suffers — whereas a fact
+whose predicate cannot be named is unreachable by every pattern that mentions
+it. Silently keeping an unqueryable entry is worse than declining it and saying
+so.
+
+Never checkpointed; `recovery.c` rebuilds all three from the live set alongside
+time/tag/lexical/edge. Keyed on ids and interned predicates, so compaction is a
+non-event.
 
 `--no-fact-index` opts out, and a `pattern` search then returns `NOT_READY`,
 exactly as `query` does under `--no-lexical-index`.
