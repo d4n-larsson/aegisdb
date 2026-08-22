@@ -294,7 +294,10 @@ because writing the parser made the failure concrete:
   author can predict.
 
 **Declared but not yet acted on:** `cardinality`, `transitive`, `symmetric`,
-`inverse_of`, `mutex_with`. 5.3 consumes them.
+`inverse_of`, `mutex_with`. 5.3 consumes them — see `inference-design.md`:
+`transitive`/`symmetric`/`inverse_of` drive materialized closures, while
+`cardinality: one` and `mutex_with` drive contradiction detection, which
+reports a conflict and deliberately never resolves it.
 
 Deliberately: with **no** registry configured, any predicate is accepted. A
 server that has not opted into a vocabulary should not be broken by this

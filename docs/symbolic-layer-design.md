@@ -468,6 +468,14 @@ stops after PR 1, the tree is still better off.
   whether lineage should point *from* the tombstone (survivable, but a tombstone
   is not walkable either) or live outside the record graph entirely — which is
   really a 5.2/5.3 question about where derivation records belong.
+  **Answered for derivation by `inference-design.md` §3/§6:** lineage lives in
+  *both* places on purpose. The `derived_from` edges are what a walk uses; a
+  copy of the premise ids lives in the record's own codec-v4 `derivation`
+  field, precisely so it survives the target's tombstone. That is what lets a
+  derived record still explain itself after its premise is retracted, and what
+  lets recovery reconcile dependents against premises with no reverse index at
+  all. The same answer would work for `consolidate`'s `supersedes`, but 5.3
+  does not touch consolidation, so this entry stays open for that case.
 - **Shrinking the sparse case.** The table above says the cost is per *target*,
   not per edge, and that a single-incoming-edge target is the expensive shape —
   which is also the common one. Two levers, neither taken in PR 2: store the
