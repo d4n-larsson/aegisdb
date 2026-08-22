@@ -35,6 +35,10 @@
 #define MSG_FRAME 0u
 #define MSG_HEARTBEAT 1u
 #define MSG_RESET 2u
+/* The primary has a frame the replica's build cannot decode. Sent instead of
+ * that frame, so the replica stops with an actionable message rather than
+ * failing to decode it — or, worse, re-bootstrapping and hitting it again. */
+#define MSG_INCOMPATIBLE 3u
 #define MSG_HDR 17 /* magic(4) + type(1) + offset(8) + len(4) */
 #define POLL_MS 50
 #define MAX_PAYLOAD (64u * 1024 * 1024) /* sanity bound on a streamed frame */
@@ -167,10 +171,23 @@ static void *streamer(void *arg) {
     const cJSON *joff = cJSON_GetObjectItemCaseSensitive(req, "from_offset");
     const cJSON *jgen = cJSON_GetObjectItemCaseSensitive(req, "generation");
     const cJSON *jfp = cJSON_GetObjectItemCaseSensitive(req, "key_fingerprint");
+    const cJSON *jcv = cJSON_GetObjectItemCaseSensitive(req, "codec_version");
     const char *tok = cJSON_IsString(jtok) ? jtok->valuestring : "";
     const char *req_fp = cJSON_IsString(jfp) ? jfp->valuestring : "";
     uint64_t from_off = cJSON_IsNumber(joff) ? (uint64_t)joff->valuedouble : 0;
     uint64_t req_gen = cJSON_IsNumber(jgen) ? (uint64_t)jgen->valuedouble : 0;
+    /* Highest record codec the replica can decode. Absent means a build from
+     * before the field existed, which by definition tops out at v2 — and so
+     * does a negative or non-numeric value, since converting one to unsigned is
+     * undefined and "assume the older format" is the direction that withholds
+     * frames rather than corrupting a replica. A peer claiming more than this
+     * build can even write is clamped to what it can. */
+    unsigned peer_codec = RECORD_CODEC_V2;
+    if (cJSON_IsNumber(jcv) && jcv->valuedouble >= 0) {
+        peer_codec = jcv->valuedouble >= (double)RECORD_CODEC_MAX
+                         ? RECORD_CODEC_MAX
+                         : (unsigned)jcv->valuedouble;
+    }
 
     /* Constant-time compare of the token's SHA-256 (not the raw bytes): avoids
      * both the byte-by-byte short-circuit of strcmp and leaking the token's
@@ -233,8 +250,10 @@ static void *streamer(void *arg) {
         goto done;
     }
 
-    LOG_INFO("replication: replica subscribed from offset %llu (reset=%d)",
-             (unsigned long long)cursor, reset);
+    LOG_INFO("replication: replica subscribed from offset %llu (reset=%d, "
+             "codec_max=%u, ours=%u)",
+             (unsigned long long)cursor, reset, peer_codec,
+             (unsigned)RECORD_CODEC_MAX);
 
     /* Frame overhead depends only on the log's (immutable) encryption mode. A
      * compaction swap that could change db->log ends this session via the
@@ -271,6 +290,23 @@ static void *streamer(void *arg) {
             pthread_rwlock_unlock(&db->log_lock);
             if (rc != 0) {
                 break; /* transient — retry next tick */
+            }
+            /* The frame's first byte is its record codec version. Checking it
+             * here rather than refusing the handshake outright is deliberate: a
+             * cluster that never writes a fact never produces a v3 frame, so an
+             * older replica keeps working exactly as before and only a real
+             * incompatibility stops it. The alternative — comparing versions at
+             * subscribe time — would break every working mixed-version pair the
+             * moment the primary was upgraded, for a frame it may never send. */
+            if (plen >= 1 && (unsigned)payload[0] > peer_codec) {
+                LOG_ERROR("replication: replica cannot decode the frame at "
+                          "offset %llu (record codec v%u, replica reads up to "
+                          "v%u); upgrade the replica",
+                          (unsigned long long)cursor, (unsigned)payload[0],
+                          peer_codec);
+                (void)send_msg(fd, MSG_INCOMPATIBLE, cursor, NULL, 0);
+                free(payload);
+                goto done;
             }
             if (send_msg(fd, MSG_FRAME, cursor, payload, (uint32_t)plen) != 0) {
                 free(payload);
@@ -504,13 +540,16 @@ static void follow_session(ReplicationFollower *f) {
     if (db->config.encryption_enabled) {
         config_key_fingerprint(db->config.encryption_key, own_fp);
     }
-    char hs[320];
+    /* Sized for the longest handshake: a 128-byte token, two u64s, a 12-char
+     * fingerprint and the codec version, with room to spare. Truncation would
+     * emit invalid JSON, so the slack is deliberate. */
+    char hs[512];
     int hl =
         snprintf(hs, sizeof hs,
                  "{\"from_offset\":%llu,\"generation\":%llu,\"token\":\"%s\","
-                 "\"key_fingerprint\":\"%s\"}\n",
+                 "\"key_fingerprint\":\"%s\",\"codec_version\":%u}\n",
                  (unsigned long long)from_off, (unsigned long long)f->gen,
-                 f->token, own_fp);
+                 f->token, own_fp, (unsigned)RECORD_CODEC_MAX);
     if (net_write_all(fd, hs, (size_t)hl) != 0) {
         close(fd);
         return;
@@ -569,6 +608,18 @@ static void follow_session(ReplicationFollower *f) {
         if (type == MSG_HEARTBEAT) {
             atomic_store(&f->primary_size, offset);
             continue;
+        }
+        if (type == MSG_INCOMPATIBLE) {
+            /* Permanent until this binary is replaced: the offending frame is
+             * already durable on the primary, so reconnecting cannot help.
+             * Stop following and say what to do, rather than spin. */
+            LOG_ERROR("replication: primary holds a record format this build "
+                      "cannot read (at offset %llu; this build reads up to "
+                      "codec v%u). Upgrade this replica; retrying will not "
+                      "help.",
+                      (unsigned long long)offset, (unsigned)RECORD_CODEC_MAX);
+            atomic_store(&f->stop, 1);
+            break;
         }
         if (type == MSG_RESET) {
             LOG_INFO("replication: reset from primary (compaction); "

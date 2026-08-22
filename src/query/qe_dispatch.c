@@ -94,6 +94,64 @@ static int want_embeddings(const cJSON *req) {
     return jr_bool(req, "include_embeddings", 1);
 }
 
+/* Parse an optional `fact` (ROADMAP 5.2) onto the record being built.
+ *   "fact": { "s": <id>, "p": "<predicate>", "o": "<literal>" | {"id": <id>} }
+ * Returns 0 (including when absent) or -1 with *err set.
+ *
+ * The subject and an id-valued object are **not** checked for existence.
+ * Mirroring `relate` was tempting, but a batch that inserts an entity and a
+ * fact about it in one request would then be refused for referencing a record
+ * that is written moments later — and the extractor path this exists for wants
+ * exactly that shape. A dangling reference is also not a security question: the
+ * fact lives on the *asserting* record, which carries the caller's namespace, so
+ * a pattern search still only ever returns records the caller owns. Asserting
+ * something about an id you cannot see reveals nothing about it. */
+static int build_fact(const cJSON *req, MemoryRecord *in, aegis_status_t *err) {
+    const cJSON *f = cJSON_GetObjectItemCaseSensitive(req, "fact");
+    if (!f || cJSON_IsNull(f)) {
+        return 0;
+    }
+    if (!cJSON_IsObject(f)) {
+        *err = AEGIS_ERR_INVALID_REQUEST;
+        return -1;
+    }
+    uint64_t subject = 0;
+    const char *pred = jr_str(f, "p", NULL);
+    if (jr_u64(f, "s", &subject) != 0 || !pred || !*pred) {
+        *err = AEGIS_ERR_INVALID_REQUEST;
+        return -1;
+    }
+    /* Bounded so the fact indexes can always intern it. Past this the fact
+     * would be stored but unreachable by any pattern naming its predicate,
+     * which is a worse outcome than refusing the write. */
+    if (strlen(pred) > FACT_MAX_PREDICATE_LEN) {
+        *err = AEGIS_ERR_INVALID_REQUEST;
+        return -1;
+    }
+    const cJSON *jo = cJSON_GetObjectItemCaseSensitive(f, "o");
+    if (cJSON_IsString(jo) && jo->valuestring) {
+        if (record_set_fact(in, FACT_OBJ_STRING, subject, pred, 0,
+                            jo->valuestring) != 0) {
+            *err = AEGIS_ERR_INTERNAL;
+            return -1;
+        }
+        return 0;
+    }
+    uint64_t oid = 0;
+    if (cJSON_IsObject(jo) && jr_u64(jo, "id", &oid) == 0) {
+        if (record_set_fact(in, FACT_OBJ_ID, subject, pred, oid, NULL) != 0) {
+            *err = AEGIS_ERR_INTERNAL;
+            return -1;
+        }
+        return 0;
+    }
+    /* A bare number is deliberately not an object: it would be ambiguous
+     * between an id reference and a numeric literal, and numeric literals do
+     * not exist (see docs/typed-facts-design.md §5). */
+    *err = AEGIS_ERR_INVALID_REQUEST;
+    return -1;
+}
+
 static int build_input_record(AegisDB *db, const cJSON *req, MemoryRecord *in,
                               aegis_status_t *err) {
     record_init(in);
@@ -129,6 +187,9 @@ static int build_input_record(AegisDB *db, const cJSON *req, MemoryRecord *in,
             *err = AEGIS_ERR_INTERNAL;
             return -1;
         }
+    }
+    if (build_fact(req, in, err) != 0) {
+        return -1;
     }
     const char **tags = NULL;
     size_t tn = 0;
@@ -258,6 +319,17 @@ static void stats_add_storage(cJSON *o, AegisDB *db) {
                                 (double)edge_index_edges(db->edges));
         cJSON_AddNumberToObject(idx, "edge_kinds",
                                 (double)edge_index_kinds(db->edges));
+        /* Indexed facts and the distinct predicates they use; both 0 with
+         * --no-fact-index. */
+        cJSON_AddNumberToObject(idx, "facts",
+                                (double)fact_index_facts(db->facts));
+        cJSON_AddNumberToObject(idx, "fact_predicates",
+                                (double)fact_index_predicates(db->facts));
+        /* Declared, not in use: 0 means no registry is configured, so every
+         * predicate is accepted. Worth being able to confirm from outside. */
+        cJSON_AddNumberToObject(
+            idx, "registered_predicates",
+            (double)predicate_registry_count(db->predicates));
         cJSON_AddNumberToObject(idx, "usage_tracked",
                                 (double)usage_index_count(db->usage));
         cJSON_AddNumberToObject(idx, "semantic",
@@ -276,6 +348,7 @@ static void stats_add_storage(cJSON *o, AegisDB *db) {
         size_t gb = tag_index_bytes(db->tags);
         size_t lb = lexical_index_bytes(db->lex);
         size_t eb = edge_index_bytes(db->edges);
+        size_t fb = fact_index_bytes(db->facts);
         size_t ub = usage_index_bytes(db->usage);
         size_t sb = semantic_index_bytes(db->sem);
         cJSON_AddNumberToObject(mem, "hash_bytes", (double)hb);
@@ -283,10 +356,12 @@ static void stats_add_storage(cJSON *o, AegisDB *db) {
         cJSON_AddNumberToObject(mem, "tag_bytes", (double)gb);
         cJSON_AddNumberToObject(mem, "lexical_bytes", (double)lb);
         cJSON_AddNumberToObject(mem, "edge_bytes", (double)eb);
+        cJSON_AddNumberToObject(mem, "fact_bytes", (double)fb);
         cJSON_AddNumberToObject(mem, "usage_bytes", (double)ub);
         cJSON_AddNumberToObject(mem, "semantic_bytes", (double)sb);
-        cJSON_AddNumberToObject(mem, "index_bytes_total",
-                                (double)(hb + tb + gb + lb + eb + ub + sb));
+        cJSON_AddNumberToObject(
+            mem, "index_bytes_total",
+            (double)(hb + tb + gb + lb + eb + fb + ub + sb));
         /* The configured backpressure cap (0 = unlimited), so a scraper can
          * alert on index_bytes_total approaching it. */
         cJSON_AddNumberToObject(mem, "index_bytes_limit",
@@ -554,8 +629,91 @@ static cJSON *handle_snapshot(AegisDB *db, const cJSON *req,
 
 static int parse_filters(const cJSON *req, const char *ns, SearchParams *p,
                          const char ***out_tags);
+static aegis_status_t parse_pattern(AegisDB *db, const cJSON *req,
+                                    SearchParams *p);
+
+/* Is a `pattern` present at all? Used by the ops that share SearchParams but do
+ * not honour it, so they refuse rather than silently drop a filter the caller
+ * asked for — the same reasoning `direction` and `kinds` follow on traverse. */
+static int has_pattern_field(const cJSON *req) {
+    const cJSON *pat = cJSON_GetObjectItemCaseSensitive(req, "pattern");
+    return pat && !cJSON_IsNull(pat);
+}
 
 #define MAX_BATCH 1000 /* max records per batch insert (bounds work/allocs) */
+
+/* Parse `search`'s `pattern` filter (ROADMAP 5.2) into p.
+ *   "pattern": { "s": <id>|"*", "p": "<pred>"|"*", "o": "<lit>"|{"id":N}|"*" }
+ * An omitted or "*" position is a wildcard. Returns AEGIS_OK, or an error: at
+ * least one position must be bound, since an all-wildcard pattern is a scan of
+ * every fact wearing a filter's clothes. */
+static aegis_status_t parse_pattern(AegisDB *db, const cJSON *req,
+                                    SearchParams *p) {
+    const cJSON *pat = cJSON_GetObjectItemCaseSensitive(req, "pattern");
+    if (!pat || cJSON_IsNull(pat)) {
+        return AEGIS_OK;
+    }
+    if (!cJSON_IsObject(pat)) {
+        return AEGIS_ERR_INVALID_REQUEST;
+    }
+    /* Reported before parsing, so a client learns the server cannot answer
+     * patterns at all rather than that its particular pattern was malformed. */
+    if (!db->facts) {
+        return AEGIS_ERR_NOT_READY;
+    }
+    p->has_pattern = 1;
+
+    const cJSON *js = cJSON_GetObjectItemCaseSensitive(pat, "s");
+    if (js && !cJSON_IsNull(js)) {
+        if (cJSON_IsNumber(js)) {
+            /* Through jr_u64, not a bare cast: converting a negative or
+             * >= 2^64 double to uint64_t is undefined, and in practice yields
+             * a garbage subject that silently matches the wrong facts (or
+             * traps, under a -fsanitize=float-cast-overflow build). The object
+             * position below already goes through it. */
+            if (jr_u64(pat, "s", &p->pat_subject) != 0) {
+                return AEGIS_ERR_INVALID_REQUEST;
+            }
+            p->pat_has_subject = 1;
+        } else if (!(cJSON_IsString(js) && js->valuestring &&
+                     strcmp(js->valuestring, "*") == 0)) {
+            return AEGIS_ERR_INVALID_REQUEST;
+        }
+    }
+    const cJSON *jp = cJSON_GetObjectItemCaseSensitive(pat, "p");
+    if (jp && !cJSON_IsNull(jp)) {
+        if (!cJSON_IsString(jp) || !jp->valuestring || !*jp->valuestring) {
+            return AEGIS_ERR_INVALID_REQUEST;
+        }
+        if (strcmp(jp->valuestring, "*") != 0) {
+            p->pat_predicate = jp->valuestring; /* borrowed from the request */
+        }
+    }
+    const cJSON *jo = cJSON_GetObjectItemCaseSensitive(pat, "o");
+    if (jo && !cJSON_IsNull(jo)) {
+        if (cJSON_IsString(jo) && jo->valuestring) {
+            if (strcmp(jo->valuestring, "*") != 0) {
+                p->pat_has_object = 1;
+                p->pat_object_kind = FACT_OBJ_STRING;
+                p->pat_object_str = jo->valuestring;
+            }
+        } else if (cJSON_IsObject(jo)) {
+            uint64_t oid = 0;
+            if (jr_u64(jo, "id", &oid) != 0) {
+                return AEGIS_ERR_INVALID_REQUEST;
+            }
+            p->pat_has_object = 1;
+            p->pat_object_kind = FACT_OBJ_ID;
+            p->pat_object_id = oid;
+        } else {
+            return AEGIS_ERR_INVALID_REQUEST;
+        }
+    }
+    if (!p->pat_has_subject && !p->pat_predicate && !p->pat_has_object) {
+        return AEGIS_ERR_INVALID_REQUEST;
+    }
+    return AEGIS_OK;
+}
 
 /* Build one input record from `spec`, pin it to `ns` when set. 0/-1 via *err. */
 static int build_pinned(AegisDB *db, const cJSON *spec, const char *ns,
@@ -717,6 +875,14 @@ static cJSON *handle_update(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     if (jr_u64(req, "id", &id) != 0) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     }
+    /* A fact is immutable: changing what a record asserts is a supersession,
+     * not an edit (see build_fact). Refused rather than ignored, for the reason
+     * bulk `delete` refuses a `pattern` — a silent no-op on a field the caller
+     * spelled correctly is worse than either doing it or saying no. */
+    const cJSON *jfact = cJSON_GetObjectItemCaseSensitive(req, "fact");
+    if (jfact && !cJSON_IsNull(jfact)) {
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
     UpdatePatch patch;
     memset(&patch, 0, sizeof(patch));
     const char *data = jr_str(req, "data", NULL);
@@ -769,6 +935,14 @@ static cJSON *handle_delete(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
         return o;
     }
     /* no id: delete every record matching the filters (requires >=1 filter) */
+    /* A `pattern` is refused rather than ignored. Deleting by pattern is a
+     * coherent operation and may well be worth having, but it is a new
+     * destructive capability — not something to acquire as a side effect of the
+     * release that added the read filter. Silently dropping it would be worse
+     * than either choice. */
+    if (has_pattern_field(req)) {
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
     SearchParams p;
     const char **tags = NULL;
     if (parse_filters(req, ns, &p, &tags) != 0) {
@@ -898,6 +1072,13 @@ static cJSON *handle_count(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     const char **tags = NULL;
     if (parse_filters(req, ns, &p, &tags) != 0) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
+    /* `count` shares the candidate path, so a pattern narrows it for free —
+     * "how many records assert this?" is the obvious companion to the search. */
+    aegis_status_t pst = parse_pattern(db, req, &p);
+    if (pst != AEGIS_OK) {
+        free(tags);
+        return json_error_status(pst);
     }
     size_t count = 0;
     int capped = 0;
@@ -1060,6 +1241,13 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     }
     p.embedding = emb;
     p.embedding_dim = en;
+
+    aegis_status_t pst = parse_pattern(db, req, &p);
+    if (pst != AEGIS_OK) {
+        free(tags);
+        free(emb);
+        return json_error_status(pst);
+    }
 
     /* Opt-in per-hit ranking breakdown (ROADMAP 1.2): off by default so normal
      * responses stay lean; clients/inspection UIs pass "explain": true. */

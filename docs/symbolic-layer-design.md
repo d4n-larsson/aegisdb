@@ -47,7 +47,9 @@ what it is.
 - **Not a forward-edge index.** Deliberate asymmetry — see §3.
 - **Not a fix for in-record edge storage.** `MAX_RELATIONSHIPS` (4096,
   `qe_internal.h:12`) and the write amplification of rewriting a record per
-  `relate` both stay. 5.1 does not need them fixed; 5.2 cannot avoid them.
+  `relate` both stay. 5.1 does not need them fixed. (This originally said 5.2
+  could not avoid them; on writing `typed-facts-design.md` that turned out to be
+  wrong — a fact is a record *field*, not an edge, so it adds no adjacency.)
 - **Not weighted or attributed edges.** `kind` stays a string. No properties.
 - **Not referential integrity.** A tombstoned record leaves dangling forward
   edges in its peers' records, as today. See §5.4 and §12.
@@ -477,6 +479,9 @@ stops after PR 1, the tree is still better off.
   `edge_bytes` in a real deployment says so — which §9 makes visible.
 - **When to move edges out of the record.** In-record storage caps a node at
   `MAX_RELATIONSHIPS` and rewrites the whole record per `relate`. 5.1 does not
-  need this changed and should not change it. 5.2's typed facts will force the
-  question; the answer is probably an edge record type with its own log frames,
-  and it deserves its own design doc rather than a paragraph here.
+  need this changed and should not change it. This entry predicted 5.2 would
+  force the question — it does not: `typed-facts-design.md` puts a fact in a
+  record *field*, adding no adjacency at all, so nothing there touches edge
+  storage. The question is still open and now has no scheduled forcing function,
+  which makes it a latency/RAM concern to revisit when a real graph gets dense
+  rather than a blocker for anything queued.

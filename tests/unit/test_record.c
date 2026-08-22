@@ -322,6 +322,278 @@ static void test_clone_rejects_embedding_overflow(void) {
         &r); /* frees the 1-float buffer (record_free ignores vec_count) */
 }
 
+/* ---- typed facts, codec v3 (ROADMAP 5.2) -------------------------------- */
+
+/* THE compatibility test. A record with no fact must encode to exactly the
+ * bytes the v2 codec produced before facts existed — not merely round-trip.
+ * These bytes were captured from the pre-5.2 encoder for the record built
+ * below; if this fails, an existing log has become unreadable or a replica of a
+ * different version has started disagreeing, and neither shows up as a
+ * round-trip failure. */
+static void test_factless_record_encodes_byte_identical_v2(void) {
+    static const uint8_t GOLDEN_V2[] = {
+        0x02, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc8, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x3f, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x61,
+        0x63, 0x6d, 0x65, 0x02, 0x00, 0x05, 0x00, 0x00, 0x00, 0x61, 0x6c, 0x70,
+        0x68, 0x61, 0x04, 0x00, 0x00, 0x00, 0x62, 0x65, 0x74, 0x61, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x07, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x0a, 0x00, 0x00, 0x00, 0x73, 0x75, 0x70, 0x65, 0x72, 0x73, 0x65, 0x64,
+        0x65, 0x73, 0x02, 0x00, 0x00, 0x00, 0x68, 0x69,
+    };
+    MemoryRecord r;
+    record_init(&r);
+    r.id = 7;
+    r.type = MEM_EPISODIC;
+    r.created = 100;
+    r.updated = 200;
+    r.importance = 0.5F;
+    r.confidence = 1.0F;
+    const char *tags[] = {"alpha", "beta"};
+    TEST_ASSERT_EQUAL_INT(0, record_set_tags(&r, tags, 2));
+    r.agent_id = strdup("acme");
+    TEST_ASSERT_EQUAL_INT(0, record_add_relationship(&r, 7, 9, "supersedes"));
+    r.data = strdup("hi");
+    r.data_len = 2;
+
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&r, &buf, &n));
+    TEST_ASSERT_EQUAL_size_t(sizeof(GOLDEN_V2), n);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(GOLDEN_V2, buf, sizeof(GOLDEN_V2));
+    TEST_ASSERT_EQUAL_UINT8(2, buf[0]); /* still announces itself as v2 */
+    free(buf);
+    record_free(&r);
+}
+
+/* A frame written before facts existed decodes with no fact, rather than
+ * failing or inventing one. */
+static void test_v2_frame_decodes_with_no_fact(void) {
+    MemoryRecord src;
+    record_init(&src);
+    src.id = 3;
+    src.type = MEM_SEMANTIC;
+    src.data = strdup("plain");
+    src.data_len = 5;
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&src, &buf, &n));
+    TEST_ASSERT_EQUAL_UINT8(2, buf[0]);
+
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(0, record_decode(buf, n, &out));
+    TEST_ASSERT_EQUAL_INT(FACT_NONE, out.fact.kind);
+    TEST_ASSERT_NULL(out.fact.predicate);
+    TEST_ASSERT_NULL(out.fact.object_str);
+    free(buf);
+    record_free(&out);
+    record_free(&src);
+}
+
+static void test_fact_id_object_roundtrip(void) {
+    MemoryRecord src;
+    record_init(&src);
+    src.id = 11;
+    src.type = MEM_SEMANTIC;
+    src.data = strdup("hnsw.c is part of the storage layer");
+    src.data_len = strlen("hnsw.c is part of the storage layer");
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_fact(&src, FACT_OBJ_ID, 42, "part_of", 99, NULL));
+
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&src, &buf, &n));
+    TEST_ASSERT_EQUAL_UINT8(3, buf[0]); /* a fact is what makes it v3 */
+
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(0, record_decode(buf, n, &out));
+    TEST_ASSERT_EQUAL_INT(FACT_OBJ_ID, out.fact.kind);
+    TEST_ASSERT_EQUAL_UINT64(42, out.fact.subject);
+    TEST_ASSERT_EQUAL_STRING("part_of", out.fact.predicate);
+    TEST_ASSERT_EQUAL_UINT64(99, out.fact.object_id);
+    TEST_ASSERT_NULL(out.fact.object_str);
+    /* the payload still decodes, i.e. the new fields did not desync the cursor */
+    TEST_ASSERT_EQUAL_size_t(src.data_len, out.data_len);
+    TEST_ASSERT_EQUAL_INT(0, memcmp(src.data, out.data, out.data_len));
+    free(buf);
+    record_free(&out);
+    record_free(&src);
+}
+
+static void test_fact_string_object_roundtrip(void) {
+    MemoryRecord src;
+    record_init(&src);
+    src.id = 12;
+    src.type = MEM_SEMANTIC;
+    src.data = strdup("the recall hook defaults to embedding_mode=none");
+    src.data_len = strlen("the recall hook defaults to embedding_mode=none");
+    TEST_ASSERT_EQUAL_INT(0, record_set_fact(&src, FACT_OBJ_STRING, 42,
+                                             "defaults_to", 0, "none"));
+
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&src, &buf, &n));
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(0, record_decode(buf, n, &out));
+    TEST_ASSERT_EQUAL_INT(FACT_OBJ_STRING, out.fact.kind);
+    TEST_ASSERT_EQUAL_STRING("defaults_to", out.fact.predicate);
+    TEST_ASSERT_EQUAL_STRING("none", out.fact.object_str);
+    TEST_ASSERT_EQUAL_UINT64(0, out.fact.object_id);
+    TEST_ASSERT_EQUAL_size_t(src.data_len, out.data_len);
+    free(buf);
+    record_free(&out);
+    record_free(&src);
+}
+
+/* An empty-string object is a real value, distinct from "no object". */
+static void test_fact_empty_string_object(void) {
+    MemoryRecord src;
+    record_init(&src);
+    src.id = 13;
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_fact(&src, FACT_OBJ_STRING, 1, "equals", 0, ""));
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&src, &buf, &n));
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(0, record_decode(buf, n, &out));
+    TEST_ASSERT_EQUAL_INT(FACT_OBJ_STRING, out.fact.kind);
+    TEST_ASSERT_NOT_NULL(out.fact.object_str);
+    TEST_ASSERT_EQUAL_STRING("", out.fact.object_str);
+    free(buf);
+    record_free(&out);
+    record_free(&src);
+}
+
+/* A record decoded from a zero-length payload has data == NULL, and anything
+ * that re-appends it (relate, update, compaction) encodes it again. That path
+ * fed a NULL source to memcpy — undefined even for n == 0, and invisible until
+ * something actually encoded a NULL payload. */
+static void test_encode_null_payload_roundtrips(void) {
+    MemoryRecord r;
+    record_init(&r);
+    r.id = 21;
+    r.type = MEM_SEMANTIC;
+    /* data left NULL, data_len 0 — exactly what decode produces for dl == 0 */
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&r, &buf, &n));
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(0, record_decode(buf, n, &out));
+    TEST_ASSERT_EQUAL_size_t(0, out.data_len);
+    TEST_ASSERT_NULL(out.data);
+    /* and again, from the decoded record: this is the real-world shape */
+    uint8_t *buf2 = NULL;
+    size_t n2 = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&out, &buf2, &n2));
+    TEST_ASSERT_EQUAL_size_t(n, n2);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(buf, buf2, n);
+    free(buf2);
+    free(buf);
+    record_free(&out);
+    record_free(&r);
+}
+
+/* A kind this build does not know must be refused, not guessed at: guessing its
+ * width would desync the cursor and decode the payload as garbage. */
+static void test_decode_rejects_unknown_fact_kind(void) {
+    MemoryRecord src;
+    record_init(&src);
+    src.id = 14;
+    src.data = strdup("payload");
+    src.data_len = 7;
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_fact(&src, FACT_OBJ_ID, 1, "part_of", 2, NULL));
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&src, &buf, &n));
+
+    /* For this record — no agent_id, no tags, no vectors, no relationships —
+     * the fact-kind byte sits at a fixed offset:
+     *   ver 1 + id 8 + type 1 + created 8 + updated 8 + importance 4 +
+     *   confidence 4 + deleted 1 + expires 8 + agent(NULL marker) 4 +
+     *   tag_count 2 + vec_count 4 + dim 4 + rel_count 2  =  59
+     * Asserting the byte is what we expect first, so a format change fails here
+     * loudly instead of silently testing the wrong byte. */
+    const size_t KIND_OFF = 59;
+    TEST_ASSERT_TRUE(n > KIND_OFF);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)FACT_OBJ_ID, buf[KIND_OFF]);
+
+    buf[KIND_OFF] = 99; /* not a known FactKind */
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(-1, record_decode(buf, n, &out));
+
+    buf[KIND_OFF] = (uint8_t)FACT_OBJ_ID; /* restored: decodes again */
+    TEST_ASSERT_EQUAL_INT(0, record_decode(buf, n, &out));
+    record_free(&out);
+    free(buf);
+    record_free(&src);
+}
+
+static void test_set_fact_validates_and_clears(void) {
+    MemoryRecord r;
+    record_init(&r);
+    /* a predicate is required */
+    TEST_ASSERT_EQUAL_INT(-1,
+                          record_set_fact(&r, FACT_OBJ_ID, 1, NULL, 2, NULL));
+    TEST_ASSERT_EQUAL_INT(-1, record_set_fact(&r, FACT_OBJ_ID, 1, "", 2, NULL));
+    /* a string object is required for FACT_OBJ_STRING */
+    TEST_ASSERT_EQUAL_INT(
+        -1, record_set_fact(&r, FACT_OBJ_STRING, 1, "p", 0, NULL));
+    /* an unknown kind is refused */
+    TEST_ASSERT_EQUAL_INT(-1,
+                          record_set_fact(&r, (FactKind)7, 1, "p", 0, NULL));
+    TEST_ASSERT_EQUAL_INT(FACT_NONE, r.fact.kind);
+
+    /* set, then replace, then clear — no leaks, and the old strings go */
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_fact(&r, FACT_OBJ_STRING, 1, "first", 0, "a"));
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_fact(&r, FACT_OBJ_STRING, 1, "second", 0, "b"));
+    TEST_ASSERT_EQUAL_STRING("second", r.fact.predicate);
+    TEST_ASSERT_EQUAL_STRING("b", r.fact.object_str);
+    TEST_ASSERT_EQUAL_INT(0, record_set_fact(&r, FACT_NONE, 0, NULL, 0, NULL));
+    TEST_ASSERT_EQUAL_INT(FACT_NONE, r.fact.kind);
+    TEST_ASSERT_NULL(r.fact.predicate);
+    TEST_ASSERT_NULL(r.fact.object_str);
+    record_free(&r);
+}
+
+/* Switching object kinds must not leave the old object string behind. */
+static void test_set_fact_switching_kinds_releases_object(void) {
+    MemoryRecord r;
+    record_init(&r);
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_fact(&r, FACT_OBJ_STRING, 1, "p", 0, "literal"));
+    TEST_ASSERT_EQUAL_INT(0,
+                          record_set_fact(&r, FACT_OBJ_ID, 1, "p", 55, NULL));
+    TEST_ASSERT_EQUAL_INT(FACT_OBJ_ID, r.fact.kind);
+    TEST_ASSERT_NULL(r.fact.object_str);
+    TEST_ASSERT_EQUAL_UINT64(55, r.fact.object_id);
+    record_free(&r);
+}
+
+static void test_clone_copies_the_fact(void) {
+    MemoryRecord src;
+    record_init(&src);
+    src.id = 15;
+    TEST_ASSERT_EQUAL_INT(0, record_set_fact(&src, FACT_OBJ_STRING, 42,
+                                             "defaults_to", 0, "none"));
+    MemoryRecord *cp = record_clone(&src);
+    TEST_ASSERT_NOT_NULL(cp);
+    TEST_ASSERT_EQUAL_INT(FACT_OBJ_STRING, cp->fact.kind);
+    TEST_ASSERT_EQUAL_STRING("defaults_to", cp->fact.predicate);
+    TEST_ASSERT_EQUAL_STRING("none", cp->fact.object_str);
+    /* deep, not aliased */
+    TEST_ASSERT_TRUE(cp->fact.predicate != src.fact.predicate);
+    TEST_ASSERT_TRUE(cp->fact.object_str != src.fact.object_str);
+    record_free(cp);
+    free(cp);
+    record_free(&src);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_init_defaults);
@@ -335,5 +607,15 @@ int main(void) {
     RUN_TEST(test_clone_rejects_embedding_overflow);
     RUN_TEST(test_clone_is_deep);
     RUN_TEST(test_multivector_roundtrip);
+    RUN_TEST(test_factless_record_encodes_byte_identical_v2);
+    RUN_TEST(test_v2_frame_decodes_with_no_fact);
+    RUN_TEST(test_fact_id_object_roundtrip);
+    RUN_TEST(test_fact_string_object_roundtrip);
+    RUN_TEST(test_fact_empty_string_object);
+    RUN_TEST(test_encode_null_payload_roundtrips);
+    RUN_TEST(test_decode_rejects_unknown_fact_kind);
+    RUN_TEST(test_set_fact_validates_and_clears);
+    RUN_TEST(test_set_fact_switching_kinds_releases_object);
+    RUN_TEST(test_clone_copies_the_fact);
     return UNITY_END();
 }

@@ -236,6 +236,25 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
         return AEGIS_ERR_INVALID_REQUEST;
     }
 
+    /* The vocabulary is enforced here rather than at the wire layer so no
+     * writer can route around it — and ahead of the type dispatch so that
+     * includes working memory, which returns before the persisted path and
+     * would otherwise accept an undeclared predicate on a server that
+     * configured a registry. Deliberately *not* in validate_common, which
+     * `update` also calls: a registry edited between runs would then make an
+     * old record's existing fact block an unrelated edit to its tags. A fact is
+     * immutable, so checking it once at insert is checking it exactly when it
+     * can change. The replica path deliberately does not check: it applies what
+     * the primary already accepted, and re-judging would desync the two. */
+    if (in->fact.kind != FACT_NONE && db->predicates) {
+        char why[256];
+        if (predicate_registry_check(db->predicates, in->fact.predicate,
+                                     in->fact.kind, why, sizeof why) != 0) {
+            LOG_DEBUG("insert refused: %s", why);
+            return AEGIS_ERR_INVALID_REQUEST;
+        }
+    }
+
     if (in->type == MEM_WORKING) {
         st = require_phase(db, 4);
         if (st != AEGIS_OK) {
@@ -316,6 +335,7 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
             edge_index_add(db->edges, rec->id, rec->relationships[i].to_id,
                            rec->relationships[i].kind);
         }
+        db_fact_index_apply(db, rec, 1);
         usage_index_track(db->usage, rec->id);
         if (rec->embedding_dim && rec->vec_count) {
             semantic_index_add(db->sem, rec->id, rec->embedding, rec->vec_count,
@@ -448,9 +468,11 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
             tag_index_add(db->tags, cur.tags[i], cur.id);
         }
     }
-    /* No edge-index work here on purpose: an update patch reaches only tags and
-     * the payload, never `relationships` (those move through relate/delete), so
-     * the incoming-edge map is unaffected by a semantic update. */
+    /* No edge- or fact-index work here on purpose. An update patch reaches only
+     * tags and the payload — never `relationships` (relate/delete own those),
+     * and never `fact`, which is immutable by design: changing what a record
+     * asserts is a supersession, not an edit, so it leaves the auditable chain
+     * 2.1/2.2 already provide instead of silently rewriting history. */
     if (st == AEGIS_OK && patch->has_data) {
         /* Same discipline for the payload text: unindex the version that just
          * stopped being current, then index the one that replaced it. */
@@ -513,6 +535,7 @@ aegis_status_t qe_delete(AegisDB *db, uint64_t id, const char *ns) {
      * reports an edge whose endpoint is not live, though a record's own
      * relationships array may still name one. */
     edge_index_remove_target(db->edges, cur.id);
+    db_fact_index_apply(db, &cur, 0);
     usage_index_untrack(db->usage, cur.id);
     if (cur.embedding_dim) {
         semantic_index_remove(db->sem, cur.id);

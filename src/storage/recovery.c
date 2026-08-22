@@ -173,6 +173,11 @@ long recovery_run(AegisDB *db) {
                                    r.relationships[k].kind);
                 }
             }
+            /* The fact indexes are derived too, so they rebuild in full here.
+             * Unlike the edge index there is no endpoint-liveness question: a
+             * fact is a property of the record holding it, and that record is
+             * live by construction in this loop. */
+            db_fact_index_apply(db, &r, 1);
             /* Establish the slot; its counters are restored from the usage
              * checkpoint below, which only writes onto slots that exist here —
              * so a record deleted since the checkpoint stays gone. */

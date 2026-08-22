@@ -377,7 +377,7 @@ does deterministically, at write time, for free.
   provenance-density and wrong for knowledge-graph density. 5.1 does not change
   it; 5.2 cannot avoid confronting it.
 
-### 5.2 Typed facts & a predicate registry
+### 5.2 Typed facts & a predicate registry — *shipped (`fact` on `insert`, `pattern` on `search`; see `typed-facts-design.md`)*
 
 - **Why now:** `data` is an opaque blob, so there is nothing to unify against
   and no way to state a constraint. Tags are a flat set with no subsumption, so
@@ -401,6 +401,36 @@ does deterministically, at write time, for free.
 - **Done when:** a fact written as a triple is retrievable by pattern
   (`{"s": 42, "p": "prefers", "o": "*"}`), the registry loads from config, and a
   record with no `fact` behaves exactly as it does today.
+- **Designed:** `typed-facts-design.md`. Two things the design settled that the
+  entry above left open. The subject is a **record id**, not a bare symbol, so
+  tenant isolation over facts is the isolation already shipped rather than a
+  second mechanism — at the cost of needing an "entity record" convention for
+  things that are not memories. And this is the first Horizon 5 item to touch the
+  **durable** record format: codec v3 adds the triple, but a record with no fact
+  still encodes as v2 byte-for-byte, so a deployment that never writes a fact is
+  unchanged on disk and on the wire. That also confines a format change nobody
+  can downgrade past to the deployments that opted in.
+- **Found while designing:** the replication handshake negotiated no codec
+  version at all, so a primary writing a newer record format streamed frames an
+  older replica could only reject, frame by frame, with no way to say why. Fixed
+  as part of this horizon: the handshake now carries a `codec_version` and the
+  primary withholds a frame the replica cannot decode, naming the offset and
+  both versions. Worth having regardless of facts.
+- **Shipped:** codec v3 carries an optional `{s, p, o}` triple, and a record
+  with no fact still encodes as v2 byte-for-byte — so a deployment that never
+  writes a fact is unchanged on disk and on the wire, and a format change nobody
+  can downgrade past is confined to those who opted in. Three derived indexes
+  (`fact_index.h/.c`: subject, object, predicate) answer any non-empty subset of
+  the triple; `--predicate-registry` declares the vocabulary and a `fact` naming
+  an undeclared predicate — or the wrong object kind for it — is refused at
+  insert. `search` and `count` take a `pattern`; bulk `delete` refuses one rather
+  than quietly ignoring it. `stats` reports
+  `facts`/`fact_predicates`/`registered_predicates`/`fact_bytes`.
+- **Held to the non-goal:** `pattern` has no variables, no disjunction and no
+  joins, so it stays a filter on an existing op rather than the beginning of a
+  query language. `cardinality`, `symmetric`, `transitive`, `inverse_of` and
+  `mutex_with` are declared and validated for coherence but nothing acts on
+  them — that is 5.3.
 
 ### 5.3 Deterministic inference & truth maintenance
 

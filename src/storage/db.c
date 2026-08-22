@@ -68,13 +68,40 @@ int db_save_metadata(AegisDB *db) {
     return fs_write_atomic(db->path_meta, buf, sizeof(buf), 0644);
 }
 
+/* Index (or unindex) a record's fact, if it has one. Every maintenance site
+ * goes through this so the argument order and the "no fact" case cannot drift
+ * apart between them. */
+void db_fact_index_apply(AegisDB *db, const MemoryRecord *r, int add) {
+    if (!db->facts || r->fact.kind == FACT_NONE) {
+        return;
+    }
+    if (add) {
+        /* A failure here leaves the fact durable but unindexed: no pattern
+         * naming it will ever match, and the `facts` stat under-counts. None of
+         * the call sites can undo the write — recovery and the replica apply
+         * are replaying a log that is already committed upstream — so the least
+         * bad outcome is to say so once, loudly, rather than let the index and
+         * the log drift apart in silence. */
+        if (fact_index_add(db->facts, r->id, r->fact.subject, r->fact.predicate,
+                           r->fact.kind, r->fact.object_id,
+                           r->fact.object_str) != 0) {
+            LOG_WARN("fact index: record %llu not indexed (predicate \"%s\"); "
+                     "it will not match any pattern",
+                     (unsigned long long)r->id, r->fact.predicate);
+        }
+    } else {
+        fact_index_remove(db->facts, r->id, r->fact.subject, r->fact.predicate,
+                          r->fact.kind, r->fact.object_id, r->fact.object_str);
+    }
+}
+
 uint64_t db_index_bytes(AegisDB *db) {
     pthread_rwlock_rdlock(&db->index_lock);
     uint64_t total =
         (uint64_t)hash_index_bytes(db->hash) + time_index_bytes(db->time) +
         tag_index_bytes(db->tags) + lexical_index_bytes(db->lex) +
-        edge_index_bytes(db->edges) + usage_index_bytes(db->usage) +
-        semantic_index_bytes(db->sem);
+        edge_index_bytes(db->edges) + fact_index_bytes(db->facts) +
+        usage_index_bytes(db->usage) + semantic_index_bytes(db->sem);
     pthread_rwlock_unlock(&db->index_lock);
     return total;
 }
@@ -245,6 +272,7 @@ int db_replica_apply(AegisDB *db, uint64_t offset, const uint8_t *payload,
                     edge_index_remove(db->edges, p.id, p.relationships[i].to_id,
                                       p.relationships[i].kind);
                 }
+                db_fact_index_apply(db, &p, 0);
                 usage_index_untrack(db->usage, p.id);
                 if (p.embedding_dim && p.vec_count) {
                     semantic_index_remove(db->sem, p.id);
@@ -282,6 +310,7 @@ int db_replica_apply(AegisDB *db, uint64_t offset, const uint8_t *payload,
                                r.relationships[i].kind);
             }
         }
+        db_fact_index_apply(db, &r, 1);
         usage_index_track(db->usage, r.id);
         if (r.embedding_dim == db->config.embedding_dimensions && r.embedding &&
             r.vec_count) {
@@ -316,14 +345,16 @@ int db_reset_replica(AegisDB *db) {
     /* Only replace the lexical index if this server builds one at all. */
     LexicalIndex *nlex = db->lex ? lexical_index_create() : NULL;
     EdgeIndex *nedges = db->edges ? edge_index_create() : NULL;
+    FactIndex *nfacts = db->facts ? fact_index_create() : NULL;
     UsageIndex *nusage = db->usage ? usage_index_create() : NULL;
     if (!nh || !nt || !ntag || (db->lex && !nlex) || (db->edges && !nedges) ||
-        (db->usage && !nusage)) {
+        (db->facts && !nfacts) || (db->usage && !nusage)) {
         hash_index_free(nh);
         time_index_free(nt);
         tag_index_free(ntag);
         lexical_index_free(nlex);
         edge_index_free(nedges);
+        fact_index_free(nfacts);
         usage_index_free(nusage);
         return -1;
     }
@@ -340,6 +371,10 @@ int db_reset_replica(AegisDB *db) {
     if (db->edges) {
         edge_index_free(db->edges);
         db->edges = nedges;
+    }
+    if (db->facts) {
+        fact_index_free(db->facts);
+        db->facts = nfacts;
     }
     if (db->usage) {
         usage_index_free(db->usage);
@@ -695,6 +730,26 @@ int db_open(AegisDB *db, const Config *cfg) {
     /* Opt-out (--no-edge-index) leaves db->edges NULL; every call site treats
      * NULL as "no edge index", and a reverse `traverse` reports NOT_READY. */
     db->edges = cfg->edge_index ? edge_index_create() : NULL;
+    /* Opt-out (--no-fact-index) leaves db->facts NULL; every call site treats
+     * NULL as "no fact index", and `search` with a `pattern` reports NOT_READY. */
+    db->facts = cfg->fact_index ? fact_index_create() : NULL;
+    /* A malformed vocabulary file fails startup rather than degrading to "no
+     * registry": an operator who configured one is relying on it, and silently
+     * accepting every predicate instead would be the opposite of what they
+     * asked for. The message names the offending predicate. */
+    if (cfg->predicate_registry[0]) {
+        char perr[256] = "";
+        db->predicates =
+            predicate_registry_load(cfg->predicate_registry, perr, sizeof perr);
+        if (!db->predicates) {
+            LOG_ERROR("predicate registry %s: %s", cfg->predicate_registry,
+                      perr);
+            goto fail_indexes;
+        }
+        LOG_INFO("predicate registry: %zu predicates from %s",
+                 predicate_registry_count(db->predicates),
+                 cfg->predicate_registry);
+    }
     db->usage = cfg->usage_feedback ? usage_index_create() : NULL;
     db->sem = semantic_index_create(cfg->embedding_dimensions,
                                     cfg->ann_threshold, cfg->ann_ef_search,
@@ -704,7 +759,7 @@ int db_open(AegisDB *db, const Config *cfg) {
     db->tenants = tenant_table_create();
     if (!db->hash || !db->time || !db->tags || !db->sem || !db->working ||
         !db->tenants || (cfg->lexical_index && !db->lex) ||
-        (cfg->edge_index && !db->edges) ||
+        (cfg->edge_index && !db->edges) || (cfg->fact_index && !db->facts) ||
         (cfg->usage_feedback && !db->usage)) {
         LOG_ERROR("index allocation failed");
         goto fail_indexes;
@@ -740,6 +795,8 @@ fail_indexes:
     tag_index_free(db->tags);
     lexical_index_free(db->lex);
     edge_index_free(db->edges);
+    fact_index_free(db->facts);
+    predicate_registry_free(db->predicates);
     usage_index_free(db->usage);
     semantic_index_free(db->sem);
     working_store_free(db->working);
@@ -765,6 +822,8 @@ void db_close(AegisDB *db) {
     tag_index_free(db->tags);
     lexical_index_free(db->lex);
     edge_index_free(db->edges);
+    fact_index_free(db->facts);
+    predicate_registry_free(db->predicates);
     usage_index_free(db->usage);
     semantic_index_free(db->sem);
     working_store_free(db->working);

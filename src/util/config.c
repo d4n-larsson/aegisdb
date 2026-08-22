@@ -65,6 +65,7 @@ void config_defaults(Config *cfg) {
     cfg->max_index_bytes = 0;     /* 0 = unlimited index RAM */
     cfg->lexical_index = 1;       /* BM25 keyword index on by default */
     cfg->edge_index = 1;          /* reverse edge index on by default */
+    cfg->fact_index = 1;          /* fact/triple indexes on by default */
     cfg->usage_feedback = 1;      /* per-record recall feedback on by default */
     cfg->enabled_phase = 4;       /* all features enabled by default */
     cfg->log_level = AEGIS_LOG_INFO;
@@ -355,6 +356,10 @@ static void usage(const char *prog) {
         "get\n"
         "                           MEMORY_LIMIT past it (accepts K/M/G; "
         "0=off)\n"
+        "  --predicate-registry <f> declare the fact predicate vocabulary "
+        "(JSON); off by default\n"
+        "  --no-fact-index          skip the subject/object/predicate fact "
+        "indexes (disables `pattern`)\n"
         "  --no-edge-index          skip the reverse relationship index "
         "(disables backward traverse)\n"
         "  --no-lexical-index       skip the BM25 keyword index over "
@@ -520,6 +525,12 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
             UINT_OPT(cfg->query_scan_cap, 0, size_t, "query-scan-cap");
         } else if (strcmp(a, "--max-index-bytes") == 0) {
             SIZE_OPT(cfg->max_index_bytes, "max-index-bytes");
+        } else if (strcmp(a, "--predicate-registry") == 0) {
+            NEXT("--predicate-registry");
+            snprintf(cfg->predicate_registry, sizeof(cfg->predicate_registry),
+                     "%s", val);
+        } else if (strcmp(a, "--no-fact-index") == 0) {
+            cfg->fact_index = 0;
         } else if (strcmp(a, "--no-edge-index") == 0) {
             cfg->edge_index = 0;
         } else if (strcmp(a, "--no-lexical-index") == 0) {
