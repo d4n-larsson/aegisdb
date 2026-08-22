@@ -328,7 +328,7 @@ performs is one nobody can regression-test. Note that today the arrangement is
 (`judge_supersedes`, 2.1) doing work that a single-valued-predicate constraint
 does deterministically, at write time, for free.
 
-### 5.1 A queryable relationship graph *(foundational — do first)* — *designed (`symbolic-layer-design.md`)*
+### 5.1 A queryable relationship graph *(foundational — do first)* — *shipped (`traverse` `kinds`/`direction`/`traversal`; see `symbolic-layer-design.md`)*
 
 - **Why now:** `kind` is inert. `qe_traverse` enqueues every outgoing neighbour
   with no kind filter (`query_engine.c:741`) and there is no reverse adjacency,
@@ -352,7 +352,20 @@ does deterministically, at write time, for free.
   derivation lineage.
 - **Done when:** the supersession chain of a consolidated record is retrievable
   in one `traverse` call, backwards, without a scan — and a contract test
-  asserts an unrequested edge kind is not followed.
+  asserts an unrequested edge kind is not followed. ✅
+- **Shipped:** `traverse` takes `kinds` (union, capped at 16) and `direction`
+  (`out`/`in`/`both`), and every returned record carries a `traversal` object
+  (`depth`, `via_id`, `via_kind`, `via_direction`) so a walk reads as a path
+  rather than a set. Filtering and the forward walk need **no new state** — the
+  record is its own forward adjacency list — so only the reverse direction is
+  backed by an index (`edge_index.h/.c`: `to_id` → incoming sources, interned
+  kinds, derived and never checkpointed, rebuilt by recovery, `--no-edge-index`
+  opts out and makes a reverse walk `NOT_READY`). `stats` reports
+  `edges`/`edge_kinds`/`edge_bytes`, counted toward `--max-index-bytes`.
+- **Cost, measured:** dominated by the *target* table rather than the postings,
+  so it tracks fan-in — ~121 B/edge at one source per target (the provenance
+  shape), ~17 at a thousand. The design doc carries the table and two further
+  levers; this was a guess in the design and a measurement in the end.
 - **Cost to state plainly:** edges live *inside* the record (`record.h:11`), so
   every `relate` rewrites the whole record to the log, capped at
   `MAX_RELATIONSHIPS` (4096, `qe_internal.h:12`). That is right for

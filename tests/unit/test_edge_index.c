@@ -311,11 +311,10 @@ static void test_kind_cap_degrades_to_unknown(void) {
     TEST_ASSERT_EQUAL_UINT(EDGE_MAX_KINDS, edge_index_kinds(e));
     TEST_ASSERT_EQUAL_UINT(EDGE_MAX_KINDS + 1, edge_index_edges(e));
 
-    /* the overflow edge is present, flagged, and admitted by any filter */
-    const char *filter[] = {"kind_0"};
+    /* The overflow edge is present and flagged... */
     EdgeSource *s = NULL;
-    size_t n = sources_of(e, 99, filter, 1, &s);
-    TEST_ASSERT_EQUAL_UINT(2, n); /* kind_0's edge + the unknown candidate */
+    size_t n = sources_of(e, 99, NULL, 0, &s);
+    TEST_ASSERT_EQUAL_UINT(EDGE_MAX_KINDS + 1, n);
     int saw_unknown = 0;
     for (size_t i = 0; i < n; i++) {
         if (s[i].from_id == 999999) {
@@ -325,6 +324,52 @@ static void test_kind_cap_degrades_to_unknown(void) {
         }
     }
     TEST_ASSERT_EQUAL_INT(1, saw_unknown);
+    free(s);
+
+    /* ...but it is NOT admitted by a filter whose kinds all resolved: the table
+     * never shrinks, so a kind interned now was interned before that posting
+     * arrived, and the posting therefore cannot be it. Admitting it would hand
+     * back a record the caller did not ask for. */
+    const char *resolved[] = {"kind_0"};
+    n = sources_of(e, 99, resolved, 1, &s);
+    TEST_ASSERT_EQUAL_UINT(1, n);
+    TEST_ASSERT_EQUAL_UINT64(0, s[0].from_id); /* kind_0's edge, nothing else */
+    free(s);
+
+    /* It *is* a candidate when the filter names something un-interned, since
+     * then the index genuinely cannot rule it out. */
+    const char *unresolved[] = {"one_kind_too_many"};
+    n = sources_of(e, 99, unresolved, 1, &s);
+    TEST_ASSERT_EQUAL_UINT(1, n);
+    TEST_ASSERT_EQUAL_UINT64(999999, s[0].from_id);
+    TEST_ASSERT_EQUAL_INT(1, s[0].kind_unknown);
+    free(s);
+    edge_index_free(e);
+}
+
+/* Symmetry with the forward filter: a named filter never matches an edge that
+ * carries no kind, and an empty filter entry names nothing. */
+static void test_named_filter_never_matches_unkinded(void) {
+    EdgeIndex *e = edge_index_create();
+    edge_index_add(e, 1, 99, NULL);
+    edge_index_add(e, 2, 99, "supersedes");
+
+    const char *sup[] = {"supersedes"};
+    EdgeSource *s = NULL;
+    TEST_ASSERT_EQUAL_UINT(1, sources_of(e, 99, sup, 1, &s));
+    TEST_ASSERT_EQUAL_UINT64(2, s[0].from_id);
+    free(s);
+
+    const char *empty[] = {""};
+    TEST_ASSERT_EQUAL_UINT(0, sources_of(e, 99, empty, 1, &s));
+    TEST_ASSERT_NULL(s);
+
+    const char *nullent[] = {NULL};
+    TEST_ASSERT_EQUAL_UINT(0, sources_of(e, 99, nullent, 1, &s));
+    TEST_ASSERT_NULL(s);
+
+    /* an unfiltered query still returns both */
+    TEST_ASSERT_EQUAL_UINT(2, sources_of(e, 99, NULL, 0, &s));
     free(s);
     edge_index_free(e);
 }
@@ -581,6 +626,7 @@ int main(void) {
     RUN_TEST(test_kind_count_tracks_use_not_history);
     RUN_TEST(test_kind_cap_degrades_to_unknown);
     RUN_TEST(test_overlong_kind_is_unknown_not_truncated);
+    RUN_TEST(test_named_filter_never_matches_unkinded);
     RUN_TEST(test_null_index_is_inert);
     RUN_TEST(test_differential_against_reference_model);
     return UNITY_END();

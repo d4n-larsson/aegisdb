@@ -46,10 +46,10 @@ typedef struct {
     const char *kind;
     /* 1 when this edge's kind could not be interned (the table was full, or the
      * kind was longer than EDGE_MAX_KIND_LEN), so `kind` is *unknown* rather
-     * than absent. Such an edge is returned by every kind filter as a
-     * candidate; a caller that needs precision must confirm against the source
-     * record, which it is generally about to read anyway. Always 0 until a
-     * corpus actually exceeds the cap. */
+     * than absent. Such an edge is only ever returned as a *candidate*, and only
+     * for a filter that itself names an un-interned kind; a caller needing
+     * precision then confirms against the source record, which it is generally
+     * about to read anyway. Always 0 until a corpus exceeds the cap. */
     int kind_unknown;
 } EdgeSource;
 
@@ -87,8 +87,11 @@ void edge_index_remove_target(EdgeIndex *e, uint64_t id);
  * index, but neither lexicographic nor predictable from the outside. Do not
  * depend on it; sort the (small) result if you need a particular order.
  *
- * A kind filter also admits every edge whose kind is unknown — see
- * EdgeSource.kind_unknown. */
+ * A kind filter admits an edge whose kind is *unknown* (see
+ * EdgeSource.kind_unknown) only when the filter itself names a kind this index
+ * has never interned. If every requested kind resolved, an unknown edge is
+ * provably not one of them and is excluded — so in any deployment that has not
+ * exhausted EDGE_MAX_KINDS, a filtered result needs no confirmation at all. */
 int edge_index_sources(const EdgeIndex *e, uint64_t to_id,
                        const char *const *kinds, size_t n_kinds,
                        EdgeSource **out, size_t *out_n);

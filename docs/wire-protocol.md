@@ -704,7 +704,7 @@ the records reached within `depth` hops.
 | `depth` | integer | No | Max hops to follow; default `1` |
 | `agent_id` | string | No | Restrict the walk to one namespace |
 | `kinds` | string[] | No | Follow only edges of these kinds (union); up to 16. Omit to follow every kind, as before |
-| `direction` | string | No | `out` (default). Only the outgoing walk exists today; `in`/`both` are rejected with `INVALID_REQUEST` until the reverse index lands |
+| `direction` | string | No | `out` (default) \| `in` \| `both`. `in`/`both` need the reverse edge index and return `NOT_READY` under `--no-edge-index`; any other value is `INVALID_REQUEST` |
 
 **Response**: Same shape as `search` — `{ "ok": true, "records": [ … ], "total": N }`.
 
@@ -727,6 +727,21 @@ the kinds are stored in the record. Only the *reverse* direction needs an index
 (`--no-edge-index` disables it), because a record lists the edges it points
 along, not the ones pointing at it.
 
+**Direction.** A relationship is directed, so half the questions about it can
+only be asked backwards. `relate` records "v2 supersedes v1" as an edge from v2
+to v1, which makes *"what did v1 turn into?"* a `direction: "in"` walk:
+
+```json
+{ "operation": "traverse", "id": 42, "depth": 3,
+  "direction": "in", "kinds": ["supersedes"] }
+```
+
+`both` follows either orientation from each hop; `traversal.via_direction` then
+says which one reached a given record, since an id can be reachable both ways
+and `via_id` alone would not distinguish them. Namespace scoping applies
+identically in reverse: a record you do not own never appears, so a backward
+walk cannot be used to discover that someone else's memory links to yours.
+
 **Per-hop attribution (`traversal`)**: every returned record carries a
 `traversal` object saying how the walk reached it, so a result reads as a path
 rather than a set whose shape has to be inferred:
@@ -742,8 +757,9 @@ rather than a set whose shape has to be inferred:
 | Field | Notes |
 |-------|-------|
 | `depth` | Hops from the starting record; `0` is the starting record itself |
-| `via_id` | The record the reaching edge came from; absent at depth `0` |
+| `via_id` | The record at the other end of the reaching edge; absent at depth `0` |
 | `via_kind` | That edge's `kind`; absent at depth `0`, and absent for an unkinded edge |
+| `via_direction` | `out` if the edge was followed forwards (`via_id` points at this record), `in` if backwards (this record points at `via_id`); absent at depth `0` |
 
 The walk is breadth-first and records **first** discovery, so `via_*` describes
 the shortest path found; a record reachable by several edges reports whichever

@@ -423,22 +423,34 @@ int edge_index_sources(const EdgeIndex *e, uint64_t to_id,
         return 0;
     }
 
-    /* Resolve the filter to ids once, rather than per posting. A kind the index
-     * has never interned matches nothing, so it is dropped here instead of
-     * being confused with a posting whose kind is genuinely unknown. */
+    /* Resolve the filter to ids once, rather than per posting. */
     uint16_t *want = NULL;
     size_t want_n = 0;
+    /* Set when a requested kind is one this index has never interned. That is
+     * what decides whether an un-internable *posting* can match: if every
+     * requested kind resolved to an interned id, then a posting whose kind
+     * failed to intern cannot be any of them (the table never shrinks, so a
+     * kind that is interned now was interned before that posting arrived) — and
+     * admitting it would return a record the caller did not ask for. Only when a
+     * requested kind is itself un-internable is such a posting a real
+     * candidate. */
+    int want_unresolved = 0;
     if (n_kinds) {
         want = malloc(n_kinds * sizeof(*want));
         if (!want) {
             return -1;
         }
         for (size_t i = 0; i < n_kinds; i++) {
-            if (!kinds[i]) {
+            /* An absent or empty entry names nothing. Skipping it (rather than
+             * letting it resolve to EDGE_KIND_NONE) keeps this direction
+             * symmetric with the forward filter: a named filter never matches an
+             * edge that carries no kind. */
+            if (!kinds[i] || !kinds[i][0]) {
                 continue;
             }
             uint16_t k = kind_lookup(e, kinds[i]);
             if (k == EDGE_KIND_UNKNOWN) {
+                want_unresolved = 1;
                 continue;
             }
             want[want_n++] = k;
@@ -454,10 +466,11 @@ int edge_index_sources(const EdgeIndex *e, uint64_t to_id,
     for (size_t i = 0; i < t->n; i++) {
         uint16_t k = t->posts[i].kind;
         if (n_kinds) {
-            /* A posting whose kind could not be interned is a candidate for
-             * every filter: the index does not know what it is, so excluding it
-             * would drop a real answer. The caller confirms against the record. */
-            int keep = (k == EDGE_KIND_UNKNOWN);
+            /* An un-internable posting is a candidate only when the filter
+             * itself names something this index never interned (see above); the
+             * caller then confirms against the source record. Otherwise it is
+             * provably not a match and is excluded. */
+            int keep = (k == EDGE_KIND_UNKNOWN) && want_unresolved;
             for (size_t j = 0; !keep && j < want_n; j++) {
                 keep = (want[j] == k);
             }

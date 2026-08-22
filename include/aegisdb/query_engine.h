@@ -206,12 +206,24 @@ aegis_status_t qe_relate(AegisDB *db, uint64_t from_id, uint64_t to_id,
 
 /* ----- traversal (ROADMAP 5.1) ------------------------------------------- */
 
+/* Which way a traversal walks an edge. OUT is the zero value, so a zeroed
+ * TraverseParams reproduces the pre-5.1 walk. */
+typedef enum {
+    TRAVERSE_OUT = 0, /* follow edges the record points along */
+    TRAVERSE_IN = 1,  /* follow edges pointing at the record */
+    TRAVERSE_BOTH = 2
+} TraverseDirection;
+
 /* Which edges a traversal follows. A zeroed struct with only start_id/depth set
  * reproduces the pre-5.1 walk exactly: every outgoing edge, whatever its kind. */
 typedef struct {
     uint64_t start_id;
     int depth;                /* max hops to follow; negative treated as 0 */
     const char *agent_filter; /* NULL = no namespace restriction */
+    /* TRAVERSE_IN/BOTH need the reverse edge index, so they return NOT_READY on
+     * a server started with --no-edge-index. TRAVERSE_OUT never does: a record
+     * is its own forward adjacency list. */
+    TraverseDirection direction;
     /* Follow only edges of these kinds; an empty filter follows every kind
      * (the pre-5.1 behaviour). Strings are borrowed for the duration of the
      * call. An edge carrying no kind at all matches only the empty filter:
@@ -230,8 +242,13 @@ typedef struct {
  * start record reports depth 0 with via_id 0 and via_kind NULL. */
 typedef struct {
     int depth;       /* hops from the start record; 0 is the start record */
-    uint64_t via_id; /* record the reaching edge came from; 0 at depth 0 */
+    uint64_t via_id; /* the *other* end of the reaching edge; 0 at depth 0 */
     char *via_kind;  /* owned copy of that edge's kind; NULL if unkinded */
+    /* 1 when this hop was reached by walking an edge backwards, i.e. via_id
+     * points *at* this record rather than the reverse. Only meaningful under
+     * TRAVERSE_BOTH, where an id can be reachable either way and (via_id,
+     * via_kind) alone would not say which orientation was taken. */
+    int via_incoming;
 } TraverseHop;
 
 /* Free `n` hops as returned by qe_traverse_ex (each via_kind, then the array).

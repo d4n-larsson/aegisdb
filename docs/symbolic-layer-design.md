@@ -1,9 +1,17 @@
 # Design: A Queryable Relationship Graph (ROADMAP 5.1)
 
-**Status:** Proposed. First item of Horizon 5 (`docs/ROADMAP.md`), and the only
-one that needs no model on any path. Worth shipping even if nothing after it
+**Status:** Implemented. First item of Horizon 5 (`docs/ROADMAP.md`), and the
+only one that needs no model on any path. Worth shipping even if nothing after it
 ever is: it retroactively fixes provenance walks for features already shipped
 (1.2's supersession chain, 1.3's inspector).
+
+Shipped as the four PRs of §11: `kinds`/`traversal` on the forward walk, the
+`edge_index` unit, its wiring into the write/recovery/replica paths, and the
+reverse reader. Three things below were revised by the implementation rather
+than confirmed by it — the per-edge memory figures (§4, measured, not
+estimated), the recovery pass needing a target-liveness check (§5.6), and
+frontier labels needing to be owned rather than borrowed (§7). The optional
+inspector work (PR 5) is not done.
 
 **Scope:** Make the relationship graph *interrogable* — filter a traversal by
 edge kind, walk it backwards, and see which edge reached each hop. Nothing
@@ -278,9 +286,11 @@ reached it**:
                  "via_direction": "out" } }
 ```
 
-The start record reports `depth: 0` with the other fields absent. `via_direction`
-matters only for `both`, where an id can be reachable either way and the pair
-`(via_id, via_kind)` alone would be ambiguous about orientation.
+The start record reports `depth: 0` with the other fields absent.
+`via_direction` is emitted for every non-start hop, not only under `both` — a
+client should not have to remember what it asked for in order to read the
+answer — but it only ever *varies* under `both`, where an id can be reachable
+either way and `(via_id, via_kind)` alone would be ambiguous about orientation.
 
 Namespace scoping is unchanged and applies to reverse edges identically: a
 namespaced caller must own a record for it to appear, so a reverse walk cannot
@@ -290,20 +300,45 @@ be used to discover that a co-tenant links to your record.
 
 No new lock, and no change to the existing order (`index_lock` → `log_lock`).
 
-The BFS loop shape does change, because the two directions are resolved in
-different phases:
+The BFS gains a third phase per level, because the two directions live in
+different places:
 
-- **Reverse neighbours** come from the edge index, so they are gathered in the
-  resolve phase, under `index_lock` for read — where the walk already is.
-- **Forward neighbours** come from the decoded record, so they continue to be
-  gathered in the read phase, under `log_lock`.
+1. **resolve** (`index_lock` read) — frontier ids → log offsets, as today;
+2. **read** (`log_lock` read) — decode, filter, accumulate, and enqueue
+   **forward** neighbours out of the record, as today;
+3. **reverse expand** (`index_lock` read) — enqueue **incoming** neighbours from
+   the edge index.
 
-Both feed the same `next` frontier, which is then deduplicated against `seen` as
-it is today. The existing invariants hold: no allocation under `log_lock` beyond
-what already happens there, no lock upgrade, and no disk I/O under `index_lock`.
+Phase 3 is separate rather than folded into phase 1 for two reasons. Only hits
+that survived *this* level's filters may be expanded (matching the forward rule
+that a filtered node is skipped entirely, edges and all), and that is not known
+until phase 2 has read the record. And `log_lock` must be released before
+re-taking `index_lock`: the order is index → log, so holding log while acquiring
+index would invert it. The cost is one extra read-lock acquisition per level,
+against a depth capped at 64.
+
+**Frontier labels must be owned, not borrowed.** The forward path could borrow an
+edge's `kind` from the parent record — the walk holds that record in `acc` for
+the duration — and the first implementation did. A *reverse* edge's kind is an
+interned string inside the shared `EdgeIndex`, and the frontier outlives the
+`index_lock` acquisition that produced it: a replica re-bootstrapping in that
+window (`follower_reset` takes `index_lock` for write and frees the whole index)
+would leave the pointer dangling. So the frontier copies the label at enqueue
+time in *both* directions. Uniform ownership is the only version whose
+correctness does not depend on which branch created the entry, which is worth one
+`strdup` per enqueued edge on a path that is already doing disk reads.
 
 Writes take `index_lock` for write already at every one of §5's sites, so edge
 maintenance adds no lock acquisition anywhere.
+
+**One durability note.** `qe_relate` indexes the edge after `append_and_hash`
+commits, but the `fsync` happens after `index_lock` is released — so a crash in
+that window can leave an edge indexed whose log frame was never durable. This is
+self-correcting rather than a divergence to fix: the index is derived, so
+recovery rebuilds it from whatever the log actually contains (§5.6), and the
+un-acknowledged write is gone from both. Indexing *before* the append would be
+the wrong trade — it would leave a phantom edge for a write that failed outright,
+which recovery could not distinguish from a real one until the next restart.
 
 ## 8. Compaction, replication, encryption
 

@@ -1155,6 +1155,11 @@ static cJSON *traversal_json(const TraverseHop *h) {
         if (h->via_kind) {
             cJSON_AddStringToObject(o, "via_kind", h->via_kind);
         }
+        /* Which way the edge was walked. Always reported, not just under
+         * `direction: both`, so a client never has to remember what it asked
+         * for to read the answer. */
+        cJSON_AddStringToObject(o, "via_direction",
+                                h->via_incoming ? "in" : "out");
     }
     return o;
 }
@@ -1174,12 +1179,18 @@ static cJSON *handle_traverse(AegisDB *db, const cJSON *req,
     if (depth > MAX_TRAVERSE_DEPTH) {
         depth = MAX_TRAVERSE_DEPTH;
     }
-    /* `direction` is accepted so a client can be explicit and forward-
-     * compatible, but only the outgoing walk exists: reversing one needs the
-     * edge index (ROADMAP 5.1 Half B) and arrives with it. Rejected rather than
-     * ignored — silently walking the wrong way is worse than an error. */
+    /* Rejected rather than ignored on an unknown value: silently walking the
+     * wrong way is worse than an error. `in`/`both` need the reverse index, and
+     * qe_traverse_ex reports NOT_READY when --no-edge-index disabled it. */
     const char *dir = jr_str(req, "direction", "out");
-    if (strcmp(dir, "out") != 0) {
+    TraverseDirection tdir;
+    if (strcmp(dir, "out") == 0) {
+        tdir = TRAVERSE_OUT;
+    } else if (strcmp(dir, "in") == 0) {
+        tdir = TRAVERSE_IN;
+    } else if (strcmp(dir, "both") == 0) {
+        tdir = TRAVERSE_BOTH;
+    } else {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     }
     const char **kinds = NULL;
@@ -1193,6 +1204,7 @@ static cJSON *handle_traverse(AegisDB *db, const cJSON *req,
     p.start_id = id;
     p.depth = (int)depth;
     p.agent_filter = ns ? ns : jr_str(req, "agent_id", NULL);
+    p.direction = tdir;
     p.kinds = kinds;
     p.kind_count = kn;
 
