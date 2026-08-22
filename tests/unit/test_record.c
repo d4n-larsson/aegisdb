@@ -819,9 +819,12 @@ static void test_set_derivation_validates_and_clears(void) {
     TEST_ASSERT_EQUAL_INT(-1,
                           record_set_derivation(&r, DERIV_TRANSITIVE, 0, many,
                                                 DERIV_MAX_PREMISES + 1));
-    /* an unknown rule is refused */
+    /* an unknown rule is refused — including the sentinel, which exists only
+     * to trip the codec-bump assertion and must never reach a record */
     TEST_ASSERT_EQUAL_INT(-1,
                           record_set_derivation(&r, (DerivRule)7, 0, prem, 1));
+    TEST_ASSERT_EQUAL_INT(
+        -1, record_set_derivation(&r, DERIV_RULE_COUNT, 0, prem, 1));
     TEST_ASSERT_EQUAL_INT(DERIV_NONE, r.derivation.rule);
 
     /* set, then replace, then clear — the old array goes each time */

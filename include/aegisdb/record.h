@@ -54,7 +54,20 @@ typedef enum {
     DERIV_TRANSITIVE = 1, /* (a p b), (b p c) => (a p c) */
     DERIV_SYMMETRIC = 2,  /* (a p b) => (b p a) */
     DERIV_INVERSE = 3,    /* (a p b), inverse_of(p, q) => (b q a) */
+    DERIV_RULE_COUNT      /* sentinel; never encoded, never persisted */
 } DerivRule;
+
+/* Adding a rule is a codec bump, the same rule the fact kinds carry — and for a
+ * sharper reason. An unknown fact kind is a *framing* problem the decoder
+ * cannot survive, so it fails loudly and obviously. An unknown rule is not: the
+ * frame is still well-formed, so a v4-claiming replica of an older build
+ * accepts the frame from the codec gate, fails to decode it, reconnects from a
+ * log size that already counts it, and resumes *past* the record — which is
+ * then durably in its log and invisible to every query, and skipped again by
+ * recovery on restart. That is exactly the divergence the gate exists to
+ * prevent, reached without a version change. The assertion below is the
+ * tripwire: a new rule moves DERIV_RULE_COUNT and fails the build until
+ * RECORD_CODEC_MAX moves with it. */
 
 /* No rule here needs more than two premises; the cap is generous so a future
  * one has room, and small enough that the array is never a memory concern. */
@@ -147,7 +160,14 @@ int record_set_fact(MemoryRecord *r, FactKind kind, uint64_t subject,
 /* Set (or clear) the record's derivation, copying the premise ids and releasing
  * whatever was there. Pass DERIV_NONE to clear; otherwise `premises` must hold
  * 1..DERIV_MAX_PREMISES ids. Returns 0, or -1 on a bad argument combination or
- * allocation failure (in which case the previous derivation is left intact). */
+ * allocation failure (in which case the previous derivation is left intact).
+ *
+ * A derived record must also carry the `fact` its derivation explains: every
+ * 5.3 rule concludes a triple, so provenance without a conclusion is
+ * provenance for nothing. That invariant is *not* checked here — the two
+ * fields are set independently and either order is fine — but record_encode
+ * refuses the record, so setting one without the other turns into a failed
+ * write rather than a bad frame. */
 int record_set_derivation(MemoryRecord *r, DerivRule rule, uint16_t depth,
                           const uint64_t *premises, size_t n);
 
@@ -165,6 +185,13 @@ int record_set_derivation(MemoryRecord *r, DerivRule rule, uint16_t depth,
 #define RECORD_CODEC_V3 3
 #define RECORD_CODEC_V4 4
 #define RECORD_CODEC_MAX RECORD_CODEC_V4
+
+/* See DerivRule: a new rule changes what a v4 frame can mean, so it must arrive
+ * with a new codec version. Both halves are named here so the failure message
+ * points at the fix rather than at the assertion. */
+_Static_assert(DERIV_RULE_COUNT == 4 && RECORD_CODEC_MAX == RECORD_CODEC_V4,
+               "a new DerivRule needs a new RECORD_CODEC version: an older "
+               "peer would otherwise accept a v4 frame it cannot interpret");
 
 /* Binary (little-endian, length-prefixed) codec used by the append-only log.
  * record_encode allocates *out (free with free()). record_decode fills *out
