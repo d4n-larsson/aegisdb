@@ -246,6 +246,14 @@ At `recovery.c:155-161`, alongside time/tag/lexical: index each live record's
 edges. Derived and never checkpointed, so it is always rebuilt in full — the
 lexical-index precedent, and the reason no `edge.db` exists.
 
+**With a target-liveness check**, which is not optional. The loop walks live
+records, so an edge's *source* is live by construction — but a live record can
+still name a target that was tombstoned since, because a tombstone deliberately
+does not rewrite its peers (§5.4). Re-indexing those edges would resurrect
+exactly what §5.4 removed, and a restarted server would then report a different
+edge count than the one that wrote the log. The hash index is fully built before
+this pass runs, so the check is one lookup per edge.
+
 Consolidation (`qe_maint.c:409-441`) needs no changes: it re-relates through
 `qe_relate` and tombstones through `qe_delete`, so it is covered transitively.
 
@@ -309,11 +317,26 @@ maintenance adds no lock acquisition anywhere.
 
 ## 9. Observability
 
-`stats` reports `edge_kinds`, `edges`, and `edge_bytes`, and `edge_bytes` joins
-the `index_bytes` total that `--max-index-bytes` enforces. The Prometheus
-exporter and the Grafana index-RAM panel pick these up the way they did
-`lexical_*` in 4.1 — a new index that is not in the RAM panel is a new way to
-run out of memory silently.
+`stats` reports `edges`, `edge_kinds`, and `edge_bytes`, and `edge_bytes` joins
+the `index_bytes` total that `--max-index-bytes` enforces.
+
+**`edge_kinds` counts kinds in use, not kinds ever seen.** The distinction is
+not cosmetic: interned kinds are never reclaimed (their strings must stay
+allocated so a returned `kind` pointer survives the lock it was read under),
+so a naive count drifts upward on a long-running server and then *disagrees with
+the same log replayed into a fresh index*. A gauge that changes across a restart
+is not one an operator can alert on, so the count is refcounted against live
+postings. `EDGE_MAX_KINDS` still bounds distinct kinds ever interned — the cap
+and the gauge deliberately measure different things.
+
+The Grafana index-RAM panel needed no change: it queries `aegisdb_index_bytes`
+with `legendFormat: {{index}}`, so a new label appears on its own. The
+**exporter did** — and not only for this index. Its per-index byte gauge was
+built from a hardcoded list (`hash`, `time`, `tag`, `semantic`) that had silently
+omitted `lexical_bytes` since 4.1 and `usage_bytes` since usage feedback landed,
+so the breakdown did not add up to the `index_bytes_total` printed beside it.
+It now derives the series from whatever `memory` reports, which fixes those two
+as a side effect and means the next index needs no exporter edit at all.
 
 ## 10. Testing
 

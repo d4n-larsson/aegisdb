@@ -306,6 +306,15 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
             tag_index_add(db->tags, rec->tags[i], rec->id);
         }
         lexical_index_add(db->lex, rec->id, rec->data, rec->data_len);
+        /* An `insert` carries no relationships today — they arrive only via
+         * `relate` — so this indexes nothing. It is here so the insert path
+         * stays uniform with db_replica_apply, which *does* receive records
+         * with edges, rather than encoding "inserts have no edges" as an
+         * invariant a future promote/batch path could quietly break. */
+        for (size_t i = 0; i < rec->rel_count; i++) {
+            edge_index_add(db->edges, rec->id, rec->relationships[i].to_id,
+                           rec->relationships[i].kind);
+        }
         usage_index_track(db->usage, rec->id);
         if (rec->embedding_dim && rec->vec_count) {
             semantic_index_add(db->sem, rec->id, rec->embedding, rec->vec_count,
@@ -438,6 +447,9 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
             tag_index_add(db->tags, cur.tags[i], cur.id);
         }
     }
+    /* No edge-index work here on purpose: an update patch reaches only tags and
+     * the payload, never `relationships` (those move through relate/delete), so
+     * the incoming-edge map is unaffected by a semantic update. */
     if (st == AEGIS_OK && patch->has_data) {
         /* Same discipline for the payload text: unindex the version that just
          * stopped being current, then index the one that replaced it. */
@@ -487,6 +499,19 @@ aegis_status_t qe_delete(AegisDB *db, uint64_t id, const char *ns) {
         tag_index_remove(db->tags, cur.tags[i], cur.id);
     }
     lexical_index_remove(db->lex, cur.id, cur.data, cur.data_len);
+    /* Outgoing: the record in hand lists its own edges. */
+    for (size_t i = 0; i < cur.rel_count; i++) {
+        edge_index_remove(db->edges, cur.id, cur.relationships[i].to_id,
+                          cur.relationships[i].kind);
+    }
+    /* Incoming: O(indegree) precisely *because* this index exists — without it
+     * finding who points here would be a corpus scan. The peers' records still
+     * list the tombstoned id and are deliberately not rewritten (a tombstone
+     * never touches other records); a forward walk already skips a target whose
+     * hash entry is absent or deleted. So the invariant is: the edge index never
+     * reports an edge whose endpoint is not live, though a record's own
+     * relationships array may still name one. */
+    edge_index_remove_target(db->edges, cur.id);
     usage_index_untrack(db->usage, cur.id);
     if (cur.embedding_dim) {
         semantic_index_remove(db->sem, cur.id);
@@ -616,6 +641,14 @@ aegis_status_t qe_relate(AegisDB *db, uint64_t from_id, uint64_t to_id,
     }
     from.updated = db_now_ms();
     st = append_and_hash(db, &from); /* relationship metadata, content intact */
+    if (st == AEGIS_OK) {
+        /* The primary maintenance site for the reverse index: `relate` is the
+         * only operation that creates an edge. Indexed after the append commits,
+         * so a failed write leaves no phantom edge behind. Both endpoints were
+         * verified live above, which is what upholds the liveness invariant
+         * documented in qe_delete. */
+        edge_index_add(db->edges, from_id, to_id, kind);
+    }
     pthread_rwlock_unlock(&db->index_lock);
     if (st == AEGIS_OK && durably_flush(db) != 0) {
         st = AEGIS_ERR_INTERNAL; /* not durable: do not acknowledge the write */

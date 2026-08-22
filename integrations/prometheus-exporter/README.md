@@ -98,7 +98,7 @@ plus an `aegisdb_scrape_error{error="…"}` sample, so you alert on
 | `aegisdb_records`, `aegisdb_tombstones` | gauge | live vs deleted-not-compacted |
 | `aegisdb_log_bytes`, `aegisdb_log_flush_pending`, `aegisdb_next_id` | gauge | |
 | `aegisdb_index_entries{index}` | gauge | `index` ∈ time, tags, semantic, working |
-| `aegisdb_index_bytes{index}` | gauge | `index` ∈ hash, time, tag, semantic |
+| `aegisdb_index_bytes{index}` | gauge | one series per index the server reports: `hash`, `time`, `tag`, `lexical`, `edge`, `usage`, `semantic` |
 | `aegisdb_index_bytes_total`, `aegisdb_index_bytes_limit` | gauge | limit is `--max-index-bytes` (0 = unlimited) |
 | `aegisdb_requests_total`, `aegisdb_errors_total`, `aegisdb_unauthorized_total` | counter | use `rate()` for QPS / error-rate |
 | `aegisdb_dispatch_seconds_total` | counter | cumulative in-dispatch time |

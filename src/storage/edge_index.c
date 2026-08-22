@@ -19,6 +19,7 @@
 typedef struct KindNode {
     char *name;
     uint16_t id;
+    size_t uses; /* postings currently carrying this kind */
     struct KindNode *next;
 } KindNode;
 
@@ -51,8 +52,9 @@ struct EdgeIndex {
     size_t edges;    /* total postings */
 
     KindNode *kind_buckets[EDGE_KIND_NBUCKETS];
-    char **kind_by_id; /* index i holds the name of kind id i+1 */
-    size_t kind_count;
+    KindNode **kind_by_id; /* index i is the node for kind id i+1 */
+    size_t kind_count;     /* kinds ever interned; never shrinks (see header) */
+    size_t kinds_live;     /* kinds with at least one posting */
     size_t kind_by_id_cap;
 };
 
@@ -92,7 +94,7 @@ static uint16_t kind_intern(EdgeIndex *e, const char *kind) {
     }
     if (e->kind_count == e->kind_by_id_cap) {
         size_t nc = e->kind_by_id_cap ? e->kind_by_id_cap * 2 : 16;
-        char **nb = realloc(e->kind_by_id, nc * sizeof(*nb));
+        KindNode **nb = realloc(e->kind_by_id, nc * sizeof(*nb));
         if (!nb) {
             return EDGE_KIND_UNKNOWN;
         }
@@ -112,7 +114,7 @@ static uint16_t kind_intern(EdgeIndex *e, const char *kind) {
     n->id = (uint16_t)(e->kind_count + 1);
     n->next = e->kind_buckets[b];
     e->kind_buckets[b] = n;
-    e->kind_by_id[e->kind_count++] = n->name; /* borrowed; the node owns it */
+    e->kind_by_id[e->kind_count++] = n;
     return n->id;
 }
 
@@ -131,14 +133,38 @@ static uint16_t kind_lookup(const EdgeIndex *e, const char *kind) {
     return EDGE_KIND_UNKNOWN;
 }
 
-static const char *kind_name(const EdgeIndex *e, uint16_t id) {
-    if (id == EDGE_KIND_NONE || id == EDGE_KIND_UNKNOWN) {
-        return NULL;
-    }
-    if ((size_t)id > e->kind_count) {
+static KindNode *kind_node(const EdgeIndex *e, uint16_t id) {
+    if (id == EDGE_KIND_NONE || id == EDGE_KIND_UNKNOWN ||
+        (size_t)id > e->kind_count) {
         return NULL;
     }
     return e->kind_by_id[id - 1];
+}
+
+static const char *kind_name(const EdgeIndex *e, uint16_t id) {
+    const KindNode *n = kind_node(e, id);
+    return n ? n->name : NULL;
+}
+
+/* A posting carrying `id` was added or dropped. The intern table itself never
+ * shrinks — a kind's node and string stay allocated so ids stay stable and a
+ * returned `kind` pointer stays valid for the index's lifetime — but the
+ * *reported* kind count tracks kinds actually in use. Without this, the number
+ * meant "kinds ever seen", which drifts upward on a long-running server and
+ * disagrees with the same log replayed into a fresh index. A metric that changes
+ * across a restart is not one an operator can alert on. */
+static void kind_use(EdgeIndex *e, uint16_t id, int delta) {
+    KindNode *n = kind_node(e, id);
+    if (!n) {
+        return; /* unkinded or un-internable: nothing to account */
+    }
+    if (delta > 0) {
+        if (n->uses++ == 0) {
+            e->kinds_live++;
+        }
+    } else if (n->uses && --n->uses == 0) {
+        e->kinds_live--;
+    }
 }
 
 /* --- target table -------------------------------------------------------- */
@@ -337,6 +363,7 @@ int edge_index_add(EdgeIndex *e, uint64_t from_id, uint64_t to_id,
     t->posts[pos].kind = k;
     t->n++;
     e->edges++;
+    kind_use(e, k, +1);
     return 0;
 }
 
@@ -362,6 +389,7 @@ void edge_index_remove(EdgeIndex *e, uint64_t from_id, uint64_t to_id,
             (t->n - pos - 1) * sizeof(*t->posts));
     t->n--;
     e->edges--;
+    kind_use(e, k, -1);
     if (t->n == 0) {
         tgt_retire(e, t);
     }
@@ -374,6 +402,9 @@ void edge_index_remove_target(EdgeIndex *e, uint64_t id) {
     EdgeTarget *t = tgt_find(e, id);
     if (!t) {
         return;
+    }
+    for (size_t i = 0; i < t->n; i++) {
+        kind_use(e, t->posts[i].kind, -1);
     }
     e->edges -= t->n;
     tgt_retire(e, t);
@@ -451,7 +482,7 @@ int edge_index_sources(const EdgeIndex *e, uint64_t to_id,
 
 size_t edge_index_edges(const EdgeIndex *e) { return e ? e->edges : 0; }
 
-size_t edge_index_kinds(const EdgeIndex *e) { return e ? e->kind_count : 0; }
+size_t edge_index_kinds(const EdgeIndex *e) { return e ? e->kinds_live : 0; }
 
 size_t edge_index_bytes(const EdgeIndex *e) {
     if (!e) {
@@ -462,7 +493,7 @@ size_t edge_index_bytes(const EdgeIndex *e) {
     for (size_t i = 0; i < e->tgt_cap; i++) {
         total += e->targets[i].cap * sizeof(EdgePost);
     }
-    total += e->kind_by_id_cap * sizeof(char *);
+    total += e->kind_by_id_cap * sizeof(KindNode *);
     for (size_t i = 0; i < EDGE_KIND_NBUCKETS; i++) {
         for (const KindNode *n = e->kind_buckets[i]; n; n = n->next) {
             total += sizeof(*n) + strlen(n->name) + 1;

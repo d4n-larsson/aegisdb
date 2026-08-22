@@ -722,6 +722,11 @@ subtree is never read.
 An edge carrying **no** kind is followed only by an unfiltered walk. Once a
 caller names the kinds it wants, an unkinded edge is not one of them.
 
+Filtering costs nothing extra: a walk already reads each record it returns, and
+the kinds are stored in the record. Only the *reverse* direction needs an index
+(`--no-edge-index` disables it), because a record lists the edges it points
+along, not the ones pointing at it.
+
 **Per-hop attribution (`traversal`)**: every returned record carries a
 `traversal` object saying how the walk reached it, so a result reads as a path
 rather than a set whose shape has to be inferred:
@@ -813,8 +818,8 @@ authentication when enabled (unlike `ping`). Available at every phase.
 | `tombstones` | Deleted-but-not-yet-compacted records still in the log |
 | `log_bytes` | Current size of `memory.log` on disk |
 | `log_flush_pending` | `true` if writes have not yet been `fsync`'d — the current durability lag |
-| `indexes` | Per-index entry counts (`semantic` is the brute-force vector count; watch it for scale). `lexical_terms`/`lexical_docs` are the distinct terms and indexed payloads in the BM25 index, both `0` under `--no-lexical-index` |
-| `memory` | Approximate resident bytes per in-RAM index — `hash_bytes`, `time_bytes`, `tag_bytes`, `lexical_bytes`, `semantic_bytes`, `index_bytes_total`, and `index_bytes_limit` (the configured `--max-index-bytes` cap; 0 = unlimited). Indexes are held in memory and grow with the dataset (the semantic vectors usually dominate), so this is the figure to monitor/alert on; past the limit inserts return `MEMORY_LIMIT`. Excludes allocator overhead. |
+| `indexes` | Per-index entry counts (`semantic` is the brute-force vector count; watch it for scale). `lexical_terms`/`lexical_docs` are the distinct terms and indexed payloads in the BM25 index, both `0` under `--no-lexical-index`. `edges`/`edge_kinds` are the indexed incoming edges and the distinct kinds they carry, both `0` under `--no-edge-index` |
+| `memory` | Approximate resident bytes per in-RAM index — `hash_bytes`, `time_bytes`, `tag_bytes`, `lexical_bytes`, `edge_bytes`, `usage_bytes`, `semantic_bytes`, `index_bytes_total`, and `index_bytes_limit` (the configured `--max-index-bytes` cap; 0 = unlimited). Indexes are held in memory and grow with the dataset (the semantic vectors usually dominate), so this is the figure to monitor/alert on; past the limit inserts return `MEMORY_LIMIT`. Excludes allocator overhead. |
 | `next_id` | The id the next persisted insert will receive |
 | `metrics` | Monotonic operational counters since startup (below) |
 

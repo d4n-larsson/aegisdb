@@ -95,7 +95,11 @@ int edge_index_sources(const EdgeIndex *e, uint64_t to_id,
 
 /* Edges currently indexed. */
 size_t edge_index_edges(const EdgeIndex *e);
-/* Distinct interned kinds. */
+/* Distinct kinds currently carrying at least one edge — not kinds ever seen, so
+ * the number is stable across a restart that replays the same log. (The intern
+ * table behind it never shrinks: a kind's string stays allocated so ids stay
+ * stable and a returned `kind` pointer stays valid, which is why EDGE_MAX_KINDS
+ * bounds distinct kinds *ever interned* rather than the count reported here.) */
 size_t edge_index_kinds(const EdgeIndex *e);
 /* Approximate resident bytes (target table + posting arrays + intern table).
  * Excludes allocator overhead. */

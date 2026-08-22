@@ -684,6 +684,136 @@ def test_traverse_kinds(binary, port):
               "17 kinds rejected")
 
 
+def test_edge_index_maintenance(binary, port):
+    print("[edge index: maintained on write, rebuilt on restart (ROADMAP 5.1)]")
+    datadir = tempfile.mkdtemp(prefix="aegis_edgeidx_")
+
+    def edges(srv):
+        st = srv.req({"operation": "stats"})
+        return st["indexes"]["edges"], st["indexes"]["edge_kinds"]
+
+    with Server(binary, port, phase=4, datadir=datadir) as srv:
+        def ins(d):
+            return srv.req({"operation": "insert", "type": "semantic",
+                            "data": d})["record"]["id"]
+
+        check(edges(srv) == (0, 0), "fresh server indexes no edges")
+
+        a, b, c = ins("a"), ins("b"), ins("c")
+        check(edges(srv) == (0, 0), "insert alone creates no edges")
+
+        # relate is the only op that creates an edge
+        srv.req({"operation": "relate", "from_id": a, "to_id": b,
+                 "kind": "supersedes"})
+        check(edges(srv) == (1, 1), "relate indexes one edge, one kind")
+        srv.req({"operation": "relate", "from_id": c, "to_id": b,
+                 "kind": "derived_from"})
+        check(edges(srv) == (2, 2), "second relate, second kind")
+
+        # idempotent on the wire as well as in the index
+        srv.req({"operation": "relate", "from_id": a, "to_id": b,
+                 "kind": "supersedes"})
+        check(edges(srv) == (2, 2), "re-relating the same edge does not double it")
+
+        # an update touches tags/payload only, never the edge map
+        srv.req({"operation": "update", "id": a, "data": "a-v2"})
+        check(edges(srv) == (2, 2), "update leaves the edge index alone")
+
+        # deleting a *target* drops its whole indegree (both edges point at b),
+        # and releases the kinds those edges were the last users of — the count
+        # tracks kinds in use, not kinds ever seen, so it survives a restart
+        srv.req({"operation": "delete", "id": b})
+        check(edges(srv) == (0, 0),
+              "deleting a target drops every edge into it, and its kinds")
+
+        # ...and deleting a *source* drops its outgoing edges
+        d, e = ins("d"), ins("e")
+        srv.req({"operation": "relate", "from_id": d, "to_id": e,
+                 "kind": "mentions"})
+        check(edges(srv)[0] == 1, "edge into e indexed")
+        srv.req({"operation": "delete", "id": d})
+        check(edges(srv)[0] == 0, "deleting the source drops its outgoing edge")
+
+        # a surviving edge to carry across the restart
+        f, g = ins("f"), ins("g")
+        srv.req({"operation": "relate", "from_id": f, "to_id": g,
+                 "kind": "derived_from"})
+        before = edges(srv)
+        check(before[0] == 1, "one live edge before restart")
+        srv.graceful_stop()
+
+    # The index is derived and never checkpointed, so recovery rebuilds it from
+    # the log. Crucially it must NOT resurrect edges whose endpoint was deleted:
+    # a restarted server has to report the same count as the one that wrote the
+    # log, or the two disagree about what the graph contains.
+    with Server(binary, port, phase=4, datadir=datadir) as srv:
+        check(edges(srv) == before,
+              f"restart rebuilds the same edge count ({before[0]})")
+
+    # --no-edge-index: no reverse index, and the forward walk is untouched
+    d2 = tempfile.mkdtemp(prefix="aegis_edgeoff_")
+    with Server(binary, port, phase=4, datadir=d2,
+                extra_args=["--no-edge-index"]) as srv:
+        a = srv.req({"operation": "insert", "type": "semantic",
+                     "data": "a"})["record"]["id"]
+        b = srv.req({"operation": "insert", "type": "semantic",
+                     "data": "b"})["record"]["id"]
+        srv.req({"operation": "relate", "from_id": a, "to_id": b, "kind": "k"})
+        st = srv.req({"operation": "stats"})
+        check(st["indexes"]["edges"] == 0 and st["indexes"]["edge_kinds"] == 0,
+              "--no-edge-index indexes nothing")
+        check(st["memory"]["edge_bytes"] == 0,
+              "--no-edge-index costs no edge RAM")
+        r = srv.req({"operation": "traverse", "id": a, "depth": 1,
+                     "kinds": ["k"]})
+        check([rec["id"] for rec in r.get("records", [])] == [a, b],
+              "forward traverse unaffected by --no-edge-index")
+
+
+def test_edge_index_replica_parity(binary, port):
+    print("[edge index: a replica agrees with its primary]")
+    repl_port = port + 1
+    replica_port = port + 2
+    tok = "repl-secret"
+    with Server(binary, port, extra_args=[
+            "--replication-port", str(repl_port),
+            "--replication-token", tok]) as primary:
+        with Server(binary, replica_port, extra_args=[
+                "--replicate-from", f"127.0.0.1:{repl_port}",
+                "--replication-token", tok]) as replica:
+
+            def edge_count(srv):
+                return srv.req({"operation": "stats"})["indexes"]["edges"]
+
+            def wait_edges(want, tries=60):
+                for _ in range(tries):
+                    if edge_count(replica) == want:
+                        return True
+                    time.sleep(0.1)
+                return edge_count(replica) == want
+
+            def ins(d):
+                return primary.req({"operation": "insert", "type": "semantic",
+                                    "data": d})["record"]["id"]
+
+            a, b, c = ins("a"), ins("b"), ins("c")
+            primary.req({"operation": "relate", "from_id": a, "to_id": b,
+                         "kind": "supersedes"})
+            primary.req({"operation": "relate", "from_id": c, "to_id": b,
+                         "kind": "derived_from"})
+            check(edge_count(primary) == 2, "primary indexed both edges")
+            check(wait_edges(2), "replica replicated both edges")
+
+            # A tombstone must drop the *incoming* edges on the replica too.
+            # Replication ships whole records, so the replica only ever sees the
+            # deleted version of b — it has to infer the indegree cleanup that
+            # qe_delete does directly on the primary.
+            primary.req({"operation": "delete", "id": b})
+            check(edge_count(primary) == 0, "primary dropped b's indegree")
+            check(wait_edges(0),
+                  "replica dropped b's indegree on the tombstone")
+
+
 def test_consolidate(binary, port):
     print("[consolidate: merge near-duplicate semantic memories]")
     with Server(binary, port, phase=4) as srv:
@@ -2562,6 +2692,8 @@ def main():
     test_bulk_ops(binary, 19480)
     test_consolidate(binary, 19481)
     test_traverse_kinds(binary, 19540)
+    test_edge_index_maintenance(binary, 19541)
+    test_edge_index_replica_parity(binary, 19542)  # uses port, +1, +2
     test_forget(binary, 19499)
     test_export_and_purge(binary, 19500)
     test_export_purge_isolation(binary, 19501)

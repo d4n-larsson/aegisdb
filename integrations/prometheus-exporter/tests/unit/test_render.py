@@ -22,7 +22,9 @@ SAMPLE = {
     "log_bytes": 4096, "log_flush_pending": False, "next_id": 8,
     "indexes": {"time": 7, "tags": 3, "semantic": 7, "working": 0},
     "memory": {"hash_bytes": 100, "time_bytes": 200, "tag_bytes": 300,
-               "semantic_bytes": 400, "index_bytes_total": 1000,
+               "semantic_bytes": 400, "lexical_bytes": 60,
+               "edge_bytes": 40, "usage_bytes": 20,
+               "index_bytes_total": 1000,
                "index_bytes_limit": 55000},
     "metrics": {"requests": 42, "errors": 1, "unauthorized": 0,
                 "dispatch_micros": 5000000,
@@ -81,6 +83,14 @@ class TestRender(unittest.TestCase):
     def test_index_bytes_labeled(self):
         text = render(SAMPLE, up=True)
         self.assertIn('aegisdb_index_bytes{index="semantic"} 400', text)
+        # Every *_bytes key the server reports must appear, not a hardcoded
+        # subset: an index missing from this panel is a way to run out of RAM
+        # without seeing it coming.
+        self.assertIn('aegisdb_index_bytes{index="lexical"} 60', text)
+        self.assertIn('aegisdb_index_bytes{index="edge"} 40', text)
+        self.assertIn('aegisdb_index_bytes{index="usage"} 20', text)
+        # ...and the summary keys are not mistaken for per-index samples.
+        self.assertNotIn('aegisdb_index_bytes{index="index"}', text)
         self.assertEqual(_value(text, "aegisdb_index_bytes_total"), "1000")
         self.assertEqual(_value(text, "aegisdb_index_bytes_limit"), "55000")
 

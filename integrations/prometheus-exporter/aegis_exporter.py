@@ -204,12 +204,14 @@ def render(stats: dict, *, up: bool = True, scrape_seconds: float | None = None,
           [({"index": k}, v) for k, v in idx.items()])
 
     # ---- per-index resident bytes ----
+    # Derived from whatever the server reports rather than a hardcoded list, so
+    # a newly added index shows up here without a matching edit. The hardcoded
+    # version had silently omitted lexical_bytes and usage_bytes, which made the
+    # per-index breakdown fail to add up to index_bytes_total. The two summary
+    # keys are excluded by suffix: they end in _total/_limit, not _bytes.
     mem = stats.get("memory") or {}
-    byte_samples = []
-    for key, label in (("hash_bytes", "hash"), ("time_bytes", "time"),
-                       ("tag_bytes", "tag"), ("semantic_bytes", "semantic")):
-        if key in mem:
-            byte_samples.append(({"index": label}, mem[key]))
+    byte_samples = [({"index": k[: -len("_bytes")]}, v)
+                    for k, v in mem.items() if k.endswith("_bytes")]
     e.add("aegisdb_index_bytes", "gauge",
           "Approximate resident bytes per in-memory index.", byte_samples)
     e.gauge("aegisdb_index_bytes_total",

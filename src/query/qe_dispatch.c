@@ -252,6 +252,12 @@ static void stats_add_storage(cJSON *o, AegisDB *db) {
                                 (double)lexical_index_terms(db->lex));
         cJSON_AddNumberToObject(idx, "lexical_docs",
                                 (double)lexical_index_docs(db->lex));
+        /* Indexed incoming edges and the distinct kinds they carry; both 0
+         * with --no-edge-index. */
+        cJSON_AddNumberToObject(idx, "edges",
+                                (double)edge_index_edges(db->edges));
+        cJSON_AddNumberToObject(idx, "edge_kinds",
+                                (double)edge_index_kinds(db->edges));
         cJSON_AddNumberToObject(idx, "usage_tracked",
                                 (double)usage_index_count(db->usage));
         cJSON_AddNumberToObject(idx, "semantic",
@@ -269,16 +275,18 @@ static void stats_add_storage(cJSON *o, AegisDB *db) {
         size_t tb = time_index_bytes(db->time);
         size_t gb = tag_index_bytes(db->tags);
         size_t lb = lexical_index_bytes(db->lex);
+        size_t eb = edge_index_bytes(db->edges);
         size_t ub = usage_index_bytes(db->usage);
         size_t sb = semantic_index_bytes(db->sem);
         cJSON_AddNumberToObject(mem, "hash_bytes", (double)hb);
         cJSON_AddNumberToObject(mem, "time_bytes", (double)tb);
         cJSON_AddNumberToObject(mem, "tag_bytes", (double)gb);
         cJSON_AddNumberToObject(mem, "lexical_bytes", (double)lb);
+        cJSON_AddNumberToObject(mem, "edge_bytes", (double)eb);
         cJSON_AddNumberToObject(mem, "usage_bytes", (double)ub);
         cJSON_AddNumberToObject(mem, "semantic_bytes", (double)sb);
         cJSON_AddNumberToObject(mem, "index_bytes_total",
-                                (double)(hb + tb + gb + lb + ub + sb));
+                                (double)(hb + tb + gb + lb + eb + ub + sb));
         /* The configured backpressure cap (0 = unlimited), so a scraper can
          * alert on index_bytes_total approaching it. */
         cJSON_AddNumberToObject(mem, "index_bytes_limit",

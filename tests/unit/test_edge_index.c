@@ -257,6 +257,40 @@ static void test_bytes_grows_with_content(void) {
     edge_index_free(e);
 }
 
+/* The reported kind count tracks kinds *in use*, not kinds ever seen — so the
+ * same log replayed into a fresh index yields the same number, which is what
+ * makes it safe to graph. */
+static void test_kind_count_tracks_use_not_history(void) {
+    EdgeIndex *e = edge_index_create();
+    edge_index_add(e, 1, 99, "supersedes");
+    edge_index_add(e, 2, 99, "derived_from");
+    TEST_ASSERT_EQUAL_UINT(2, edge_index_kinds(e));
+
+    /* two edges of one kind, then drop one: the kind is still in use */
+    edge_index_add(e, 3, 99, "supersedes");
+    TEST_ASSERT_EQUAL_UINT(2, edge_index_kinds(e));
+    edge_index_remove(e, 3, 99, "supersedes");
+    TEST_ASSERT_EQUAL_UINT(2, edge_index_kinds(e));
+
+    /* dropping its last edge retires the kind from the count */
+    edge_index_remove(e, 1, 99, "supersedes");
+    TEST_ASSERT_EQUAL_UINT(1, edge_index_kinds(e));
+
+    /* re-adding it counts once, not twice (the node was never freed) */
+    edge_index_add(e, 1, 99, "supersedes");
+    TEST_ASSERT_EQUAL_UINT(2, edge_index_kinds(e));
+
+    /* a whole-target drop releases every kind it held */
+    edge_index_remove_target(e, 99);
+    TEST_ASSERT_EQUAL_UINT(0, edge_index_kinds(e));
+    TEST_ASSERT_EQUAL_UINT(0, edge_index_edges(e));
+
+    /* unkinded and un-internable edges are not counted as kinds at all */
+    edge_index_add(e, 1, 98, NULL);
+    TEST_ASSERT_EQUAL_UINT(0, edge_index_kinds(e));
+    edge_index_free(e);
+}
+
 /* ---- the interning cap -------------------------------------------------- */
 
 /* Past EDGE_MAX_KINDS the edge is still indexed; only its label is lost, and it
@@ -544,6 +578,7 @@ int main(void) {
     RUN_TEST(test_churn_reclaims);
     RUN_TEST(test_many_targets_grow_and_stay_exact);
     RUN_TEST(test_bytes_grows_with_content);
+    RUN_TEST(test_kind_count_tracks_use_not_history);
     RUN_TEST(test_kind_cap_degrades_to_unknown);
     RUN_TEST(test_overlong_kind_is_unknown_not_truncated);
     RUN_TEST(test_null_index_is_inert);
