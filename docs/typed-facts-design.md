@@ -223,15 +223,31 @@ clothes, and is refused with `INVALID_REQUEST`. Combines with the existing
 `type`/`tags`/`agent_id`/time filters by intersection.
 
 A pattern search is a **filter, not a ranking**: like a tags-only search it
-orders by time and reports `explain.semantic`/`lexical` as false. Combining
-`pattern` with `embedding` or `query` narrows the candidate set and then ranks
-it, which is the useful composition and costs no new machinery.
+orders by time and reports `explain.semantic`/`lexical` as false.
+
+Combining `pattern` with `embedding` or `query` composes, but not in the order
+this design first claimed ("narrows the candidate set and then ranks it"). The
+candidate source is the *ranked* one — the vector or BM25 index chooses what to
+consider — and the pattern applies as a post-filter over those candidates, with
+the existing widening loop re-fetching more when a selective filter thins the
+result. The outcome is the same set, and it costs no new machinery, but the
+mechanism is rank-then-filter rather than filter-then-rank, which matters if you
+are reasoning about how many candidates a very selective pattern will see.
 
 What makes this a filter rather than a language, stated so a future change can
 be measured against it: there are no variables, so nothing can be bound in one
 position and referred to in another; there is no disjunction; and a pattern
 never produces a join. "Facts about the subjects of these facts" is two calls,
 deliberately.
+
+**Which operations honour it.** `search` and `count` — both read-only, both
+already sharing the candidate path, and "how many records assert this?" is the
+obvious companion to the search. Bulk `delete` shares that path too and
+deliberately **refuses** a `pattern` rather than ignoring it: delete-by-pattern
+is a coherent operation and may well be worth having, but it is a new
+destructive capability, not something to acquire as a side effect of the release
+that added the read filter. Silently dropping the filter would be worse than
+either choice — the same reasoning `traverse` applies to a malformed `kinds`.
 
 ## 7. The predicate registry
 

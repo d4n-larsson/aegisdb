@@ -629,8 +629,84 @@ static cJSON *handle_snapshot(AegisDB *db, const cJSON *req,
 
 static int parse_filters(const cJSON *req, const char *ns, SearchParams *p,
                          const char ***out_tags);
+static aegis_status_t parse_pattern(AegisDB *db, const cJSON *req,
+                                    SearchParams *p);
+
+/* Is a `pattern` present at all? Used by the ops that share SearchParams but do
+ * not honour it, so they refuse rather than silently drop a filter the caller
+ * asked for — the same reasoning `direction` and `kinds` follow on traverse. */
+static int has_pattern_field(const cJSON *req) {
+    const cJSON *pat = cJSON_GetObjectItemCaseSensitive(req, "pattern");
+    return pat && !cJSON_IsNull(pat);
+}
 
 #define MAX_BATCH 1000 /* max records per batch insert (bounds work/allocs) */
+
+/* Parse `search`'s `pattern` filter (ROADMAP 5.2) into p.
+ *   "pattern": { "s": <id>|"*", "p": "<pred>"|"*", "o": "<lit>"|{"id":N}|"*" }
+ * An omitted or "*" position is a wildcard. Returns AEGIS_OK, or an error: at
+ * least one position must be bound, since an all-wildcard pattern is a scan of
+ * every fact wearing a filter's clothes. */
+static aegis_status_t parse_pattern(AegisDB *db, const cJSON *req,
+                                    SearchParams *p) {
+    const cJSON *pat = cJSON_GetObjectItemCaseSensitive(req, "pattern");
+    if (!pat || cJSON_IsNull(pat)) {
+        return AEGIS_OK;
+    }
+    if (!cJSON_IsObject(pat)) {
+        return AEGIS_ERR_INVALID_REQUEST;
+    }
+    /* Reported before parsing, so a client learns the server cannot answer
+     * patterns at all rather than that its particular pattern was malformed. */
+    if (!db->facts) {
+        return AEGIS_ERR_NOT_READY;
+    }
+    p->has_pattern = 1;
+
+    const cJSON *js = cJSON_GetObjectItemCaseSensitive(pat, "s");
+    if (js && !cJSON_IsNull(js)) {
+        if (cJSON_IsNumber(js)) {
+            p->pat_has_subject = 1;
+            p->pat_subject = (uint64_t)js->valuedouble;
+        } else if (!(cJSON_IsString(js) && js->valuestring &&
+                     strcmp(js->valuestring, "*") == 0)) {
+            return AEGIS_ERR_INVALID_REQUEST;
+        }
+    }
+    const cJSON *jp = cJSON_GetObjectItemCaseSensitive(pat, "p");
+    if (jp && !cJSON_IsNull(jp)) {
+        if (!cJSON_IsString(jp) || !jp->valuestring || !*jp->valuestring) {
+            return AEGIS_ERR_INVALID_REQUEST;
+        }
+        if (strcmp(jp->valuestring, "*") != 0) {
+            p->pat_predicate = jp->valuestring; /* borrowed from the request */
+        }
+    }
+    const cJSON *jo = cJSON_GetObjectItemCaseSensitive(pat, "o");
+    if (jo && !cJSON_IsNull(jo)) {
+        if (cJSON_IsString(jo) && jo->valuestring) {
+            if (strcmp(jo->valuestring, "*") != 0) {
+                p->pat_has_object = 1;
+                p->pat_object_kind = FACT_OBJ_STRING;
+                p->pat_object_str = jo->valuestring;
+            }
+        } else if (cJSON_IsObject(jo)) {
+            uint64_t oid = 0;
+            if (jr_u64(jo, "id", &oid) != 0) {
+                return AEGIS_ERR_INVALID_REQUEST;
+            }
+            p->pat_has_object = 1;
+            p->pat_object_kind = FACT_OBJ_ID;
+            p->pat_object_id = oid;
+        } else {
+            return AEGIS_ERR_INVALID_REQUEST;
+        }
+    }
+    if (!p->pat_has_subject && !p->pat_predicate && !p->pat_has_object) {
+        return AEGIS_ERR_INVALID_REQUEST;
+    }
+    return AEGIS_OK;
+}
 
 /* Build one input record from `spec`, pin it to `ns` when set. 0/-1 via *err. */
 static int build_pinned(AegisDB *db, const cJSON *spec, const char *ns,
@@ -844,6 +920,14 @@ static cJSON *handle_delete(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
         return o;
     }
     /* no id: delete every record matching the filters (requires >=1 filter) */
+    /* A `pattern` is refused rather than ignored. Deleting by pattern is a
+     * coherent operation and may well be worth having, but it is a new
+     * destructive capability — not something to acquire as a side effect of the
+     * release that added the read filter. Silently dropping it would be worse
+     * than either choice. */
+    if (has_pattern_field(req)) {
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
     SearchParams p;
     const char **tags = NULL;
     if (parse_filters(req, ns, &p, &tags) != 0) {
@@ -973,6 +1057,13 @@ static cJSON *handle_count(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     const char **tags = NULL;
     if (parse_filters(req, ns, &p, &tags) != 0) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
+    /* `count` shares the candidate path, so a pattern narrows it for free —
+     * "how many records assert this?" is the obvious companion to the search. */
+    aegis_status_t pst = parse_pattern(db, req, &p);
+    if (pst != AEGIS_OK) {
+        free(tags);
+        return json_error_status(pst);
     }
     size_t count = 0;
     int capped = 0;
@@ -1135,6 +1226,13 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     }
     p.embedding = emb;
     p.embedding_dim = en;
+
+    aegis_status_t pst = parse_pattern(db, req, &p);
+    if (pst != AEGIS_OK) {
+        free(tags);
+        free(emb);
+        return json_error_status(pst);
+    }
 
     /* Opt-in per-hit ranking breakdown (ROADMAP 1.2): off by default so normal
      * responses stay lean; clients/inspection UIs pass "explain": true. */

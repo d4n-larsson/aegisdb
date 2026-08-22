@@ -27,6 +27,37 @@ static int rec_has_tag(const MemoryRecord *r, const char *tag) {
     return 0;
 }
 
+/* Does this record's fact match the bound positions of the pattern? Exact, and
+ * index-free: the record is already loaded, so this compares what it actually
+ * asserts rather than trusting the candidate source. That matters because the
+ * pattern is also usable *alongside* a semantic or lexical query, where the
+ * candidates come from somewhere else entirely. */
+static int matches_pattern(const MemoryRecord *r, const SearchParams *p) {
+    if (r->fact.kind == FACT_NONE || !r->fact.predicate) {
+        return 0; /* a record asserting nothing matches no pattern */
+    }
+    if (p->pat_has_subject && r->fact.subject != p->pat_subject) {
+        return 0;
+    }
+    if (p->pat_predicate && strcmp(r->fact.predicate, p->pat_predicate) != 0) {
+        return 0;
+    }
+    if (p->pat_has_object) {
+        if (r->fact.kind != p->pat_object_kind) {
+            return 0; /* an id never matches a literal, or the reverse */
+        }
+        if (p->pat_object_kind == FACT_OBJ_ID) {
+            if (r->fact.object_id != p->pat_object_id) {
+                return 0;
+            }
+        } else if (!r->fact.object_str || !p->pat_object_str ||
+                   strcmp(r->fact.object_str, p->pat_object_str) != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int passes_filters(const MemoryRecord *r, const SearchParams *p) {
     if (r->deleted) {
         return 0;
@@ -43,6 +74,9 @@ static int passes_filters(const MemoryRecord *r, const SearchParams *p) {
     }
     if (p->has_time &&
         (r->created < p->start_time || r->created > p->end_time)) {
+        return 0;
+    }
+    if (p->has_pattern && !matches_pattern(r, p)) {
         return 0;
     }
     if (p->tag_count) {
@@ -422,6 +456,29 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
          * when it truncates; treat a full load as "possibly more". */
         *exhausted =
             p->oldest_first ? (load_cap == 0 || nids < load_cap) : !trunc;
+    } else if (p->has_pattern) {
+        /* Draw candidates from whichever bound position the index can answer
+         * most narrowly: a subject or an object each pins one slot, while a
+         * predicate alone pins a whole list. The predicate is passed along in
+         * the first two cases so it narrows inside the index rather than in the
+         * post-filter. The set is complete either way, so nothing is exhausted
+         * early. */
+        int rc;
+        if (p->pat_has_subject) {
+            rc = fact_index_by_subject(db->facts, p->pat_subject,
+                                       p->pat_predicate, &ids, &nids);
+        } else if (p->pat_has_object) {
+            rc = fact_index_by_object(db->facts, p->pat_object_kind,
+                                      p->pat_object_id, p->pat_object_str,
+                                      p->pat_predicate, &ids, &nids);
+        } else {
+            rc = fact_index_by_predicate(db->facts, p->pat_predicate, &ids,
+                                         &nids);
+        }
+        if (rc != 0) {
+            pthread_rwlock_unlock(&db->index_lock);
+            return AEGIS_ERR_INTERNAL;
+        }
     } else if (p->tag_count) {
         if (tag_index_query(db->tags, p->tags, p->tag_count, p->match_all, &ids,
                             &nids) != 0) {

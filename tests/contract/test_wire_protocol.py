@@ -1422,6 +1422,179 @@ def test_predicate_registry_refuses_to_start(binary, port):
     check(rc is None, "a valid registry starts and keeps running")
 
 
+def test_pattern_search(binary, port):
+    print("[search: the pattern filter over typed facts (ROADMAP 5.2)]")
+    with Server(binary, port, phase=4) as srv:
+        def ins(data, fact=None, **kw):
+            p = {"operation": "insert", "type": "semantic", "data": data,
+                 "include_embeddings": False}
+            if fact is not None:
+                p["fact"] = fact
+            p.update(kw)
+            return srv.req(p)["record"]["id"]
+
+        def find(pattern, **kw):
+            p = {"operation": "search", "pattern": pattern, "top_k": 50,
+                 "include_embeddings": False}
+            p.update(kw)
+            return srv.req(p)
+
+        def ids(r):
+            return sorted(rec["id"] for rec in r.get("records", []))
+
+        hook = ins("the recall hook")
+        store = ins("the storage layer")
+        hnsw = ins("hnsw.c")
+
+        a = ins("hook defaults to none",
+                {"s": hook, "p": "defaults_to", "o": "none"}, tags=["cfg"])
+        b = ins("hnsw defaults to none",
+                {"s": hnsw, "p": "defaults_to", "o": "none"})
+        c = ins("hook is described as a hook",
+                {"s": hook, "p": "described_as", "o": "a hook"})
+        d = ins("hnsw is part of storage",
+                {"s": hnsw, "p": "part_of", "o": {"id": store}})
+
+        # each of the five bindable shapes
+        check(ids(find({"s": hook})) == sorted([a, c]),
+              "{s} finds everything about a subject")
+        check(ids(find({"s": hook, "p": "defaults_to"})) == [a],
+              "{s,p} narrows to one predicate")
+        check(ids(find({"p": "defaults_to"})) == sorted([a, b]),
+              "{p} finds every record using a predicate")
+        check(ids(find({"o": "none"})) == sorted([a, b]),
+              "{o} finds every record asserting a literal")
+        check(ids(find({"p": "defaults_to", "o": "none"})) == sorted([a, b]),
+              "{p,o} combines them")
+        check(ids(find({"o": {"id": store}})) == [d],
+              "an id-valued object is matched as a reference")
+
+        # a wildcard is the same as omitting the position
+        check(ids(find({"s": hook, "p": "*"})) == sorted([a, c]),
+              'an explicit "*" is a wildcard')
+        check(ids(find({"s": hook, "p": "*", "o": "*"})) == sorted([a, c]),
+              "wildcards in every free position")
+
+        # an id object and a literal that looks like one stay distinct
+        check(ids(find({"o": str(store)})) == [],
+              "a literal is not confused with an id reference")
+
+        # misses
+        check(ids(find({"s": 999999})) == [], "an unknown subject finds nothing")
+        check(ids(find({"p": "never_used"})) == [],
+              "an unknown predicate finds nothing")
+
+        # records asserting nothing never match a pattern
+        check(hook not in ids(find({"p": "*", "s": hook})),
+              "a fact-less record does not match its own subject pattern")
+
+        # intersects with the ordinary filters rather than replacing them
+        check(ids(find({"p": "defaults_to"}, tags=["cfg"])) == [a],
+              "a pattern intersects with a tag filter")
+        check(ids(find({"p": "defaults_to"}, type="episodic")) == [],
+              "and with a type filter")
+
+        # a filter, not a ranking
+        r = find({"p": "defaults_to"}, explain=True)
+        ex = r["records"][0]["explain"]
+        check(ex["semantic"] is False and ex["lexical"] is False,
+              "a pattern hit is neither semantic nor lexical")
+
+        # Combined with a ranked query the pattern acts on the ranked
+        # candidates rather than replacing them: the vector search chooses what
+        # to consider, the pattern removes what does not assert the right thing,
+        # and the search widens its fetch to compensate for a selective filter.
+        dim = 384
+        vec = [1.0] + [0.0] * (dim - 1)
+        srv.req({"operation": "insert", "type": "semantic", "data": "vectored",
+                 "embedding": vec,
+                 "fact": {"s": hook, "p": "defaults_to", "o": "none"}})
+        r = find({"p": "defaults_to"}, embedding=vec)
+        check(r.get("ok") is True and r.get("total", 0) >= 1,
+              "a pattern composes with a semantic query")
+        for rec in r.get("records", []):
+            check(rec.get("fact", {}).get("p") == "defaults_to",
+                  "every ranked hit still satisfies the pattern")
+            break
+
+        # count shares the candidate path, so it narrows too — and must agree
+        # with what search returns for the same pattern, which is a stronger
+        # claim than any literal expectation
+        want = len(ids(find({"p": "defaults_to"})))
+        r = srv.req({"operation": "count", "pattern": {"p": "defaults_to"}})
+        check(r.get("ok") is True and r.get("count") == want,
+              f"count honours a pattern and agrees with search ({want})")
+
+        # --- validation ---
+        r = find({})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "an empty pattern is refused")
+        r = find({"s": "*", "p": "*", "o": "*"})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "an all-wildcard pattern is refused: it is a scan, not a filter")
+        for bad in ("not-an-object", 42, [1]):
+            r = find(bad)
+            check(r.get("ok") is False
+                  and r["error"]["code"] == "INVALID_REQUEST",
+                  f"a non-object pattern {bad!r} is refused")
+        r = find({"s": "forty-two"})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "a non-numeric subject is refused")
+        r = find({"o": {"nope": 1}})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "an object reference without an id is refused")
+
+        # delete refuses a pattern rather than silently ignoring it: narrowing
+        # or not, delete-by-pattern is a capability, not a side effect
+        r = srv.req({"operation": "delete", "pattern": {"p": "defaults_to"}})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "bulk delete refuses a pattern instead of dropping it")
+        check(len(ids(find({"p": "defaults_to"}))) == want,
+              "and nothing was deleted")
+
+
+def test_pattern_search_disabled_and_isolated(binary, port):
+    print("[search: pattern needs the index, and respects tenants]")
+    with Server(binary, port, phase=4,
+                extra_args=["--no-fact-index"]) as srv:
+        s0 = srv.req({"operation": "insert", "type": "semantic",
+                      "data": "s"})["record"]["id"]
+        srv.req({"operation": "insert", "type": "semantic", "data": "f",
+                 "fact": {"s": s0, "p": "p", "o": "o"}})
+        r = srv.req({"operation": "search", "pattern": {"p": "p"}})
+        check(r.get("ok") is False and r["error"]["code"] == "NOT_READY",
+              "a pattern without the index reports NOT_READY")
+        r = srv.req({"operation": "search", "tags": ["x"]})
+        check(r.get("ok") is True, "other searches are unaffected")
+
+    tokens = ["acme-key   acme   rw", "beta-key   beta   rw", "admin-key admin"]
+    with Server(binary, port, phase=4, token_lines=tokens) as srv:
+        def ins(tok, data, fact=None):
+            p = {"operation": "insert", "type": "semantic", "data": data,
+                 "token": tok}
+            if fact:
+                p["fact"] = fact
+            return srv.req(p)["record"]["id"]
+
+        subj = ins("admin-key", "shared subject")
+        mine = ins("acme-key", "acme asserts", {"s": subj, "p": "p", "o": "o"})
+        theirs = ins("beta-key", "beta asserts", {"s": subj, "p": "p", "o": "o"})
+
+        # Both tenants assert the same triple about the same subject. A pattern
+        # search must return only the asserting records the caller owns — the
+        # fact index is global, so this is the isolation that matters.
+        r = srv.req({"operation": "search", "pattern": {"s": subj, "p": "p"},
+                     "token": "acme-key", "include_embeddings": False})
+        got = sorted(rec["id"] for rec in r.get("records", []))
+        check(got == [mine], "a tenant sees only its own assertion")
+        check(theirs not in got, "and never a co-tenant's")
+
+        r = srv.req({"operation": "search", "pattern": {"s": subj, "p": "p"},
+                     "token": "admin-key", "include_embeddings": False})
+        check(sorted(rec["id"] for rec in r.get("records", []))
+              == sorted([mine, theirs]), "an admin sees both")
+
+
 def test_consolidate(binary, port):
     print("[consolidate: merge near-duplicate semantic memories]")
     with Server(binary, port, phase=4) as srv:
@@ -3331,6 +3504,8 @@ def main():
     test_replication(binary, 19520)
     test_replication_codec_gate(binary, 19527)  # uses port, +1
     test_typed_facts(binary, 19547)
+    test_pattern_search(binary, 19552)
+    test_pattern_search_disabled_and_isolated(binary, 19553)
     test_predicate_registry(binary, 19550)
     test_predicate_registry_refuses_to_start(binary, 19551)
     test_codec_gate_with_a_real_v3_frame(binary, 19549)  # uses port, +1

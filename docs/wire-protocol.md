@@ -573,6 +573,7 @@ when **both** `start_time` and `end_time` are present.
 | `tags` | string[] | Tag filter |
 | `match` | string | `all` (intersection) \| `any` (union); default `all` |
 | `embedding` | number[] | Semantic query vector; ranked by cosine similarity weighted by importance × confidence |
+| `pattern` | object | Filter by the typed fact a record asserts (ROADMAP 5.2); see below. Returns `NOT_READY` if the server runs with `--no-fact-index` |
 | `query` | string | Lexical query text; ranked by Okapi BM25 over record payloads. Combine with `embedding` for hybrid retrieval (see below). Returns `NOT_READY` if the server runs with `--no-lexical-index` |
 | `type` | string | Filter by memory type |
 | `agent_id` | string | Namespace filter |
@@ -623,6 +624,41 @@ Two behaviours differ in hybrid mode, both deliberate:
   fused query therefore ranks on the fusion alone and reports `weight` and
   `recency_factor` as `1.0`. Use a single-source query when that shaping is what
   you want.
+
+**Pattern filter (`pattern`)**: matches on the machine-readable `fact` a record
+carries (see `insert`), rather than on its words. Bind any non-empty subset of
+the three positions; omit a position, or set it to `"*"`, to leave it free.
+
+```json
+{ "operation": "search", "pattern": { "s": 42, "p": "defaults_to" }, "top_k": 20 }
+```
+
+| Pattern | Question it answers |
+|---------|--------------------|
+| `{"s": 42}` | everything asserted about record 42 |
+| `{"s": 42, "p": "defaults_to"}` | what 42 defaults to |
+| `{"p": "defaults_to"}` | every record using that predicate |
+| `{"o": "none"}` | every record asserting the literal `none` |
+| `{"p": "part_of", "o": {"id": 99}}` | everything declared part of record 99 |
+
+An **all-wildcard pattern is refused** with `INVALID_REQUEST` — it is a scan of
+every fact wearing a filter's clothes. A record that asserts no fact never
+matches any pattern. A literal object and an id reference are never confused:
+`{"o": "99"}` and `{"o": {"id": 99}}` are different queries.
+
+`pattern` **intersects** with the ordinary filters (`type`, `tags`,
+`agent_id`, the time range) rather than replacing them, and namespace scoping
+applies as everywhere else — the fact indexes are server-wide, but a pattern
+search returns only records the caller owns.
+
+It is a **filter, not a ranking**: on its own it orders by time and reports
+`explain.semantic`/`lexical` as `false`. Combined with `embedding` or `query`
+the ranked index still chooses the candidates and the pattern removes those that
+do not assert the right thing.
+
+`count` accepts `pattern` too. Bulk `delete` deliberately **rejects** it rather
+than ignoring it: deleting by pattern would be a new destructive capability, so
+it is refused until it is asked for explicitly.
 
 **Ranking explanation (`explain: true`)**: each record carries an `explain`
 object so retrieval is inspectable rather than a black box:

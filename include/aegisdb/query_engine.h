@@ -80,6 +80,20 @@ typedef struct {
      * "track_usage": false — which the inspector does, so browsing memories does
      * not mark them all as used. */
     int track_usage;
+    /* Typed-fact pattern filter (ROADMAP 5.2). `has_pattern` gates the whole
+     * thing; each position is independently bound or wildcard, and at least one
+     * must be bound (an all-wildcard pattern is a full scan wearing a filter's
+     * clothes, and the wire layer refuses it). Deliberately no variables: a
+     * position can be a value or "anything", never a name reused in another
+     * position — that is the line between a filter and a query language. */
+    int has_pattern;
+    int pat_has_subject;
+    uint64_t pat_subject;
+    const char *pat_predicate; /* NULL = any predicate */
+    int pat_has_object;
+    FactKind pat_object_kind; /* FACT_OBJ_ID or FACT_OBJ_STRING */
+    uint64_t pat_object_id;
+    const char *pat_object_str;
     int oldest_first; /* non-semantic: when a bounded time scan truncates, keep
                          * the OLDEST rather than the most recent (candidate
                          * selection for summarization). Ignored for semantic. */
