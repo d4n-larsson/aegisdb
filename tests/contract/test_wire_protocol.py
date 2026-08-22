@@ -1033,7 +1033,8 @@ REPL_MAGIC = 0xA6E515ED
 MSG_FRAME, MSG_HEARTBEAT, MSG_RESET, MSG_INCOMPATIBLE = 0, 1, 2, 3
 
 
-def _fake_replica(repl_port, token, codec_version, want=2, timeout=5.0):
+def _fake_replica(repl_port, token, codec_version, want=2, timeout=5.0,
+                  from_offset=0, generation=0):
     """Subscribe to a primary's replication stream as a bare socket and return
     (handshake_response, [message types seen]).
 
@@ -1043,8 +1044,8 @@ def _fake_replica(repl_port, token, codec_version, want=2, timeout=5.0):
     """
     s = socket.create_connection(("127.0.0.1", repl_port), timeout)
     s.settimeout(timeout)
-    hs = {"from_offset": 0, "generation": 0, "token": token,
-          "key_fingerprint": ""}
+    hs = {"from_offset": from_offset, "generation": generation,
+          "token": token, "key_fingerprint": ""}
     if codec_version is not None:
         hs["codec_version"] = codec_version
     s.sendall((json.dumps(hs) + "\n").encode())
@@ -1126,6 +1127,29 @@ def test_replication_codec_gate(binary, port):
               "an unreadable frame yields MSG_INCOMPATIBLE, not the frame")
         check(MSG_FRAME not in kinds,
               "the undecodable frame is never sent")
+
+        # from_offset/generation cannot be converted from a negative or
+        # >= 2^64 double, so a peer sending one is refused rather than seeked
+        # to an arbitrary place in the log — or silently re-sent all of it.
+        # Rejected after the token check, so it is not an oracle for anything.
+        for field in ("from_offset", "generation"):
+            for bad in (-1, 1e30):
+                resp, msgs = _fake_replica(repl_port, tok, codec_version=3,
+                                           want=1, **{field: bad})
+                check(resp.get("ok") is False,
+                      f"{field}={bad!r} is refused, not converted")
+                check(MSG_FRAME not in [m[0] for m in msgs],
+                      f"and nothing is streamed for {field}={bad!r}")
+        resp, _ = _fake_replica(repl_port, "wrong-token", codec_version=3,
+                                want=1, from_offset=-1)
+        check(resp.get("ok") is False and "malformed" not in str(resp),
+              "a bad token outranks a malformed offset, so it leaks nothing")
+
+        # a valid offset still subscribes: the guard rejects only what cannot
+        # be an offset, not an unusual one
+        resp, _ = _fake_replica(repl_port, tok, codec_version=3, want=1,
+                                from_offset=0, generation=1)
+        check(resp.get("ok") is True, "a well-formed handshake still works")
 
 
 def test_typed_facts(binary, port):

@@ -25,6 +25,7 @@
 #include <unistd.h>
 
 #include "aegisdb/endian.h"
+#include "aegisdb/json_request.h"
 #include "aegisdb/log.h"
 #include "aegisdb/logging.h"
 #include "aegisdb/netio.h"
@@ -174,8 +175,25 @@ static void *streamer(void *arg) {
     const cJSON *jcv = cJSON_GetObjectItemCaseSensitive(req, "codec_version");
     const char *tok = cJSON_IsString(jtok) ? jtok->valuestring : "";
     const char *req_fp = cJSON_IsString(jfp) ? jfp->valuestring : "";
-    uint64_t from_off = cJSON_IsNumber(joff) ? (uint64_t)joff->valuedouble : 0;
-    uint64_t req_gen = cJSON_IsNumber(jgen) ? (uint64_t)jgen->valuedouble : 0;
+    /* Both default to 0 when absent, as they always have. When present they go
+     * through jr_u64 rather than a cast: converting a negative or >= 2^64
+     * double to uint64_t is undefined, and the two plausible results are both
+     * bad — a garbage offset seeks somewhere arbitrary in the log, and 0 would
+     * silently re-stream the whole thing to a peer that asked for neither.
+     * Validity is only recorded here; it is acted on after the token check, so
+     * a malformed field tells an unauthenticated peer nothing a bad token
+     * would not. */
+    uint64_t from_off = 0;
+    uint64_t req_gen = 0;
+    int hs_malformed = 0;
+    if (joff && !cJSON_IsNull(joff) &&
+        jr_u64(req, "from_offset", &from_off) != 0) {
+        hs_malformed = 1;
+    }
+    if (jgen && !cJSON_IsNull(jgen) &&
+        jr_u64(req, "generation", &req_gen) != 0) {
+        hs_malformed = 1;
+    }
     /* Highest record codec the replica can decode. Absent means a build from
      * before the field existed, which by definition tops out at v2 — and so
      * does a negative or non-numeric value, since converting one to unsigned is
@@ -217,6 +235,14 @@ static void *streamer(void *arg) {
         cJSON_Delete(req);
         LOG_WARN(
             "replication: subscriber rejected (encryption key/mode mismatch)");
+        goto done;
+    }
+    if (hs_malformed) {
+        (void)net_write_str(
+            fd, "{\"ok\":false,\"error\":\"malformed handshake\"}\n");
+        cJSON_Delete(req);
+        LOG_WARN("replication: subscriber rejected (from_offset/generation not "
+                 "a valid offset)");
         goto done;
     }
     cJSON_Delete(req);
