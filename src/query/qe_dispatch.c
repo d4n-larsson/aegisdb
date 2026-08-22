@@ -875,6 +875,14 @@ static cJSON *handle_update(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     if (jr_u64(req, "id", &id) != 0) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     }
+    /* A fact is immutable: changing what a record asserts is a supersession,
+     * not an edit (see build_fact). Refused rather than ignored, for the reason
+     * bulk `delete` refuses a `pattern` — a silent no-op on a field the caller
+     * spelled correctly is worse than either doing it or saying no. */
+    const cJSON *jfact = cJSON_GetObjectItemCaseSensitive(req, "fact");
+    if (jfact && !cJSON_IsNull(jfact)) {
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
     UpdatePatch patch;
     memset(&patch, 0, sizeof(patch));
     const char *data = jr_str(req, "data", NULL);

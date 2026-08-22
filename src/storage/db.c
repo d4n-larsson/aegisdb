@@ -76,9 +76,19 @@ void db_fact_index_apply(AegisDB *db, const MemoryRecord *r, int add) {
         return;
     }
     if (add) {
-        (void)fact_index_add(db->facts, r->id, r->fact.subject,
-                             r->fact.predicate, r->fact.kind, r->fact.object_id,
-                             r->fact.object_str);
+        /* A failure here leaves the fact durable but unindexed: no pattern
+         * naming it will ever match, and the `facts` stat under-counts. None of
+         * the call sites can undo the write — recovery and the replica apply
+         * are replaying a log that is already committed upstream — so the least
+         * bad outcome is to say so once, loudly, rather than let the index and
+         * the log drift apart in silence. */
+        if (fact_index_add(db->facts, r->id, r->fact.subject, r->fact.predicate,
+                           r->fact.kind, r->fact.object_id,
+                           r->fact.object_str) != 0) {
+            LOG_WARN("fact index: record %llu not indexed (predicate \"%s\"); "
+                     "it will not match any pattern",
+                     (unsigned long long)r->id, r->fact.predicate);
+        }
     } else {
         fact_index_remove(db->facts, r->id, r->fact.subject, r->fact.predicate,
                           r->fact.kind, r->fact.object_id, r->fact.object_str);

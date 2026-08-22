@@ -177,9 +177,17 @@ static void *streamer(void *arg) {
     uint64_t from_off = cJSON_IsNumber(joff) ? (uint64_t)joff->valuedouble : 0;
     uint64_t req_gen = cJSON_IsNumber(jgen) ? (uint64_t)jgen->valuedouble : 0;
     /* Highest record codec the replica can decode. Absent means a build from
-     * before the field existed, which by definition tops out at v2. */
-    unsigned peer_codec =
-        cJSON_IsNumber(jcv) ? (unsigned)jcv->valuedouble : RECORD_CODEC_V2;
+     * before the field existed, which by definition tops out at v2 — and so
+     * does a negative or non-numeric value, since converting one to unsigned is
+     * undefined and "assume the older format" is the direction that withholds
+     * frames rather than corrupting a replica. A peer claiming more than this
+     * build can even write is clamped to what it can. */
+    unsigned peer_codec = RECORD_CODEC_V2;
+    if (cJSON_IsNumber(jcv) && jcv->valuedouble >= 0) {
+        peer_codec = jcv->valuedouble >= (double)RECORD_CODEC_MAX
+                         ? RECORD_CODEC_MAX
+                         : (unsigned)jcv->valuedouble;
+    }
 
     /* Constant-time compare of the token's SHA-256 (not the raw bytes): avoids
      * both the byte-by-byte short-circuit of strcmp and leaking the token's

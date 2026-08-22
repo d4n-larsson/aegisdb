@@ -1212,6 +1212,21 @@ def test_typed_facts(binary, port):
         check(r["record"].get("fact", {}).get("o") == "none",
               "an update does not disturb the fact")
         check(stats_facts(srv)[0] == 2, "nor the fact index")
+
+        # and an update that *tries* to set one is refused rather than silently
+        # dropped — the caller spelled the field correctly and deserves to
+        # learn that supersession, not editing, is how a claim changes
+        r = srv.req({"operation": "update", "id": lit,
+                     "fact": {"s": hook, "p": "defaults_to", "o": "other"}})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "update refuses a fact instead of ignoring it")
+        r = srv.req({"operation": "get", "id": lit})
+        check(r["record"].get("fact", {}).get("o") == "none",
+              "and the original claim stands")
+        r = srv.req({"operation": "update", "id": lit, "data": "again",
+                     "fact": None})
+        check(r.get("ok") is True, "an explicit null fact is not a change")
+
         before = stats_facts(srv)
         srv.graceful_stop()
 
@@ -1270,6 +1285,26 @@ def test_codec_gate_with_a_real_v3_frame(binary, port):
         check(3 in versions, "a v3-capable replica receives the v3 frame")
         check(MSG_INCOMPATIBLE not in [m[0] for m in msgs],
               "and is not refused")
+
+        # A negative version cannot be converted to unsigned at all (that is
+        # undefined), so it reads as "no field" — the v2 default, which is the
+        # direction that withholds a frame rather than streaming one to a peer
+        # that never claimed to understand it.
+        _, msgs = _fake_replica(repl_port, tok, codec_version=-1, want=5)
+        versions = [m[1][0] for m in msgs if m[0] == MSG_FRAME and m[1]]
+        check(3 not in versions, "a negative codec_version defaults to v2")
+        check(MSG_INCOMPATIBLE in [m[0] for m in msgs],
+              "and the peer is still told why")
+
+        # Anything at or above what this build can write is clamped to that:
+        # a future replica reads everything we emit, and there is no principled
+        # line above RECORD_CODEC_MAX that separates "newer build" from "absurd
+        # number" — both can decode every frame this primary is able to produce.
+        for high in (99, 1e30):
+            _, msgs = _fake_replica(repl_port, tok, codec_version=high, want=5)
+            versions = [m[1][0] for m in msgs if m[0] == MSG_FRAME and m[1]]
+            check(3 in versions,
+                  f"codec_version {high!r} is clamped to what we can write")
 
 
 def test_typed_facts_replica_parity(binary, port):
@@ -1364,6 +1399,18 @@ def test_predicate_registry(binary, port):
         # a fact-less insert is unaffected by any of this
         r = srv.req({"operation": "insert", "type": "semantic", "data": "plain"})
         check(r.get("ok") is True, "a record with no fact is unaffected")
+
+        # working memory is not a way around the vocabulary: it returns before
+        # the persisted write path, so the check has to sit ahead of the type
+        # dispatch rather than on it
+        w = {"operation": "insert", "type": "working", "session_id": "s1",
+             "data": "w"}
+        r = srv.req(dict(w, fact={"s": subj, "p": "invented_here", "o": "x"}))
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "a working record cannot assert an undeclared predicate")
+        r = srv.req(dict(w, fact={"s": subj, "p": "defaults_to", "o": "none"}))
+        check(r.get("ok") is True,
+              "and a declared one on working memory still works")
 
     # with no registry, any predicate is accepted: a server that never opted in
     # cannot be broken by this feature
@@ -3470,7 +3517,7 @@ def main():
     test_stats(binary, 19474)
     test_multitenancy(binary, 19475)
     test_hashed_tokens(binary, 19476)
-    test_cli(binary, 19477)
+    test_cli(binary, 19514)  # uses port, +1
     test_search_limits(binary, 19478)
     test_query_scan_cap(binary, 19491)
     test_input_validation(binary, 19495)
@@ -3485,7 +3532,7 @@ def main():
     test_consolidate(binary, 19481)
     test_traverse_kinds(binary, 19540)
     test_edge_index_maintenance(binary, 19541)
-    test_edge_index_replica_parity(binary, 19542)  # uses port, +1, +2
+    test_edge_index_replica_parity(binary, 19511)  # uses port, +1, +2
     test_traverse_reverse(binary, 19543)
     test_traverse_reverse_disabled(binary, 19544)
     test_traverse_reverse_recovery(binary, 19545)
@@ -3512,21 +3559,21 @@ def main():
     test_tenant_quota(binary, 19488)
     test_tenant_rate_limit(binary, 19489)
     test_token_admin(binary, 19490)
-    test_replication(binary, 19520)
-    test_replication_codec_gate(binary, 19527)  # uses port, +1
+    test_replication(binary, 19520)  # uses port, +1, +2
+    test_replication_codec_gate(binary, 19509)  # uses port, +1
     test_typed_facts(binary, 19547)
     test_pattern_search(binary, 19552)
     test_pattern_search_disabled_and_isolated(binary, 19553)
-    test_predicate_registry(binary, 19550)
+    test_predicate_registry(binary, 19570)
     test_predicate_registry_refuses_to_start(binary, 19551)
-    test_codec_gate_with_a_real_v3_frame(binary, 19549)  # uses port, +1
-    test_typed_facts_replica_parity(binary, 19548)  # uses port, +1, +2  # uses port, +1 (repl stream), +2 (replica)
-    test_replication_encrypted(binary, 19525)  # uses port, +1, +2, +12
+    test_codec_gate_with_a_real_v3_frame(binary, 19568)  # uses port, +1
+    test_typed_facts_replica_parity(binary, 19548)  # uses port, +1 (repl stream), +2 (replica)
+    test_replication_encrypted(binary, 19554)  # uses port, +1, +2, +10
     test_replication_preauth(binary, 19523)  # uses port, +1 (repl stream)
     test_snapshot(binary, 19483)
     test_snapshot_admin_only(binary, 19485)
-    test_restore(binary, 19486)
-    test_encrypted_backup_restore(binary, 19494)
+    test_restore(binary, 19516)  # uses port, +1
+    test_encrypted_backup_restore(binary, 19518)  # uses port, +1
 
     print()
     if FAILURES:
