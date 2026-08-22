@@ -470,6 +470,27 @@ does deterministically, at write time, for free.
 - **Deferred:** non-monotonic defaults and exceptions ("normally X, except
   here"). Supersession already covers the common case, and defeasible reasoning
   is a research rabbit-hole with a poor ratio of value to subtlety.
+- **Designed:** `inference-design.md`. Three things the design settled that the
+  entry above left open. **Subsumption is not a closure** — materializing it
+  would write facts that are false (the storage layer does not default to what
+  `hnsw.c` defaults to) and would go quadratic in taxonomy depth × facts per
+  entity; it becomes an opt-in `subsume` flag on `pattern` instead, reading the
+  `is_a` closure that *is* materialized, so the two compose into one index
+  probe. A conclusion is a **record**, carrying codec v4's `derivation` (rule,
+  depth, premise ids) — server-only and unforgeable, because every trust claim
+  in this horizon rests on provenance a client cannot manufacture. And the job
+  runs **per namespace**: the fact indexes are server-wide, so the naive
+  implementation would join a premise from one tenant with a premise from
+  another and write a record that exists in neither.
+- **Found while designing:** retraction does *not* fall out of 5.1's reverse
+  adjacency as the entry assumes. `qe_delete` drops every edge pointing at the
+  tombstone before it returns, so a background job walking `derived_from`
+  backwards on the next tick finds nothing. Fixed by capturing dependents under
+  the write lock `qe_delete` already holds and draining them off it — with the
+  queue deliberately *not* durable, because a derived record names its own
+  premises and recovery can reconcile the whole live set instead. That turns
+  "the queue was flushed" into the far better invariant "no live derived record
+  has a dead premise", which is checkable on every restart.
 
 ### 5.4 The neuro-symbolic seam
 
