@@ -594,6 +594,280 @@ static void test_clone_copies_the_fact(void) {
     record_free(&src);
 }
 
+/* ---- derivation, codec v4 (ROADMAP 5.3) --------------------------------- */
+
+/* THE compatibility test for v4, in the shape v3's used. A record that carries
+ * a fact but no derivation must encode to exactly the bytes the v3 codec
+ * produced before derivations existed — not merely round-trip. These bytes were
+ * captured from the pre-5.3 encoder for the record built below and diffed
+ * against it; a round-trip test would pass while the format silently moved. */
+static void test_underived_record_encodes_byte_identical_v3(void) {
+    static const uint8_t GOLDEN_V3[] = {
+        0x03, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x64, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc8, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x3f, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x61,
+        0x63, 0x6d, 0x65, 0x01, 0x00, 0x05, 0x00, 0x00, 0x00, 0x61, 0x6c, 0x70,
+        0x68, 0x61, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+        0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x64, 0x65, 0x72, 0x69,
+        0x76, 0x65, 0x64, 0x5f, 0x66, 0x72, 0x6f, 0x6d, 0x01, 0x0c, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x70, 0x61, 0x72,
+        0x74, 0x5f, 0x6f, 0x66, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x02, 0x00, 0x00, 0x00, 0x68, 0x69,
+    };
+    MemoryRecord r;
+    record_init(&r);
+    r.id = 7;
+    r.type = MEM_SEMANTIC;
+    r.created = 100;
+    r.updated = 200;
+    r.importance = 0.5F;
+    r.confidence = 1.0F;
+    const char *tags[] = {"alpha"};
+    TEST_ASSERT_EQUAL_INT(0, record_set_tags(&r, tags, 1));
+    r.agent_id = strdup("acme");
+    TEST_ASSERT_EQUAL_INT(0, record_add_relationship(&r, 7, 9, "derived_from"));
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_fact(&r, FACT_OBJ_ID, 12, "part_of", 56, NULL));
+    r.data = strdup("hi");
+    r.data_len = 2;
+
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&r, &buf, &n));
+    TEST_ASSERT_EQUAL_size_t(sizeof(GOLDEN_V3), n);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(GOLDEN_V3, buf, sizeof(GOLDEN_V3));
+    TEST_ASSERT_EQUAL_UINT8(3, buf[0]); /* still announces itself as v3 */
+    free(buf);
+    record_free(&r);
+}
+
+/* A fact-less, derivation-less record is still v2 — v4 must not disturb the
+ * older step of the same ladder. */
+static void test_plain_record_is_still_v2(void) {
+    MemoryRecord r;
+    record_init(&r);
+    r.id = 3;
+    r.data = strdup("x");
+    r.data_len = 1;
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&r, &buf, &n));
+    TEST_ASSERT_EQUAL_UINT8(RECORD_CODEC_V2, buf[0]);
+    free(buf);
+    record_free(&r);
+}
+
+static void test_derived_record_roundtrips_as_v4(void) {
+    const uint64_t prem[] = {88, 91};
+    MemoryRecord src;
+    record_init(&src);
+    src.id = 21;
+    src.type = MEM_SEMANTIC;
+    src.confidence = 0.49F;
+    src.data = strdup("a part_of c");
+    src.data_len = 11;
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_fact(&src, FACT_OBJ_ID, 12, "part_of", 56, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_derivation(&src, DERIV_TRANSITIVE, 2, prem, 2));
+
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&src, &buf, &n));
+    TEST_ASSERT_EQUAL_UINT8(RECORD_CODEC_V4, buf[0]);
+
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(0, record_decode(buf, n, &out));
+    TEST_ASSERT_EQUAL_INT(DERIV_TRANSITIVE, out.derivation.rule);
+    TEST_ASSERT_EQUAL_UINT16(2, out.derivation.depth);
+    TEST_ASSERT_EQUAL_size_t(2, out.derivation.premise_count);
+    TEST_ASSERT_EQUAL_UINT64(88, out.derivation.premises[0]);
+    TEST_ASSERT_EQUAL_UINT64(91, out.derivation.premises[1]);
+    /* the fact it explains survives alongside it */
+    TEST_ASSERT_EQUAL_INT(FACT_OBJ_ID, out.fact.kind);
+    TEST_ASSERT_EQUAL_STRING("part_of", out.fact.predicate);
+    TEST_ASSERT_EQUAL_size_t(11, out.data_len);
+
+    record_free(&out);
+    free(buf);
+    record_free(&src);
+}
+
+/* A v3 frame predates derivations and must decode as underived, not fail and
+ * not invent one. */
+static void test_v3_frame_decodes_with_no_derivation(void) {
+    MemoryRecord src;
+    record_init(&src);
+    src.id = 5;
+    src.data = strdup("p");
+    src.data_len = 1;
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_fact(&src, FACT_OBJ_STRING, 1, "defaults_to", 0, "none"));
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&src, &buf, &n));
+    TEST_ASSERT_EQUAL_UINT8(RECORD_CODEC_V3, buf[0]);
+
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(0, record_decode(buf, n, &out));
+    TEST_ASSERT_EQUAL_INT(DERIV_NONE, out.derivation.rule);
+    TEST_ASSERT_NULL(out.derivation.premises);
+    TEST_ASSERT_EQUAL_size_t(0, out.derivation.premise_count);
+    record_free(&out);
+    free(buf);
+    record_free(&src);
+}
+
+/* A rule this build cannot name is refused rather than handed over as an
+ * uninterpretable provenance claim. */
+static void test_decode_rejects_unknown_deriv_rule(void) {
+    const uint64_t prem[] = {2};
+    MemoryRecord src;
+    record_init(&src);
+    src.id = 14;
+    src.data = strdup("payload");
+    src.data_len = 7;
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_fact(&src, FACT_OBJ_ID, 1, "part_of", 2, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_derivation(&src, DERIV_SYMMETRIC, 1, prem, 1));
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&src, &buf, &n));
+
+    /* Same fixed-offset reasoning as the fact-kind test: no agent_id, tags,
+     * vectors or relationships, so the fact block starts at 59 and occupies
+     * kind 1 + subject 8 + predlen 4 + "part_of" 7 + object_id 8 = 28. The rule
+     * byte therefore sits at 87. Asserted before it is corrupted, so a format
+     * change fails loudly here rather than testing the wrong byte. */
+    const size_t RULE_OFF = 87;
+    TEST_ASSERT_TRUE(n > RULE_OFF);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)DERIV_SYMMETRIC, buf[RULE_OFF]);
+
+    buf[RULE_OFF] = 99; /* not a known DerivRule */
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(-1, record_decode(buf, n, &out));
+
+    buf[RULE_OFF] = (uint8_t)DERIV_SYMMETRIC; /* restored: decodes again */
+    TEST_ASSERT_EQUAL_INT(0, record_decode(buf, n, &out));
+    record_free(&out);
+    free(buf);
+    record_free(&src);
+}
+
+/* A premise count past the cap is refused on the way in, so a crafted frame
+ * cannot make the decoder overrun its fixed-size premise buffer. */
+static void test_decode_rejects_premise_count_past_cap(void) {
+    const uint64_t prem[] = {2};
+    MemoryRecord src;
+    record_init(&src);
+    src.id = 14;
+    src.data = strdup("payload");
+    src.data_len = 7;
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_fact(&src, FACT_OBJ_ID, 1, "part_of", 2, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_derivation(&src, DERIV_SYMMETRIC, 1, prem, 1));
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&src, &buf, &n));
+
+    const size_t COUNT_OFF = 87 + 1 + 2; /* rule, depth, then the u16 count */
+    TEST_ASSERT_TRUE(n > COUNT_OFF + 1);
+    TEST_ASSERT_EQUAL_UINT8(1, buf[COUNT_OFF]);
+    buf[COUNT_OFF] = DERIV_MAX_PREMISES + 1;
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(-1, record_decode(buf, n, &out));
+    buf[COUNT_OFF] = 0; /* zero premises is not a derivation either */
+    TEST_ASSERT_EQUAL_INT(-1, record_decode(buf, n, &out));
+    free(buf);
+    record_free(&src);
+}
+
+/* A derivation with no fact is provenance for nothing: every 5.3 rule concludes
+ * a triple, so refusing keeps an uninterpretable frame out of the log. */
+static void test_encode_refuses_derivation_without_fact(void) {
+    const uint64_t prem[] = {1};
+    MemoryRecord r;
+    record_init(&r);
+    r.id = 4;
+    r.data = strdup("x");
+    r.data_len = 1;
+    TEST_ASSERT_EQUAL_INT(0,
+                          record_set_derivation(&r, DERIV_INVERSE, 0, prem, 1));
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(-1, record_encode(&r, &buf, &n));
+    record_free(&r);
+}
+
+static void test_set_derivation_validates_and_clears(void) {
+    const uint64_t prem[] = {1, 2, 3};
+    uint64_t many[DERIV_MAX_PREMISES + 1];
+    for (size_t i = 0; i < DERIV_MAX_PREMISES + 1; i++) {
+        many[i] = i + 1;
+    }
+    MemoryRecord r;
+    record_init(&r);
+    /* premises are required, and bounded */
+    TEST_ASSERT_EQUAL_INT(
+        -1, record_set_derivation(&r, DERIV_TRANSITIVE, 0, NULL, 0));
+    TEST_ASSERT_EQUAL_INT(
+        -1, record_set_derivation(&r, DERIV_TRANSITIVE, 0, prem, 0));
+    TEST_ASSERT_EQUAL_INT(-1,
+                          record_set_derivation(&r, DERIV_TRANSITIVE, 0, many,
+                                                DERIV_MAX_PREMISES + 1));
+    /* an unknown rule is refused — including the sentinel, which exists only
+     * to trip the codec-bump assertion and must never reach a record */
+    TEST_ASSERT_EQUAL_INT(-1,
+                          record_set_derivation(&r, (DerivRule)7, 0, prem, 1));
+    TEST_ASSERT_EQUAL_INT(
+        -1, record_set_derivation(&r, DERIV_RULE_COUNT, 0, prem, 1));
+    TEST_ASSERT_EQUAL_INT(DERIV_NONE, r.derivation.rule);
+
+    /* set, then replace, then clear — the old array goes each time */
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_derivation(&r, DERIV_TRANSITIVE, 1, prem, 3));
+    TEST_ASSERT_EQUAL_size_t(3, r.derivation.premise_count);
+    TEST_ASSERT_EQUAL_INT(0,
+                          record_set_derivation(&r, DERIV_INVERSE, 2, prem, 1));
+    TEST_ASSERT_EQUAL_INT(DERIV_INVERSE, r.derivation.rule);
+    TEST_ASSERT_EQUAL_size_t(1, r.derivation.premise_count);
+    TEST_ASSERT_EQUAL_UINT16(2, r.derivation.depth);
+    TEST_ASSERT_EQUAL_INT(0, record_set_derivation(&r, DERIV_NONE, 0, NULL, 0));
+    TEST_ASSERT_EQUAL_INT(DERIV_NONE, r.derivation.rule);
+    TEST_ASSERT_NULL(r.derivation.premises);
+    record_free(&r);
+}
+
+static void test_clone_preserves_derivation(void) {
+    const uint64_t prem[] = {88, 91};
+    MemoryRecord src;
+    record_init(&src);
+    src.id = 9;
+    src.data = strdup("d");
+    src.data_len = 1;
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_fact(&src, FACT_OBJ_ID, 1, "part_of", 2, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_derivation(&src, DERIV_TRANSITIVE, 3, prem, 2));
+
+    MemoryRecord *c = record_clone(&src);
+    TEST_ASSERT_NOT_NULL(c);
+    TEST_ASSERT_EQUAL_INT(DERIV_TRANSITIVE, c->derivation.rule);
+    TEST_ASSERT_EQUAL_UINT16(3, c->derivation.depth);
+    TEST_ASSERT_EQUAL_size_t(2, c->derivation.premise_count);
+    TEST_ASSERT_EQUAL_UINT64(91, c->derivation.premises[1]);
+    /* a deep copy: freeing the source leaves the clone intact */
+    TEST_ASSERT_TRUE(c->derivation.premises != src.derivation.premises);
+    record_free(&src);
+    TEST_ASSERT_EQUAL_UINT64(88, c->derivation.premises[0]);
+    record_free(c);
+    free(c);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_init_defaults);
@@ -614,6 +888,15 @@ int main(void) {
     RUN_TEST(test_fact_empty_string_object);
     RUN_TEST(test_encode_null_payload_roundtrips);
     RUN_TEST(test_decode_rejects_unknown_fact_kind);
+    RUN_TEST(test_underived_record_encodes_byte_identical_v3);
+    RUN_TEST(test_plain_record_is_still_v2);
+    RUN_TEST(test_derived_record_roundtrips_as_v4);
+    RUN_TEST(test_v3_frame_decodes_with_no_derivation);
+    RUN_TEST(test_decode_rejects_unknown_deriv_rule);
+    RUN_TEST(test_decode_rejects_premise_count_past_cap);
+    RUN_TEST(test_encode_refuses_derivation_without_fact);
+    RUN_TEST(test_set_derivation_validates_and_clears);
+    RUN_TEST(test_clone_preserves_derivation);
     RUN_TEST(test_set_fact_validates_and_clears);
     RUN_TEST(test_set_fact_switching_kinds_releases_object);
     RUN_TEST(test_clone_copies_the_fact);

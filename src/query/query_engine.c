@@ -98,6 +98,16 @@ static aegis_status_t append_and_hash(AegisDB *db, const MemoryRecord *rec) {
     uint8_t *buf = NULL;
     size_t len = 0;
     if (record_encode(rec, &buf, &len) != 0) {
+        /* Usually a refusal rather than an allocation failure: encode rejects a
+         * record it has no defined encoding for — an unknown fact kind or
+         * derivation rule, a derivation with no fact to explain, a count past
+         * its wire width. All of those surface to the caller as a bare
+         * INTERNAL, so without this line the write is dropped with nothing to
+         * diagnose it by. */
+        LOG_ERROR("record_encode refused record %llu (type %d, fact kind %d, "
+                  "derivation rule %d); write dropped",
+                  (unsigned long long)rec->id, (int)rec->type,
+                  (int)rec->fact.kind, (int)rec->derivation.rule);
         return AEGIS_ERR_INTERNAL;
     }
 

@@ -188,6 +188,17 @@ static int build_input_record(AegisDB *db, const cJSON *req, MemoryRecord *in,
             return -1;
         }
     }
+    /* `derivation` is written by the inference job and by nothing else
+     * (ROADMAP 5.3). A client that could supply one could manufacture
+     * provenance — a record that claims to follow from premises it never
+     * followed from — and every trust claim in this horizon rests on that being
+     * impossible. Refused rather than ignored, so a caller who sends one learns
+     * the field is not theirs instead of watching it vanish. */
+    const cJSON *jderiv = cJSON_GetObjectItemCaseSensitive(req, "derivation");
+    if (jderiv && !cJSON_IsNull(jderiv)) {
+        *err = AEGIS_ERR_INVALID_REQUEST;
+        return -1;
+    }
     if (build_fact(req, in, err) != 0) {
         return -1;
     }
@@ -881,6 +892,12 @@ static cJSON *handle_update(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
      * spelled correctly is worse than either doing it or saying no. */
     const cJSON *jfact = cJSON_GetObjectItemCaseSensitive(req, "fact");
     if (jfact && !cJSON_IsNull(jfact)) {
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
+    /* Nor a derivation, for the stronger reason: it is server-written, so an
+     * update is the second way a client might try to author one. */
+    const cJSON *jderiv = cJSON_GetObjectItemCaseSensitive(req, "derivation");
+    if (jderiv && !cJSON_IsNull(jderiv)) {
         return json_error_status(AEGIS_ERR_INVALID_REQUEST);
     }
     UpdatePatch patch;

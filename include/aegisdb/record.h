@@ -43,6 +43,56 @@ typedef struct {
     char *object_str;   /* owned; kind == FACT_OBJ_STRING */
 } Fact;
 
+/* Which inference rule produced a derived record (ROADMAP 5.3). Values are
+ * stable: persisted in the log encoding. A decoder that meets a rule it does
+ * not know refuses the frame rather than guessing, for the same reason an
+ * unknown FactKind is refused — except here the length is fixed, so the refusal
+ * is about meaning rather than framing: a record whose provenance cannot be
+ * named is not one to hand a caller as if it were understood. */
+typedef enum {
+    DERIV_NONE = 0,       /* asserted, not derived — the default */
+    DERIV_TRANSITIVE = 1, /* (a p b), (b p c) => (a p c) */
+    DERIV_SYMMETRIC = 2,  /* (a p b) => (b p a) */
+    DERIV_INVERSE = 3,    /* (a p b), inverse_of(p, q) => (b q a) */
+    DERIV_RULE_COUNT      /* sentinel; never encoded, never persisted */
+} DerivRule;
+
+/* Adding a rule is a codec bump, the same rule the fact kinds carry — and for a
+ * sharper reason. An unknown fact kind is a *framing* problem the decoder
+ * cannot survive, so it fails loudly and obviously. An unknown rule is not: the
+ * frame is still well-formed, so a v4-claiming replica of an older build
+ * accepts the frame from the codec gate, fails to decode it, reconnects from a
+ * log size that already counts it, and resumes *past* the record — which is
+ * then durably in its log and invisible to every query, and skipped again by
+ * recovery on restart. That is exactly the divergence the gate exists to
+ * prevent, reached without a version change. The assertion below is the
+ * tripwire: a new rule moves DERIV_RULE_COUNT and fails the build until
+ * RECORD_CODEC_MAX moves with it. */
+
+/* No rule here needs more than two premises; the cap is generous so a future
+ * one has room, and small enough that the array is never a memory concern. */
+#define DERIV_MAX_PREMISES 8
+
+/* How a derived record came to exist (ROADMAP 5.3): which rule fired, how deep
+ * in a chain it sits, and which records it was concluded from.
+ *
+ * `premises` duplicates the record's `derived_from` relationships on purpose.
+ * The edges are what a walk uses; this array is what *survives* the edges — a
+ * tombstoned premise takes its incoming edge out of the reverse index, and a
+ * derived record that kept its lineage only in the graph would lose the ability
+ * to explain itself at exactly the moment the explanation matters most. It is
+ * also what lets recovery reconcile every derived record against its premises
+ * without consulting an index at all (docs/inference-design.md §6).
+ *
+ * `rule == DERIV_NONE` is the default and means the record was asserted, not
+ * derived — in which case it encodes exactly as it did before 5.3. */
+typedef struct {
+    DerivRule rule;
+    uint16_t depth;     /* 0 for a conclusion drawn only from assertions */
+    uint64_t *premises; /* owned; non-NULL exactly when rule != DERIV_NONE */
+    size_t premise_count;
+} Derivation;
+
 /* Primary persisted (or RAM-held, for working) entity.
  * All pointer fields are owned by the record and freed by record_free(). */
 typedef struct {
@@ -69,6 +119,11 @@ typedef struct {
     size_t rel_count;
 
     Fact fact; /* optional typed assertion (ROADMAP 5.2); zeroed = none */
+
+    Derivation derivation; /* set only on a derived record (5.3); zeroed = none.
+                            * Server-written: `insert` refuses a client-supplied
+                            * one, because forgeable provenance is worse than
+                            * none. */
 
     void *data; /* owned opaque payload */
     size_t data_len;
@@ -102,10 +157,25 @@ int record_set_fact(MemoryRecord *r, FactKind kind, uint64_t subject,
                     const char *predicate, uint64_t object_id,
                     const char *object_str);
 
+/* Set (or clear) the record's derivation, copying the premise ids and releasing
+ * whatever was there. Pass DERIV_NONE to clear; otherwise `premises` must hold
+ * 1..DERIV_MAX_PREMISES ids. Returns 0, or -1 on a bad argument combination or
+ * allocation failure (in which case the previous derivation is left intact).
+ *
+ * A derived record must also carry the `fact` its derivation explains: every
+ * 5.3 rule concludes a triple, so provenance without a conclusion is
+ * provenance for nothing. That invariant is *not* checked here — the two
+ * fields are set independently and either order is fine — but record_encode
+ * refuses the record, so setting one without the other turns into a failed
+ * write rather than a bad frame. */
+int record_set_derivation(MemoryRecord *r, DerivRule rule, uint16_t depth,
+                          const uint64_t *premises, size_t n);
+
 /* Codec versions of the on-disk record encoding. v1 held a single embedding;
- * v2 added multi-vector; v3 added the optional Fact above. A record is encoded
- * with the *lowest* version that can represent it, so a fact-less record is
- * still v2 and an existing log stays byte-compatible.
+ * v2 added multi-vector; v3 added the optional Fact above; v4 added the optional
+ * Derivation. A record is encoded with the *lowest* version that can represent
+ * it, so a fact-less record is still v2, a derivation-less one with a fact is
+ * still v3, and an existing log stays byte-compatible.
  *
  * RECORD_CODEC_MAX is what a build can read, and is exchanged in the
  * replication handshake: a primary that is about to ship a frame newer than its
@@ -113,7 +183,15 @@ int record_set_fact(MemoryRecord *r, FactKind kind, uint64_t subject,
  * with nothing to go on. */
 #define RECORD_CODEC_V2 2
 #define RECORD_CODEC_V3 3
-#define RECORD_CODEC_MAX RECORD_CODEC_V3
+#define RECORD_CODEC_V4 4
+#define RECORD_CODEC_MAX RECORD_CODEC_V4
+
+/* See DerivRule: a new rule changes what a v4 frame can mean, so it must arrive
+ * with a new codec version. Both halves are named here so the failure message
+ * points at the fix rather than at the assertion. */
+_Static_assert(DERIV_RULE_COUNT == 4 && RECORD_CODEC_MAX == RECORD_CODEC_V4,
+               "a new DerivRule needs a new RECORD_CODEC version: an older "
+               "peer would otherwise accept a v4 frame it cannot interpret");
 
 /* Binary (little-endian, length-prefixed) codec used by the append-only log.
  * record_encode allocates *out (free with free()). record_decode fills *out
