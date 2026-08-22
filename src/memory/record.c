@@ -8,8 +8,23 @@
 #include "aegisdb/endian.h"
 
 /* v1: single embedding (dim + dim floats). v2 (#85): vec_count + dim +
- * vec_count*dim floats. decode reads both; encode always writes v2. */
-#define RECORD_CODEC_VERSION 2
+ * vec_count*dim floats. v3 (ROADMAP 5.2): an optional typed fact between the
+ * relationships and the payload.
+ *
+ * decode reads all three. encode writes the *lowest* version that can represent
+ * the record: v3 only when a fact is present, v2 otherwise. That is the whole
+ * compatibility story — an existing log stays readable, and a deployment that
+ * never writes a fact keeps producing byte-identical frames, so nothing about
+ * its on-disk or replication behaviour changes until it opts in.
+ *
+ * A tempting alternative was to append the fact *after* the payload and leave
+ * the version at 2: decode ignores trailing bytes, so an older reader would
+ * accept the frame and simply not see the fact. Rejected — that is silent field
+ * loss on whoever is behind, and a replica that quietly drops facts is worse
+ * than one that refuses the frame and says so. The refusal is made explicit by
+ * the replication handshake gate (see docs/typed-facts-design.md §4). */
+#define RECORD_CODEC_V2 2
+#define RECORD_CODEC_V3 3
 #define NULL_LEN 0xFFFFFFFFu
 
 /* ----- record lifecycle ------------------------------------------------- */
@@ -34,6 +49,8 @@ void record_free(MemoryRecord *r) {
         free(r->relationships[i].kind);
     }
     free(r->relationships);
+    free(r->fact.predicate);
+    free(r->fact.object_str);
     free(r->data);
     memset(r, 0, sizeof(*r));
 }
@@ -123,6 +140,12 @@ MemoryRecord *record_clone(const MemoryRecord *src) {
         record_set_tags(r, (const char *const *)src->tags, src->tag_count)) {
         goto fail;
     }
+    if (src->fact.kind != FACT_NONE &&
+        record_set_fact(r, src->fact.kind, src->fact.subject,
+                        src->fact.predicate, src->fact.object_id,
+                        src->fact.object_str) != 0) {
+        goto fail;
+    }
     if (src->embedding_dim && src->vec_count) {
         /* Overflow-safe: bound vec_count*dim and the *sizeof(float) allocation
          * before multiplying (division form, like record_decode). Records reach
@@ -160,6 +183,43 @@ fail:
     record_free(r);
     free(r);
     return NULL;
+}
+
+int record_set_fact(MemoryRecord *r, FactKind kind, uint64_t subject,
+                    const char *predicate, uint64_t object_id,
+                    const char *object_str) {
+    if (kind == FACT_NONE) {
+        free(r->fact.predicate);
+        free(r->fact.object_str);
+        memset(&r->fact, 0, sizeof(r->fact));
+        return 0;
+    }
+    if (kind != FACT_OBJ_ID && kind != FACT_OBJ_STRING) {
+        return -1;
+    }
+    if (!predicate || !*predicate) {
+        return -1;
+    }
+    if (kind == FACT_OBJ_STRING && !object_str) {
+        return -1;
+    }
+    /* Build the copies before touching the record, so a failure halfway leaves
+     * the previous fact intact rather than half-replaced. */
+    char *pred = dup_str(predicate);
+    char *obj = (kind == FACT_OBJ_STRING) ? dup_str(object_str) : NULL;
+    if (!pred || (kind == FACT_OBJ_STRING && !obj)) {
+        free(pred);
+        free(obj);
+        return -1;
+    }
+    free(r->fact.predicate);
+    free(r->fact.object_str);
+    r->fact.kind = kind;
+    r->fact.subject = subject;
+    r->fact.predicate = pred;
+    r->fact.object_id = (kind == FACT_OBJ_ID) ? object_id : 0;
+    r->fact.object_str = obj;
+    return 0;
 }
 
 /* ----- little-endian serialization buffer ------------------------------- */
@@ -205,8 +265,16 @@ static void put_bytes(Buf *b, const void *s, size_t n) {
     if (b->err) {
         return;
     }
-    memcpy(b->p + b->len, s, n);
-    b->len += n;
+    /* memcpy's arguments are declared non-null, so passing a NULL source is
+     * undefined even for n == 0 — and a record decoded from a zero-length
+     * payload has exactly that: data == NULL, data_len == 0. Re-encoding one
+     * (relate, update, compaction all re-append a loaded record) tripped UBSan.
+     * Harmless on every real platform, which is why it went unnoticed until a
+     * test finally encoded a NULL payload. */
+    if (n) {
+        memcpy(b->p + b->len, s, n);
+        b->len += n;
+    }
 }
 static void put_u8(Buf *b, uint8_t v) { put_bytes(b, &v, 1); }
 static void put_u16(Buf *b, uint16_t v) {
@@ -240,7 +308,14 @@ static void put_lenstr(Buf *b, const char *s, size_t n) {
 
 int record_encode(const MemoryRecord *r, uint8_t **out, size_t *out_len) {
     Buf b = {0};
-    put_u8(&b, RECORD_CODEC_VERSION);
+    /* Only a fact-bearing record needs v3; everything else stays v2 so its
+     * bytes are unchanged from before this field existed. */
+    int has_fact = r->fact.kind != FACT_NONE;
+    if (has_fact &&
+        (r->fact.kind != FACT_OBJ_ID && r->fact.kind != FACT_OBJ_STRING)) {
+        return -1; /* an unknown kind has no defined encoding */
+    }
+    put_u8(&b, has_fact ? RECORD_CODEC_V3 : RECORD_CODEC_V2);
     put_u64(&b, r->id);
     put_u8(&b, (uint8_t)r->type);
     put_u64(&b, r->created);
@@ -288,6 +363,21 @@ int record_encode(const MemoryRecord *r, uint8_t **out, size_t *out_len) {
         put_lenstr(&b, r->relationships[i].kind,
                    r->relationships[i].kind ? strlen(r->relationships[i].kind)
                                             : 0);
+    }
+
+    /* v3 only: the fact sits between the relationships and the payload, keeping
+     * the variable-length payload last as it has always been. */
+    if (has_fact) {
+        put_u8(&b, (uint8_t)r->fact.kind);
+        put_u64(&b, r->fact.subject);
+        put_lenstr(&b, r->fact.predicate,
+                   r->fact.predicate ? strlen(r->fact.predicate) : 0);
+        if (r->fact.kind == FACT_OBJ_ID) {
+            put_u64(&b, r->fact.object_id);
+        } else {
+            put_lenstr(&b, r->fact.object_str,
+                       r->fact.object_str ? strlen(r->fact.object_str) : 0);
+        }
     }
 
     put_u32(&b, (uint32_t)r->data_len);
@@ -382,8 +472,8 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
     record_init(out);
 
     uint8_t ver = get_u8(&c);
-    if (ver != 1 && ver != 2) {
-        goto fail; /* read v1 (single vec) and v2 */
+    if (ver != 1 && ver != RECORD_CODEC_V2 && ver != RECORD_CODEC_V3) {
+        goto fail; /* v1 (single vec), v2, v3 (typed fact) */
     }
     out->id = get_u64(&c);
     out->type = (MemoryType)get_u8(&c);
@@ -484,6 +574,43 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
         int rv = record_add_relationship(out, from, to, kind);
         free(kind);
         if (rv) {
+            goto fail;
+        }
+    }
+
+    if (ver >= RECORD_CODEC_V3) {
+        uint8_t fk = get_u8(&c);
+        if (c.err) {
+            goto fail;
+        }
+        /* Refuse a kind this build does not know rather than guess how many
+         * bytes it occupies: guessing would desync the cursor and decode the
+         * payload as garbage. A future object kind is therefore a codec bump,
+         * which is exactly what the version byte is for. */
+        if (fk != FACT_OBJ_ID && fk != FACT_OBJ_STRING) {
+            goto fail;
+        }
+        uint64_t subject = get_u64(&c);
+        char *pred = get_lenstr(&c, &wasnull);
+        if (c.err || !pred) {
+            free(pred);
+            goto fail; /* a v3 frame always carries a predicate */
+        }
+        int rv;
+        if (fk == FACT_OBJ_ID) {
+            uint64_t oid = get_u64(&c);
+            rv = c.err ? -1
+                       : record_set_fact(out, FACT_OBJ_ID, subject, pred, oid,
+                                         NULL);
+        } else {
+            char *obj = get_lenstr(&c, &wasnull);
+            rv = (c.err || !obj) ? -1
+                                 : record_set_fact(out, FACT_OBJ_STRING,
+                                                   subject, pred, 0, obj);
+            free(obj);
+        }
+        free(pred);
+        if (rv != 0) {
             goto fail;
         }
     }

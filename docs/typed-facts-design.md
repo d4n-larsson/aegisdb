@@ -36,8 +36,8 @@ make them possible without pre-empting them.
 - **Not inference.** The registry *declares* cardinality, symmetry,
   transitivity, inverse-of and mutex sets in 5.2 and only *acts* on the first
   two of those in 5.3. See §7 for what is enforced now and why.
-- **Not typed literals.** Object literals are a string or a number. No dates,
-  durations, units, or language tags.
+- **Not typed literals.** An object literal is a string. No numbers (see §5),
+  dates, durations, units, or language tags.
 - **Not entity resolution.** Deciding that two mentions denote the same thing is
   5.4's job, on top of this.
 - **Not a change to edge storage.** An earlier note in
@@ -81,7 +81,7 @@ makes a v3 tractable.
   rather than a second mechanism to get wrong.
 - **`p` — predicate.** A short interned string, validated against the registry.
 - **`o` — object.** Either `{"id": N}` (a reference to another record) or a
-  literal string/number.
+  literal string. Numbers are deliberately absent — see §5.
 
 `data` keeps the natural-language rendering. It is not derived from the triple
 and the triple is not parsed out of it: they are two views the writer supplies,
@@ -108,12 +108,22 @@ Three fields appended after `relationships` and before `data`, so the existing
 prefix is byte-identical:
 
 ```
-u8   fact_kind      0 = none, 1 = object is an id-ref, 2 = string, 3 = number
-                    (absent in v2; a v2 record decodes with fact_kind = 0)
+u8   fact_kind      0 = none, 1 = object is an id-ref, 2 = string
+                    (3 reserved for a number; absent in v2, where a record
+                     decodes with fact_kind = 0)
 u64  fact_subject   record id                      } only when fact_kind != 0
-u16+ fact_predicate length-prefixed string         }
-     fact_object    u64 | length-prefixed string | f64, per fact_kind
+u32+ fact_predicate length-prefixed string         }
+     fact_object    u64 | length-prefixed string, per fact_kind
 ```
+
+Length prefixes are u32 with a `0xFFFFFFFF` NULL marker, matching the codec's
+existing `put_lenstr`/`get_lenstr` rather than introducing a second convention.
+
+A decoder that meets a `fact_kind` it does not know **refuses the frame**. It
+cannot do otherwise: it does not know how many bytes the unknown object
+occupies, so continuing would desync the cursor and decode the payload as
+garbage. Adding kind 3 later is therefore a codec bump, not a compatible
+extension — which is exactly what the version byte is for.
 
 **Records encode as v2 unless they carry a fact.** This is the whole
 compatibility story and it is worth stating plainly: `record_encode` emits
@@ -153,12 +163,13 @@ predicates, so compaction is a non-event.
 `--no-fact-index` opts out, and a `pattern` search then returns `NOT_READY`,
 exactly as `query` does under `--no-lexical-index`.
 
-Object literals need a hashable form for the `(p, o)` side. Strings hash
-directly; numbers hash by their IEEE-754 bits, with the consequence stated
-rather than discovered: `1` and `1.0` are the same key, `0.1 + 0.2` and `0.3`
-are not. Facts whose object is a float are a bad idea for a different reason
-(nothing exact can be asserted about them), and the registry can forbid a
-numeric object per predicate.
+Object literals need a hashable form for the `(p, o)` side, which is what
+settled §13's question about numbers: **there are none.** A float object would
+key the index on IEEE-754 bits, where `1` and `1.0` collide but `0.1 + 0.2` and
+`0.3` do not — and nothing exact can be asserted about a float in the first
+place. Shipping that into a *durable* format for symmetry's sake is the kind of
+foot-gun that cannot be withdrawn later, whereas kind 3 stays reserved and can
+be added the day a predicate genuinely needs it. Strings hash directly.
 
 ## 6. `pattern` on `search`
 
@@ -193,7 +204,7 @@ A JSON file, `--predicate-registry <path>`, loaded at startup:
   "contains":     { "object": "id", "inverse_of": "part_of" },
   "is_a":         { "object": "id", "transitive": true },
   "conflicts_with": { "object": "id", "symmetric": true },
-  "port":         { "object": "number", "cardinality": "one" }
+  "port":         { "object": "string", "cardinality": "one" }
 }
 ```
 
@@ -201,8 +212,7 @@ A JSON file, `--predicate-registry <path>`, loaded at startup:
 
 - a `fact` whose predicate is absent from the registry is rejected
   (`INVALID_REQUEST`) — this is the controlled vocabulary, and it is the point;
-- the object's kind must match the declared `object` (`id` / `literal` /
-  `string` / `number`);
+- the object's kind must match the declared `object` (`id` or `string`);
 - the file itself is validated at startup: unknown keys, an `inverse_of` naming
   an absent predicate, or an `inverse_of` that is not mutual is a startup
   failure, not a runtime surprise.
@@ -321,6 +331,9 @@ un-negotiated one, regardless of facts.
   a `semantic` record tagged `entity` whose `data` is the name. That is enough
   to build on, but nothing enforces it, and 5.4 will be the first real user.
   Worth revisiting once there is a caller instead of a hypothesis.
-- **Numeric objects at all?** §5 notes float keys are a trap. It may be cleaner
-  to accept only string and id objects in 5.2 and add numbers when a predicate
-  actually needs one, rather than shipping a foot-gun for symmetry's sake.
+- ~~**Numeric objects at all?**~~ **Decided (PR 1): no.** Only id-ref and string
+  objects exist; value 3 is reserved. A durable format is the wrong place to add
+  something for symmetry, because it cannot be taken back out — and a float
+  object is a trap on both the index key (IEEE-754 bits) and the semantics
+  (nothing exact is assertable). Adding it later costs a codec bump, which is
+  cheap next to having shipped it.
