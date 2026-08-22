@@ -1029,6 +1029,93 @@ def test_traverse_reverse_isolation(binary, port):
               "a foreign start record yields nothing, not a leak")
 
 
+REPL_MAGIC = 0xA6E515ED
+MSG_FRAME, MSG_HEARTBEAT, MSG_RESET, MSG_INCOMPATIBLE = 0, 1, 2, 3
+
+
+def _fake_replica(repl_port, token, codec_version, want=2, timeout=5.0):
+    """Subscribe to a primary's replication stream as a bare socket and return
+    (handshake_response, [message types seen]).
+
+    A real replica cannot be made to declare an old codec version — the number
+    is compiled in — so the gate is driven from a hand-rolled peer instead.
+    Reads up to `want` messages or until the primary hangs up.
+    """
+    s = socket.create_connection(("127.0.0.1", repl_port), timeout)
+    s.settimeout(timeout)
+    hs = {"from_offset": 0, "generation": 0, "token": token,
+          "key_fingerprint": ""}
+    if codec_version is not None:
+        hs["codec_version"] = codec_version
+    s.sendall((json.dumps(hs) + "\n").encode())
+    resp = json.loads(s.makefile().readline())
+
+    types = []
+    try:
+        while len(types) < want:
+            hdr = b""
+            while len(hdr) < 17:
+                chunk = s.recv(17 - len(hdr))
+                if not chunk:
+                    raise EOFError
+                hdr += chunk
+            magic = int.from_bytes(hdr[0:4], "little")
+            if magic != REPL_MAGIC:
+                raise AssertionError(f"bad magic {magic:#x}")
+            mtype = hdr[4]
+            length = int.from_bytes(hdr[13:17], "little")
+            body = b""
+            while len(body) < length:
+                chunk = s.recv(length - len(body))
+                if not chunk:
+                    raise EOFError
+                body += chunk
+            types.append((mtype, body))
+    except (EOFError, socket.timeout, OSError):
+        pass
+    s.close()
+    return resp, types
+
+
+def test_replication_codec_gate(binary, port):
+    print("[replication: refuse a frame the replica cannot decode]")
+    repl_port = port + 1
+    tok = "repl-secret"
+    with Server(binary, port, extra_args=[
+            "--replication-port", str(repl_port),
+            "--replication-token", tok]) as primary:
+        primary.req({"operation": "insert", "type": "semantic",
+                     "data": "a record to ship"})
+
+        # A peer that can read what this build writes gets the frame.
+        resp, msgs = _fake_replica(repl_port, tok, codec_version=3, want=1)
+        check(resp.get("ok") is True, "codec-aware replica is accepted")
+        kinds = [m[0] for m in msgs]
+        check(MSG_FRAME in kinds, "a readable frame is streamed")
+        body = [m[1] for m in msgs if m[0] == MSG_FRAME][0]
+        check(body[0] == 2,
+              "a fact-less record still ships as codec v2")
+
+        # A peer that predates the field is assumed to top out at v2, which is
+        # what every fact-less frame is — so nothing changes for it. This is the
+        # case a handshake-time version check would have broken.
+        resp, msgs = _fake_replica(repl_port, tok, codec_version=None, want=1)
+        check(resp.get("ok") is True, "replica omitting codec_version accepted")
+        check(MSG_FRAME in [m[0] for m in msgs],
+              "an old replica still receives v2 frames")
+
+        # A peer that cannot read v2 must be told, not fed the frame. (Real
+        # builds all read v2; declaring v1 is how the gate's comparison is
+        # exercised without a v3 frame, which nothing can write yet.)
+        resp, msgs = _fake_replica(repl_port, tok, codec_version=1, want=1)
+        check(resp.get("ok") is True, "subscription itself still succeeds")
+        kinds = [m[0] for m in msgs]
+        check(MSG_INCOMPATIBLE in kinds,
+              "an unreadable frame yields MSG_INCOMPATIBLE, not the frame")
+        check(MSG_FRAME not in kinds,
+              "the undecodable frame is never sent")
+
+
 def test_consolidate(binary, port):
     print("[consolidate: merge near-duplicate semantic memories]")
     with Server(binary, port, phase=4) as srv:
@@ -2935,7 +3022,8 @@ def main():
     test_tenant_quota(binary, 19488)
     test_tenant_rate_limit(binary, 19489)
     test_token_admin(binary, 19490)
-    test_replication(binary, 19520)  # uses port, +1 (repl stream), +2 (replica)
+    test_replication(binary, 19520)
+    test_replication_codec_gate(binary, 19527)  # uses port, +1  # uses port, +1 (repl stream), +2 (replica)
     test_replication_encrypted(binary, 19525)  # uses port, +1, +2, +12
     test_replication_preauth(binary, 19523)  # uses port, +1 (repl stream)
     test_snapshot(binary, 19483)

@@ -136,15 +136,28 @@ version 3 *only* when `fact_kind != 0`. So
 
 `record_decode` accepts 1, 2, and 3, reading the fact fields only for v3.
 
-**Replication needs a version gate, and does not have one.** The handshake
-carries `generation` and an auth token but no codec version
-(`replication.c:168`). A v3-writing primary streaming to an older replica sends
-frames whose `record_decode` returns -1 — the replica cannot apply them and
-cannot explain why. Since the v2-unless-fact rule means this only bites once
-facts are actually used, the fix belongs here rather than earlier: the handshake
-should carry a **maximum supported codec version**, and a primary should refuse a
-replica that cannot read what it may write, with an error naming both versions.
-Failing the handshake is much better than failing frame 400,000.
+**Replication needs a version gate, and did not have one.** The handshake
+carried `generation` and an auth token but no codec version. A v3-writing primary
+streaming to an older replica sends frames whose `record_decode` returns -1 — the
+replica cannot apply them and cannot explain why.
+
+The handshake now carries a `codec_version`: the highest record codec the replica
+can decode, defaulting to v2 when absent (a build predating the field tops out
+there by definition). **Enforcement is per frame, not at subscribe time** — a
+deliberate change from this design's first draft, which said the primary should
+refuse a replica that "cannot read what it may write". That would have broken
+every working mixed-version pair the moment the primary was upgraded, over a
+frame the primary may never send: with the v2-unless-fact rule, a cluster that
+writes no facts emits no v3 frame at all. So the primary checks each frame's
+version byte — which it already has in hand, having read the payload to stream
+it — and when one exceeds what the replica declared it sends `MSG_INCOMPATIBLE`
+instead, naming the offset and both versions in its log. The replica logs the
+same and **stops following**: the offending frame is already durable on the
+primary, so reconnecting cannot help and only a new binary can.
+
+Failing on the frame that is actually unreadable, with both versions named, is
+better than failing the handshake for a hypothetical one — and far better than
+failing frame 400,000 with a bare decode error.
 
 ## 5. The fact index
 

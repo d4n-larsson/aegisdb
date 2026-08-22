@@ -102,6 +102,19 @@ int record_set_fact(MemoryRecord *r, FactKind kind, uint64_t subject,
                     const char *predicate, uint64_t object_id,
                     const char *object_str);
 
+/* Codec versions of the on-disk record encoding. v1 held a single embedding;
+ * v2 added multi-vector; v3 added the optional Fact above. A record is encoded
+ * with the *lowest* version that can represent it, so a fact-less record is
+ * still v2 and an existing log stays byte-compatible.
+ *
+ * RECORD_CODEC_MAX is what a build can read, and is exchanged in the
+ * replication handshake: a primary that is about to ship a frame newer than its
+ * replica can decode should say so, rather than let the replica fail per frame
+ * with nothing to go on. */
+#define RECORD_CODEC_V2 2
+#define RECORD_CODEC_V3 3
+#define RECORD_CODEC_MAX RECORD_CODEC_V3
+
 /* Binary (little-endian, length-prefixed) codec used by the append-only log.
  * record_encode allocates *out (free with free()). record_decode fills *out
  * which must then be released with record_free(). Both return 0/-1. */

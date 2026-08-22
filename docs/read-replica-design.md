@@ -113,8 +113,25 @@ A replica opens a dedicated connection to the primary and subscribes from its
 cursor:
 
 ```
-replica → primary:  {"operation":"replicate","from_offset":<N>,"token":"<repl-token>"}
+replica → primary:  {"from_offset":<N>,"generation":<G>,"token":"<repl-token>",
+                     "key_fingerprint":"<fp>","codec_version":<V>}
 ```
+
+`codec_version` is the highest **record codec** version this replica's build can
+decode (`RECORD_CODEC_MAX`). It is absent from builds predating the field, which
+the primary reads as v2 — the highest that existed then.
+
+**Why the primary does not refuse an old replica at subscribe time.** A record is
+encoded with the lowest version that can represent it, so a primary running a
+newer build still emits v2 frames for every record that uses no newer feature. A
+version comparison at handshake would therefore break working mixed-version
+pairs over frames the primary may never send. Instead the primary checks each
+frame's version byte as it streams — it has already read the payload — and if one
+exceeds what the replica declared it sends `MSG_INCOMPATIBLE` in place of that
+frame, naming the offset and both versions in its log. The replica logs the same
+and **stops following**, because the frame is already durable upstream: retrying
+cannot help, and only a newer replica binary can. See
+`typed-facts-design.md` §4, which introduced the field.
 
 On success the connection **switches from request/response NDJSON to a
 one-directional binary frame stream** (the request/response model doesn't fit a

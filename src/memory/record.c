@@ -22,9 +22,10 @@
  * accept the frame and simply not see the fact. Rejected — that is silent field
  * loss on whoever is behind, and a replica that quietly drops facts is worse
  * than one that refuses the frame and says so. The refusal is made explicit by
- * the replication handshake gate (see docs/typed-facts-design.md §4). */
-#define RECORD_CODEC_V2 2
-#define RECORD_CODEC_V3 3
+ * the replication handshake gate (see docs/typed-facts-design.md §4).
+ *
+ * The version constants live in record.h: replication compares them across
+ * peers, so they are part of the contract rather than a codec-local detail. */
 #define NULL_LEN 0xFFFFFFFFu
 
 /* ----- record lifecycle ------------------------------------------------- */
