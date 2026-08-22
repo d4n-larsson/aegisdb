@@ -311,6 +311,168 @@ the same bet, and it needs no model on the hot path.*
 
 ---
 
+## Horizon 5 — Next: reasoning over memory, not just retrieving it
+
+*Theme: the relationship graph is the one primitive in the tree that was built
+and then never finished. Horizons 1–2 made memory coherent, 4 made it findable;
+this makes it **inferrable** — and it is the only way to answer the question the
+North Star actually asks at the level of **belief** rather than **ranking**.*
+
+**The division of labour.** Symbols where the answer must be reproducible,
+auditable, and cheap; the model where the input is ambiguous. The LLM is the
+*interface* to the symbolic store — parsing prose into facts, verbalizing a
+derivation back into English, adjudicating what the rules flagged but could not
+settle. It is never *inside* the inference loop, because an inference the model
+performs is one nobody can regression-test. Note that today the arrangement is
+**inverted**: contradiction detection is an LLM call per candidate fact
+(`judge_supersedes`, 2.1) doing work that a single-valued-predicate constraint
+does deterministically, at write time, for free.
+
+### 5.1 A queryable relationship graph *(foundational — do first)*
+
+- **Why now:** `kind` is inert. `qe_traverse` enqueues every outgoing neighbour
+  with no kind filter (`query_engine.c:741`) and there is no reverse adjacency,
+  so the two edge kinds already written in anger — `supersedes` from
+  consolidation (`qe_maint.c:441`) and `derived_from` — can be walked neither
+  selectively nor backwards. "Show me the supersession chain", which 1.2 counts
+  as shipped provenance, is really a blind BFS plus client-side filtering;
+  "what depends on this?" is a full scan. Every later item in this horizon needs
+  a graph you can ask questions of.
+- **Build:** an edge index (kind → postings, plus reverse adjacency) alongside
+  `tag_index`; `kinds: [...]` and `direction: out|in|both` on `traverse`; the
+  traversed `kind` reported per hop so a path is legible rather than inferred.
+  Derived and in-RAM, rebuilt from the log like time/tag/lexical — no new
+  checkpoint, nothing new to corrupt.
+- **Leverages:** `tag_index`'s inverted-postings machinery (`tag_index.h` — the
+  exact pattern `lexical_index` followed in 4.1), `relate`'s existing edge
+  idempotency, and `stats`'s per-index byte reporting so its RAM is watchable
+  like every other index.
+- **Falls out for free:** the inspector (1.3) can render a provenance *tree*
+  instead of a flat neighbour list, and `export` (3.2) can follow a subject's
+  derivation lineage.
+- **Done when:** the supersession chain of a consolidated record is retrievable
+  in one `traverse` call, backwards, without a scan — and a contract test
+  asserts an unrequested edge kind is not followed.
+- **Cost to state plainly:** edges live *inside* the record (`record.h:11`), so
+  every `relate` rewrites the whole record to the log, capped at
+  `MAX_RELATIONSHIPS` (4096, `qe_internal.h:12`). That is right for
+  provenance-density and wrong for knowledge-graph density. 5.1 does not change
+  it; 5.2 cannot avoid confronting it.
+
+### 5.2 Typed facts & a predicate registry
+
+- **Why now:** `data` is an opaque blob, so there is nothing to unify against
+  and no way to state a constraint. Tags are a flat set with no subsumption, so
+  nothing inherits. Without a symbol there is no symbolic layer — only a graph.
+- **Build:** **the triple *is* the record** — no second store. `insert` accepts
+  an optional `fact: {s, p, o}` (object an id-ref or a literal) beside the
+  natural-language rendering that stays in `data`, indexed by `(s,p)` and
+  `(p,o)`. Plus a **predicate registry**: a declarative schema, loaded from
+  config, carrying per-predicate cardinality (single- vs multi-valued),
+  symmetry, transitivity, inverse-of, and mutex sets. `search` gains a
+  `pattern` filter with wildcards.
+- **Leverages:** everything already built applies unchanged — the append-only
+  log becomes the belief history, `history`/`as_of` (3.1) becomes bitemporal
+  *belief*, namespaces are per-agent belief sets, `forget` (2.3) decays derived
+  facts, and 4.1's identifier-preserving tokenizer already makes predicate and
+  entity names findable by their exact spelling.
+- **Non-goal check:** a `pattern` filter is one more field on `search`, the same
+  shape as 4.1's `query` — *not* a query language. The rules stay a
+  **registry**: declarative config, never syntax. If this item starts growing a
+  grammar, it has drifted into the non-goals and should be cut back.
+- **Done when:** a fact written as a triple is retrievable by pattern
+  (`{"s": 42, "p": "prefers", "o": "*"}`), the registry loads from config, and a
+  record with no `fact` behaves exactly as it does today.
+
+### 5.3 Deterministic inference & truth maintenance
+
+- **Why now:** this is where the trust payoff lands. `explain` (1.2) explains
+  *ranking* — similarity, BM25, RRF, recency. It cannot say "you believe this
+  because of these three facts and this rule." A derivation tree can. Derivation
+  is also what makes forgetting *safe*: today, tombstoning a premise leaves its
+  consequences standing and nothing notices.
+- **Build:** three closures, and deliberately no more —
+  1. **subsumption** over an `is_a` taxonomy, so a memory about `hnsw.c:214`
+     answers a question about the storage layer with no embedding involved;
+  2. **transitive / symmetric / inverse** closure over predicates the 5.2
+     registry declares as such;
+  3. **functional-property conflict detection** — two live values for a
+     single-valued predicate is a contradiction, found deterministically.
+
+  Materialize forward in a **background job**, never the write path (the
+  summarizer/compaction precedent), depth- and fanout-capped. Every derived
+  record carries `derived_from` edges to its premises plus the rule that fired,
+  so an inference is provenance-linked by construction and `explain` can walk
+  it. Confidence propagates as the product along the chain with a floor —
+  testable, and honest about being a heuristic rather than a probability. Truth
+  maintenance then falls out of 5.1's reverse adjacency: retract a premise, walk
+  `derived_from` backwards, tombstone the dependents.
+- **Leverages:** 5.1's edge index, the `supersedes`/`derived_from` vocabulary
+  already in use, `forget`/`consolidate` as the retraction mechanism, and the
+  append-only log as the truth-maintenance journal.
+- **Done when:** `make eval` gains a multi-hop dataset whose queries are
+  **structurally unanswerable by retrieval alone** (the answer lives in no
+  single record), and the symbolic path answers them while semantic, lexical,
+  and hybrid all score near zero. Plus: retracting a premise demonstrably
+  retracts its consequences, and a functional-property contradiction is caught
+  with no model call.
+- **Not building:** a general Datalog/Prolog engine in C. Unrestricted
+  recursion, negation-as-failure, and a rule language are all out of scope; the
+  three closures above cover the coding-agent cases and stop there.
+- **Deferred:** non-monotonic defaults and exceptions ("normally X, except
+  here"). Supersession already covers the common case, and defeasible reasoning
+  is a research rabbit-hole with a poor ratio of value to subtlety.
+
+### 5.4 The neuro-symbolic seam
+
+- **Why now:** symbols are only worth having if writing and reading them is as
+  easy as writing prose. That is exactly what a model is for — and the seam to
+  hang it on already exists and is already provider-neutral.
+- **Build:** three jobs for the model, all **at the boundary**, none inside
+  5.3's loop —
+  1. **Parse (write path)** — prose → candidate triples. Extend the
+     `ExtractionProvider` seam (`aegis_mcp/extract.py`, 2.1) with a triple
+     target, prompted **against the 5.2 registry as a controlled vocabulary**.
+     This is the item that decides whether the horizon works at all: a model
+     inventing predicates freely produces a symbol soup no rule can ever fire
+     on, which is the standard failure mode of model-built knowledge graphs.
+  2. **Verbalize & formulate (read path)** — question → `pattern` filter, and
+     derivation tree → an English "here is why I believe this." The model
+     *reads* the proof; it never produces it.
+  3. **Adjudicate (fallback)** — when 5.3 detects a conflict it cannot settle
+     (two confident values for a single-valued predicate), hand *that one case*
+     to the model. Symbolic detection, neural resolution — the inverse of
+     today's arrangement, and cheaper: the model sees only the hard cases
+     instead of every candidate fact.
+- **Grounding is the hard part.** Two phrasings of one fact must become one
+  symbol or the store fragments. The fix reuses shipped machinery rather than
+  inventing any: resolve a mention to an existing entity id via HNSW cosine +
+  BM25 before minting a new symbol — the same candidate-and-collapse shape as
+  2.2's dedup, scored by the same harness.
+- **Leverages:** the extraction/summarization provider seam
+  (`none`/`fake`/`claude-code`/`anthropic`/`openai` — the deterministic `fake`
+  backend is what makes any of this testable), 4.1's hybrid retrieval for entity
+  resolution, and `consolidate` for collapsing duplicate symbols.
+- **Done when:** a coding-agent transcript produces triples that snap to the
+  registry — measured as an in-vocabulary rate, not asserted — and a wrong
+  inference is traceable to either a bad premise or a bad parse, never to an
+  opaque model judgment.
+
+### Ground rules for the whole horizon
+
+- **Off by default; degrade to today.** Every piece is opt-in, and recall is
+  never gated on the symbolic path. A brittle reasoner that fails closed is
+  worse than no reasoner — this is the `--no-lexical-index` discipline in
+  reverse.
+- **Unmeasured is unshipped.** By this repo's own standard (1.1 before Horizon
+  2), 5.3's multi-hop eval dataset lands *before or with* the inference, not
+  after it.
+- **RAM is a budget.** Closure materialization can multiply the corpus. Cap it,
+  report it in `stats` like every other index, and surface it in the dashboard
+  (3.3).
+
+---
+
 ## Sequencing rationale
 
 ```
@@ -325,6 +487,11 @@ the same bet, and it needs no model on the hot path.*
         │
 4.1 lexical + hybrid retrieval  ✅
         (validated against 1.1; graded by the same recall@k/MRR)
+        │
+5.1 edge index ──> 5.2 typed facts ──> 5.3 inference + TMS
+        │                                      │
+        └──────────> 5.4 neuro-symbolic seam <─┘
+        (graded by a new multi-hop dataset in the same harness)
 ```
 
 Build the **scoreboard (1.1)** before the memory-policy work in Horizon 2, so
@@ -338,6 +505,15 @@ remaining SDK/metrics work: a keyword query that returns nothing is a recall
 failure users feel on every session, whereas a missing SDK is friction for
 adopters who haven't arrived yet.
 
+**Horizon 5 starts with 5.1 alone**, and 5.1 is worth shipping even if nothing
+after it ever is: it is pure engine work with no model on any path, and it
+retroactively fixes provenance walks for features already shipped (1.2's
+supersession chain, 1.3's inspector). Only then a *narrow* 5.2/5.3 spike over
+one predicate family — enough to see whether the multi-hop eval moves before
+committing to the layer. The model work (5.4) comes last because it is the
+easiest part to demo and the easiest to fool yourself with: without the registry
+to snap to, extracted triples look impressive and reason over nothing.
+
 ## Risks & how the roadmap answers them
 
 - **Commoditization from above** (model providers ship native memory, frameworks
@@ -348,6 +524,20 @@ adopters who haven't arrived yet.
   is *not* an exception: hybrid retrieval is one `query` field on the existing
   `search` op — not a query language, and not full-text search as a product —
   scoped to a recall failure the wedge hits daily.
+- **Horizon 5 turns into a knowledge-graph product** — a rule language, a
+  reasoner, a graph query dialect. This is the largest scope-drift risk in the
+  document, because the subject matter invites it. *Answer:* the explicit "not
+  building" list in 5.3, rules as declarative *registry* rather than syntax in
+  5.2, `pattern` as one `search` field in the shape of 4.1's `query`, and the
+  standing test — if it grows a grammar, cut it back.
+- **The symbol space rots into soup.** A model minting predicates and entities
+  freely produces a graph no rule can fire on, which is how most LLM-built
+  knowledge graphs die. *Answer:* 5.2's registry as a controlled vocabulary,
+  entity resolution reusing 2.2's shipped dedup machinery, and an in-vocabulary
+  rate measured like every other number here rather than assumed.
+- **A brittle reasoner degrades recall** for the users it was meant to help.
+  *Answer:* Horizon 5's ground rules — opt-in, off by default, recall never
+  gated on the symbolic path.
 - **Polishing the engine because it's concrete** while the unglamorous
   extraction/eval/UI work — where the users are — waits. *Answer:* Horizon 1 is
   deliberately the eval + trust surface, not more storage features.
