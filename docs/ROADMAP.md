@@ -377,7 +377,7 @@ does deterministically, at write time, for free.
   provenance-density and wrong for knowledge-graph density. 5.1 does not change
   it; 5.2 cannot avoid confronting it.
 
-### 5.2 Typed facts & a predicate registry
+### 5.2 Typed facts & a predicate registry — *designed (`typed-facts-design.md`)*
 
 - **Why now:** `data` is an opaque blob, so there is nothing to unify against
   and no way to state a constraint. Tags are a flat set with no subsumption, so
@@ -401,6 +401,20 @@ does deterministically, at write time, for free.
 - **Done when:** a fact written as a triple is retrievable by pattern
   (`{"s": 42, "p": "prefers", "o": "*"}`), the registry loads from config, and a
   record with no `fact` behaves exactly as it does today.
+- **Designed:** `typed-facts-design.md`. Two things the design settled that the
+  entry above left open. The subject is a **record id**, not a bare symbol, so
+  tenant isolation over facts is the isolation already shipped rather than a
+  second mechanism — at the cost of needing an "entity record" convention for
+  things that are not memories. And this is the first Horizon 5 item to touch the
+  **durable** record format: codec v3 adds the triple, but a record with no fact
+  still encodes as v2 byte-for-byte, so a deployment that never writes a fact is
+  unchanged on disk and on the wire. That also confines a format change nobody
+  can downgrade past to the deployments that opted in.
+- **Found while designing:** the replication handshake negotiates no codec
+  version at all (`replication.c:168` carries only `generation` and a token), so
+  a primary writing a newer record format streams frames an older replica can
+  only reject, frame by frame, with no way to say why. Worth a version gate
+  regardless of facts, and sequenced early in the design's rollout.
 
 ### 5.3 Deterministic inference & truth maintenance
 
