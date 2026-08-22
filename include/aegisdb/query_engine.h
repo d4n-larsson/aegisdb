@@ -204,9 +204,90 @@ aegis_status_t qe_promote(AegisDB *db, const char *session_id,
 aegis_status_t qe_relate(AegisDB *db, uint64_t from_id, uint64_t to_id,
                          const char *kind, const char *ns);
 
+/* ----- traversal (ROADMAP 5.1) ------------------------------------------- */
+
+/* Max records one traversal may visit. Outdegree is capped per record by
+ * MAX_RELATIONSHIPS, but *indegree* is capped by nothing, so a reverse walk from
+ * a heavily-referenced record would otherwise be unbounded work performed while
+ * holding index_lock — starving writers, which need it exclusively. Set clear of
+ * MAX_RELATIONSHIPS + 1 so no single-hop forward walk, even of a record at its
+ * relationship limit, can be truncated. */
+#define TRAVERSE_MAX_NODES 8192
+
+/* Which way a traversal walks an edge. OUT is the zero value, so a zeroed
+ * TraverseParams reproduces the pre-5.1 walk. */
+typedef enum {
+    TRAVERSE_OUT = 0, /* follow edges the record points along */
+    TRAVERSE_IN = 1,  /* follow edges pointing at the record */
+    TRAVERSE_BOTH = 2
+} TraverseDirection;
+
+/* Which edges a traversal follows. A zeroed struct with only start_id/depth set
+ * reproduces the pre-5.1 walk exactly: every outgoing edge, whatever its kind. */
+typedef struct {
+    uint64_t start_id;
+    int depth;                /* max hops to follow; negative treated as 0 */
+    const char *agent_filter; /* NULL = no namespace restriction */
+    /* TRAVERSE_IN/BOTH need the reverse edge index, so they return NOT_READY on
+     * a server started with --no-edge-index. TRAVERSE_OUT never does: a record
+     * is its own forward adjacency list. */
+    TraverseDirection direction;
+    /* Follow only edges of these kinds; an empty filter follows every kind
+     * (the pre-5.1 behaviour). Strings are borrowed for the duration of the
+     * call. An edge carrying no kind at all matches only the empty filter:
+     * once a caller names the kinds it wants, an unkinded edge is not one of
+     * them. */
+    const char *const *kinds;
+    size_t kind_count;
+} TraverseParams;
+
+/* How the walk first reached one returned record; one entry parallel to each
+ * returned record, in the same order. This is what turns a result from an
+ * unordered bag whose shape has to be inferred into a legible path.
+ *
+ * BFS records *first* discovery, so `via_*` names the shortest path found, and
+ * a record reachable by several edges reports whichever reached it first. The
+ * start record reports depth 0 with via_id 0 and via_kind NULL. */
+typedef struct {
+    int depth;       /* hops from the start record; 0 is the start record */
+    uint64_t via_id; /* the *other* end of the reaching edge; 0 at depth 0 */
+    char *via_kind;  /* owned copy of that edge's kind; NULL if unkinded */
+    /* 1 when this hop was reached by walking an edge backwards, i.e. via_id
+     * points *at* this record rather than the reverse. Only meaningful under
+     * TRAVERSE_BOTH, where an id can be reachable either way and (via_id,
+     * via_kind) alone would not say which orientation was taken. */
+    int via_incoming;
+    /* Reverse hops only: 1 when the reaching edge's kind could not be interned
+     * by the edge index, so `via_kind` is *unknown* rather than absent — and,
+     * if a kind filter was given, this hop is a candidate the index could not
+     * rule out rather than a confirmed match. Reachable only once a corpus
+     * exceeds EDGE_MAX_KINDS distinct kinds; reported rather than silently
+     * conflated with an unkinded edge. */
+    int via_kind_uncertain;
+} TraverseHop;
+
+/* Free `n` hops as returned by qe_traverse_ex (each via_kind, then the array).
+ * Safe on NULL. */
+void traverse_hops_free(TraverseHop *hops, size_t n);
+
 /* Breadth-first relationship traversal from start_id up to `depth` hops. */
 aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
                            const char *agent_filter, MemoryRecord **out,
                            size_t *out_n);
+
+/* Like qe_traverse, but takes the 5.1 edge filter and, when out_hops is
+ * non-NULL, also allocates a parallel array of TraverseHop (one per returned
+ * record, same order; free it with traverse_hops_free). Pass NULL for out_hops
+ * to skip the attribution bookkeeping entirely.
+ *
+ * A walk visits at most TRAVERSE_MAX_NODES records. On hitting that ceiling it
+ * returns what it has and sets *out_capped (may be NULL) to 1 — the result is
+ * then a prefix of the graph, not the whole reachable set. Indegree is
+ * unbounded (unlike outdegree, which MAX_RELATIONSHIPS caps per record), so a
+ * reverse walk from a heavily-referenced record is exactly the case this
+ * bounds. */
+aegis_status_t qe_traverse_ex(AegisDB *db, const TraverseParams *p,
+                              MemoryRecord **out, TraverseHop **out_hops,
+                              size_t *out_n, int *out_capped);
 
 #endif /* AEGISDB_QUERY_ENGINE_H */

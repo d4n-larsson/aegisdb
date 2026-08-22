@@ -586,6 +586,449 @@ def test_bulk_ops(binary, port):
         check(r.get("ok") is True and r.get("count") == 1, "count bulk -> 1 remains")
 
 
+def test_traverse_kinds(binary, port):
+    print("[traverse: edge-kind filter + per-hop attribution (ROADMAP 5.1)]")
+    with Server(binary, port, phase=4) as srv:
+        def ins(data):
+            return srv.req({"operation": "insert", "type": "semantic",
+                            "data": data})["record"]["id"]
+
+        def rel(a, b, kind=None):
+            p = {"operation": "relate", "from_id": a, "to_id": b}
+            if kind is not None:
+                p["kind"] = kind
+            check(srv.req(p).get("ok") is True, f"relate {a}->{b} ({kind})")
+
+        def walk(start, **kw):
+            p = {"operation": "traverse", "id": start, "include_embeddings": False}
+            p.update(kw)
+            return srv.req(p)
+
+        # a -derived_from-> b -derived_from-> d,  a -supersedes-> c
+        a, b, c, d = ins("a"), ins("b"), ins("c"), ins("d")
+        rel(a, b, "derived_from")
+        rel(a, c, "supersedes")
+        rel(b, d, "derived_from")
+
+        # unfiltered walk is unchanged by 5.1: every kind is followed
+        r = walk(a, depth=2)
+        ids = sorted(rec["id"] for rec in r.get("records", []))
+        check(r.get("ok") is True and ids == sorted([a, b, c, d]),
+              "unfiltered traverse still follows every edge kind")
+
+        # the filter is the point: `supersedes` is not followed
+        r = walk(a, depth=2, kinds=["derived_from"])
+        ids = sorted(rec["id"] for rec in r.get("records", []))
+        check(r.get("ok") is True and ids == sorted([a, b, d]),
+              "kinds filter excludes an unrequested edge kind")
+
+        # ...and the converse, one hop of the other kind only
+        r = walk(a, depth=2, kinds=["supersedes"])
+        ids = sorted(rec["id"] for rec in r.get("records", []))
+        check(r.get("ok") is True and ids == sorted([a, c]),
+              "kinds filter follows only the requested kind")
+
+        # several kinds at once = union
+        r = walk(a, depth=1, kinds=["supersedes", "derived_from"])
+        ids = sorted(rec["id"] for rec in r.get("records", []))
+        check(r.get("ok") is True and ids == sorted([a, b, c]),
+              "multiple kinds are a union")
+
+        # a kind nobody wrote reaches only the start record
+        r = walk(a, depth=2, kinds=["no_such_kind"])
+        ids = [rec["id"] for rec in r.get("records", [])]
+        check(r.get("ok") is True and ids == [a],
+              "unknown kind yields just the start record")
+
+        # per-hop attribution: every non-start hop names the edge that reached it
+        r = walk(a, depth=2, kinds=["derived_from"])
+        hop = {rec["id"]: rec.get("traversal") for rec in r["records"]}
+        check(hop[a] == {"depth": 0},
+              "start record reports depth 0 and no reaching edge")
+        check(hop[b] == {"depth": 1, "via_id": a, "via_kind": "derived_from",
+                         "via_direction": "out"},
+              "depth-1 hop names its reaching edge")
+        check(hop[d] == {"depth": 2, "via_id": b, "via_kind": "derived_from",
+                         "via_direction": "out"},
+              "depth-2 hop names the edge from its actual parent")
+
+        # an unkinded edge is followed only when no kinds are named
+        e, f = ins("e"), ins("f")
+        rel(e, f)  # no kind
+        r = walk(e, depth=1)
+        ids = sorted(rec["id"] for rec in r.get("records", []))
+        check(r.get("ok") is True and ids == sorted([e, f]),
+              "unkinded edge followed by an unfiltered walk")
+        r = walk(e, depth=1, kinds=["derived_from"])
+        ids = [rec["id"] for rec in r.get("records", [])]
+        check(r.get("ok") is True and ids == [e],
+              "unkinded edge not followed once kinds are named")
+        # ...and it reports no via_kind rather than an empty one
+        r = walk(e, depth=1)
+        hop = {rec["id"]: rec.get("traversal") for rec in r["records"]}
+        check(hop[f] == {"depth": 1, "via_id": e, "via_direction": "out"},
+              "unkinded edge reports via_id with no via_kind")
+
+        # direction: the three real values are accepted, anything else is not
+        for good in ("out", "in", "both"):
+            r = walk(a, depth=1, direction=good)
+            check(r.get("ok") is True, f'direction "{good}" is accepted')
+        for bad in ("sideways", "OUT", ""):
+            r = walk(a, depth=1, direction=bad)
+            check(r.get("ok") is False
+                  and r["error"]["code"] == "INVALID_REQUEST",
+                  f'direction "{bad}" rejected, not silently ignored')
+
+        # A `kind` longer than the reverse index can intern is refused rather
+        # than accepted-and-unlabelled: an un-internable kind would degrade a
+        # filtered reverse walk into a candidate set nobody asked for.
+        r = srv.req({"operation": "relate", "from_id": a, "to_id": c,
+                     "kind": "k" * 65})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "an over-long edge kind is rejected")
+        r = srv.req({"operation": "relate", "from_id": a, "to_id": c,
+                     "kind": "k" * 64})
+        check(r.get("ok") is True, "a kind at exactly the limit is accepted")
+
+        # A malformed `kinds` must not silently become an unfiltered walk — the
+        # same strictness `direction` gets. Asking to narrow and getting the
+        # widest possible result is the failure worth refusing.
+        for bad in ([123], ["derived_from", 5], "derived_from", {"a": 1}):
+            r = walk(a, depth=1, kinds=bad)
+            check(r.get("ok") is False
+                  and r["error"]["code"] == "INVALID_REQUEST",
+                  f"malformed kinds {bad!r} rejected, not silently widened")
+        r = walk(a, depth=1, kinds=[])
+        check(r.get("ok") is True, "an explicitly empty kinds list is allowed")
+
+        # the kinds list is capped (MAX_TRAVERSE_KINDS = 16)
+        r = walk(a, depth=1, kinds=[f"k{i}" for i in range(16)])
+        check(r.get("ok") is True, "16 kinds accepted")
+        r = walk(a, depth=1, kinds=[f"k{i}" for i in range(17)])
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "17 kinds rejected")
+
+
+def test_edge_index_maintenance(binary, port):
+    print("[edge index: maintained on write, rebuilt on restart (ROADMAP 5.1)]")
+    datadir = tempfile.mkdtemp(prefix="aegis_edgeidx_")
+
+    def edges(srv):
+        st = srv.req({"operation": "stats"})
+        return st["indexes"]["edges"], st["indexes"]["edge_kinds"]
+
+    with Server(binary, port, phase=4, datadir=datadir) as srv:
+        def ins(d):
+            return srv.req({"operation": "insert", "type": "semantic",
+                            "data": d})["record"]["id"]
+
+        check(edges(srv) == (0, 0), "fresh server indexes no edges")
+
+        a, b, c = ins("a"), ins("b"), ins("c")
+        check(edges(srv) == (0, 0), "insert alone creates no edges")
+
+        # relate is the only op that creates an edge
+        srv.req({"operation": "relate", "from_id": a, "to_id": b,
+                 "kind": "supersedes"})
+        check(edges(srv) == (1, 1), "relate indexes one edge, one kind")
+        srv.req({"operation": "relate", "from_id": c, "to_id": b,
+                 "kind": "derived_from"})
+        check(edges(srv) == (2, 2), "second relate, second kind")
+
+        # idempotent on the wire as well as in the index
+        srv.req({"operation": "relate", "from_id": a, "to_id": b,
+                 "kind": "supersedes"})
+        check(edges(srv) == (2, 2), "re-relating the same edge does not double it")
+
+        # an update touches tags/payload only, never the edge map
+        srv.req({"operation": "update", "id": a, "data": "a-v2"})
+        check(edges(srv) == (2, 2), "update leaves the edge index alone")
+
+        # deleting a *target* drops its whole indegree (both edges point at b),
+        # and releases the kinds those edges were the last users of — the count
+        # tracks kinds in use, not kinds ever seen, so it survives a restart
+        srv.req({"operation": "delete", "id": b})
+        check(edges(srv) == (0, 0),
+              "deleting a target drops every edge into it, and its kinds")
+
+        # ...and deleting a *source* drops its outgoing edges
+        d, e = ins("d"), ins("e")
+        srv.req({"operation": "relate", "from_id": d, "to_id": e,
+                 "kind": "mentions"})
+        check(edges(srv)[0] == 1, "edge into e indexed")
+        srv.req({"operation": "delete", "id": d})
+        check(edges(srv)[0] == 0, "deleting the source drops its outgoing edge")
+
+        # a surviving edge to carry across the restart
+        f, g = ins("f"), ins("g")
+        srv.req({"operation": "relate", "from_id": f, "to_id": g,
+                 "kind": "derived_from"})
+        before = edges(srv)
+        check(before[0] == 1, "one live edge before restart")
+        srv.graceful_stop()
+
+    # The index is derived and never checkpointed, so recovery rebuilds it from
+    # the log. Crucially it must NOT resurrect edges whose endpoint was deleted:
+    # a restarted server has to report the same count as the one that wrote the
+    # log, or the two disagree about what the graph contains.
+    with Server(binary, port, phase=4, datadir=datadir) as srv:
+        check(edges(srv) == before,
+              f"restart rebuilds the same edge count ({before[0]})")
+
+    # --no-edge-index: no reverse index, and the forward walk is untouched
+    d2 = tempfile.mkdtemp(prefix="aegis_edgeoff_")
+    with Server(binary, port, phase=4, datadir=d2,
+                extra_args=["--no-edge-index"]) as srv:
+        a = srv.req({"operation": "insert", "type": "semantic",
+                     "data": "a"})["record"]["id"]
+        b = srv.req({"operation": "insert", "type": "semantic",
+                     "data": "b"})["record"]["id"]
+        srv.req({"operation": "relate", "from_id": a, "to_id": b, "kind": "k"})
+        st = srv.req({"operation": "stats"})
+        check(st["indexes"]["edges"] == 0 and st["indexes"]["edge_kinds"] == 0,
+              "--no-edge-index indexes nothing")
+        check(st["memory"]["edge_bytes"] == 0,
+              "--no-edge-index costs no edge RAM")
+        r = srv.req({"operation": "traverse", "id": a, "depth": 1,
+                     "kinds": ["k"]})
+        check([rec["id"] for rec in r.get("records", [])] == [a, b],
+              "forward traverse unaffected by --no-edge-index")
+
+
+def test_edge_index_replica_parity(binary, port):
+    print("[edge index: a replica agrees with its primary]")
+    repl_port = port + 1
+    replica_port = port + 2
+    tok = "repl-secret"
+    with Server(binary, port, extra_args=[
+            "--replication-port", str(repl_port),
+            "--replication-token", tok]) as primary:
+        with Server(binary, replica_port, extra_args=[
+                "--replicate-from", f"127.0.0.1:{repl_port}",
+                "--replication-token", tok]) as replica:
+
+            def edge_count(srv):
+                return srv.req({"operation": "stats"})["indexes"]["edges"]
+
+            def wait_edges(want, tries=60):
+                for _ in range(tries):
+                    if edge_count(replica) == want:
+                        return True
+                    time.sleep(0.1)
+                return edge_count(replica) == want
+
+            def ins(d):
+                return primary.req({"operation": "insert", "type": "semantic",
+                                    "data": d})["record"]["id"]
+
+            a, b, c = ins("a"), ins("b"), ins("c")
+            primary.req({"operation": "relate", "from_id": a, "to_id": b,
+                         "kind": "supersedes"})
+            primary.req({"operation": "relate", "from_id": c, "to_id": b,
+                         "kind": "derived_from"})
+            check(edge_count(primary) == 2, "primary indexed both edges")
+            check(wait_edges(2), "replica replicated both edges")
+
+            # A tombstone must drop the *incoming* edges on the replica too.
+            # Replication ships whole records, so the replica only ever sees the
+            # deleted version of b — it has to infer the indegree cleanup that
+            # qe_delete does directly on the primary.
+            primary.req({"operation": "delete", "id": b})
+            check(edge_count(primary) == 0, "primary dropped b's indegree")
+            check(wait_edges(0),
+                  "replica dropped b's indegree on the tombstone")
+
+            # A record's relationships array outlives its targets: a tombstone
+            # never rewrites its peers, so `a` still names the deleted `b`.
+            # Relating a again re-ships the whole record, and a replica that
+            # re-indexes it blindly resurrects a->b — permanently, since nothing
+            # ever revisits it. This is the case the tombstone check above does
+            # NOT cover, and it diverged before the liveness guard was added.
+            d = ins("d")
+            primary.req({"operation": "relate", "from_id": a, "to_id": d,
+                         "kind": "mentions"})
+            check(edge_count(primary) == 1,
+                  "primary indexed only the edge to the live target")
+            check(wait_edges(1),
+                  "replica did not resurrect the edge to the deleted target")
+
+
+def test_traverse_reverse(binary, port):
+    print("[traverse: walking edges backwards (ROADMAP 5.1)]")
+    with Server(binary, port, phase=4) as srv:
+        def ins(d):
+            return srv.req({"operation": "insert", "type": "semantic",
+                            "data": d})["record"]["id"]
+
+        def rel(a, b, kind=None):
+            p = {"operation": "relate", "from_id": a, "to_id": b}
+            if kind is not None:
+                p["kind"] = kind
+            srv.req(p)
+
+        def walk(start, **kw):
+            p = {"operation": "traverse", "id": start,
+                 "include_embeddings": False}
+            p.update(kw)
+            return srv.req(p)
+
+        def ids(r):
+            return sorted(rec["id"] for rec in r.get("records", []))
+
+        # THE motivating case: a supersession chain. v3 supersedes v2 supersedes
+        # v1, so the edges point newest -> oldest. "What superseded v1?" is a
+        # question only a backward walk can answer.
+        v1, v2, v3 = ins("v1"), ins("v2"), ins("v3")
+        rel(v2, v1, "supersedes")
+        rel(v3, v2, "supersedes")
+
+        r = walk(v1, depth=2, direction="in", kinds=["supersedes"])
+        check(r.get("ok") is True and ids(r) == sorted([v1, v2, v3]),
+              "supersession chain retrieved backwards in one call")
+        hop = {rec["id"]: rec.get("traversal") for rec in r["records"]}
+        check(hop[v1] == {"depth": 0}, "start of a reverse walk has no edge")
+        check(hop[v2] == {"depth": 1, "via_id": v1, "via_kind": "supersedes",
+                          "via_direction": "in"},
+              "reverse hop reports via_direction in")
+        check(hop[v3]["depth"] == 2 and hop[v3]["via_id"] == v2,
+              "reverse walk continues past one hop")
+
+        # forward from the same node finds nothing: v1 points at no one
+        r = walk(v1, depth=2, direction="out")
+        check(ids(r) == [v1], "forward from the chain tail reaches only itself")
+        # ...and forward from the head walks the other way
+        r = walk(v3, depth=2, direction="out")
+        check(ids(r) == sorted([v1, v2, v3]), "forward from the head still works")
+
+        # the kind filter applies to the reverse direction too
+        other = ins("other")
+        rel(other, v1, "mentions")
+        r = walk(v1, depth=1, direction="in", kinds=["supersedes"])
+        check(ids(r) == sorted([v1, v2]), "reverse walk honours the kind filter")
+        r = walk(v1, depth=1, direction="in")
+        check(ids(r) == sorted([v1, v2, other]), "unfiltered reverse finds both")
+        r = walk(v1, depth=1, direction="in", kinds=["no_such_kind"])
+        check(ids(r) == [v1], "reverse walk with an unknown kind finds nothing")
+
+        # both: a node in the middle of the chain sees each side, and each hop
+        # says which way it was reached
+        r = walk(v2, depth=1, direction="both")
+        check(ids(r) == sorted([v1, v2, v3]), "both directions from the middle")
+        hop = {rec["id"]: rec.get("traversal") for rec in r["records"]}
+        check(hop[v1]["via_direction"] == "out",
+              "the node v2 points at is reached outward")
+        check(hop[v3]["via_direction"] == "in",
+              "the node pointing at v2 is reached inward")
+
+        # an unkinded edge is followed by an unfiltered reverse walk only
+        u1, u2 = ins("u1"), ins("u2")
+        rel(u1, u2)
+        r = walk(u2, depth=1, direction="in")
+        check(ids(r) == sorted([u1, u2]), "unkinded edge walked backwards")
+        r = walk(u2, depth=1, direction="in", kinds=["mentions"])
+        check(ids(r) == [u2], "named filter does not match an unkinded edge")
+
+        # a cycle must terminate rather than revisit
+        c1, c2 = ins("c1"), ins("c2")
+        rel(c1, c2, "loops")
+        rel(c2, c1, "loops")
+        r = walk(c1, depth=5, direction="both")
+        check(r.get("ok") is True and ids(r) == sorted([c1, c2]),
+              "a cycle terminates without repeating records")
+
+
+def test_traverse_reverse_disabled(binary, port):
+    print("[traverse: reverse needs the edge index]")
+    with Server(binary, port, phase=4,
+                extra_args=["--no-edge-index"]) as srv:
+        a = srv.req({"operation": "insert", "type": "semantic",
+                     "data": "a"})["record"]["id"]
+        b = srv.req({"operation": "insert", "type": "semantic",
+                     "data": "b"})["record"]["id"]
+        srv.req({"operation": "relate", "from_id": a, "to_id": b, "kind": "k"})
+        for d in ("in", "both"):
+            r = srv.req({"operation": "traverse", "id": b, "direction": d})
+            check(r.get("ok") is False and r["error"]["code"] == "NOT_READY",
+                  f'direction "{d}" -> NOT_READY without the edge index')
+        r = srv.req({"operation": "traverse", "id": a, "direction": "out"})
+        check(r.get("ok") is True,
+              "the forward walk needs no index and still works")
+
+
+def test_traverse_reverse_recovery(binary, port):
+    print("[traverse: reverse walk survives a restart]")
+    datadir = tempfile.mkdtemp(prefix="aegis_revrec_")
+    with Server(binary, port, phase=4, datadir=datadir) as srv:
+        def ins(d):
+            return srv.req({"operation": "insert", "type": "semantic",
+                            "data": d})["record"]["id"]
+        keep_src, target = ins("keeps pointing"), ins("target")
+        gone_src = ins("will be deleted")
+        srv.req({"operation": "relate", "from_id": keep_src,
+                 "to_id": target, "kind": "supersedes"})
+        srv.req({"operation": "relate", "from_id": gone_src,
+                 "to_id": target, "kind": "supersedes"})
+        srv.req({"operation": "delete", "id": gone_src})
+        srv.graceful_stop()
+
+    with Server(binary, port, phase=4, datadir=datadir) as srv:
+        r = srv.req({"operation": "traverse", "id": target, "depth": 1,
+                     "direction": "in", "include_embeddings": False})
+        got = sorted(rec["id"] for rec in r.get("records", []))
+        check(got == sorted([target, keep_src]),
+              "reverse walk answers identically after a restart")
+        check(gone_src not in got,
+              "a deleted source is not resurrected by the rebuild")
+
+
+def test_traverse_reverse_isolation(binary, port):
+    print("[traverse: a reverse walk cannot cross a tenant boundary]")
+    tokens = ["acme-key   acme   rw", "beta-key   beta   rw", "admin-key admin"]
+    with Server(binary, port, phase=4, token_lines=tokens) as srv:
+        def ins(tok, d):
+            return srv.req({"operation": "insert", "type": "semantic",
+                            "data": d, "token": tok})["record"]["id"]
+
+        # acme owns the target; beta owns a record pointing AT it. Only an admin
+        # can relate across namespaces, which is exactly how the interesting
+        # situation arises: acme's record now has an incoming edge it does not
+        # own, sitting in the reverse index under acme's own id.
+        target = ins("acme-key", "acme target")
+        beta_src = ins("beta-key", "beta source")
+        acme_src = ins("acme-key", "acme source")
+        for src in (beta_src, acme_src):
+            r = srv.req({"operation": "relate", "from_id": src,
+                         "to_id": target, "kind": "mentions",
+                         "token": "admin-key"})
+            check(r.get("ok") is True, f"admin related {src} -> {target}")
+
+        # An admin sees the whole picture...
+        r = srv.req({"operation": "traverse", "id": target, "depth": 1,
+                     "direction": "in", "token": "admin-key",
+                     "include_embeddings": False})
+        check(sorted(rec["id"] for rec in r.get("records", []))
+              == sorted([target, beta_src, acme_src]),
+              "admin sees both incoming sources")
+
+        # ...but acme walking backwards from its OWN record must not learn that
+        # beta's record points at it. This is the leak a reverse index makes
+        # newly possible, and the namespace filter has to catch it.
+        r = srv.req({"operation": "traverse", "id": target, "depth": 1,
+                     "direction": "in", "token": "acme-key",
+                     "include_embeddings": False})
+        got = sorted(rec["id"] for rec in r.get("records", []))
+        check(got == sorted([target, acme_src]),
+              "acme sees only its own incoming source")
+        check(beta_src not in got,
+              "a co-tenant's incoming edge is not revealed by a reverse walk")
+
+        # and beta cannot use acme's id as a starting point at all
+        r = srv.req({"operation": "traverse", "id": target, "depth": 1,
+                     "direction": "in", "token": "beta-key"})
+        check(r.get("ok") is True and r.get("records") == [],
+              "a foreign start record yields nothing, not a leak")
+
+
 def test_consolidate(binary, port):
     print("[consolidate: merge near-duplicate semantic memories]")
     with Server(binary, port, phase=4) as srv:
@@ -2463,6 +2906,13 @@ def main():
     test_connection_guards(binary, 19506)  # uses port, +1, +2
     test_bulk_ops(binary, 19480)
     test_consolidate(binary, 19481)
+    test_traverse_kinds(binary, 19540)
+    test_edge_index_maintenance(binary, 19541)
+    test_edge_index_replica_parity(binary, 19542)  # uses port, +1, +2
+    test_traverse_reverse(binary, 19543)
+    test_traverse_reverse_disabled(binary, 19544)
+    test_traverse_reverse_recovery(binary, 19545)
+    test_traverse_reverse_isolation(binary, 19546)
     test_forget(binary, 19499)
     test_export_and_purge(binary, 19500)
     test_export_purge_isolation(binary, 19501)

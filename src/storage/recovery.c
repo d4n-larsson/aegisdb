@@ -159,6 +159,20 @@ long recovery_run(AegisDB *db) {
             /* The lexical index is derived and never checkpointed, so it is
              * always rebuilt in full here — like time/tag, unlike semantic. */
             lexical_index_add(db->lex, r.id, r.data, r.data_len);
+            /* Same for the reverse edge index. Only edges whose *target* is
+             * still live are re-indexed: this loop walks live records, so the
+             * source is live by construction, but a live record can still name a
+             * target that has since been tombstoned. Re-adding those would
+             * resurrect edges qe_delete removed, and make a restarted server
+             * report a different edge count than the one that wrote the log. */
+            for (size_t k = 0; k < r.rel_count; k++) {
+                const HashEntry *te =
+                    hash_index_get(db->hash, r.relationships[k].to_id);
+                if (te && !te->deleted) {
+                    edge_index_add(db->edges, r.id, r.relationships[k].to_id,
+                                   r.relationships[k].kind);
+                }
+            }
             /* Establish the slot; its counters are restored from the usage
              * checkpoint below, which only writes onto slots that exist here —
              * so a record deleted since the checkpoint stays gone. */

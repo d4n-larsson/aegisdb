@@ -667,6 +667,11 @@ Add a relationship between two persisted records.
 }
 ```
 
+`kind` is optional and at most **64 bytes**; a longer one is rejected with
+`INVALID_REQUEST`. The limit is what the reverse edge index can intern, and an
+un-internable kind would quietly demote a filtered backward `traverse` from an
+answer to a candidate list.
+
 **Response**:
 
 ```json
@@ -703,8 +708,87 @@ the records reached within `depth` hops.
 | `id` | integer | Yes | Starting record |
 | `depth` | integer | No | Max hops to follow; default `1` |
 | `agent_id` | string | No | Restrict the walk to one namespace |
+| `kinds` | string[] | No | Follow only edges of these kinds (union); up to 16. Omit to follow every kind, as before. Must be an array of strings — a malformed one is `INVALID_REQUEST` rather than a silent unfiltered walk |
+| `direction` | string | No | `out` (default) \| `in` \| `both`. `in`/`both` need the reverse edge index and return `NOT_READY` under `--no-edge-index`; any other value is `INVALID_REQUEST` |
 
-**Response**: Same shape as `search` — `{ "ok": true, "records": [ … ], "total": N }`.
+**Response**: Same shape as `search` — `{ "ok": true, "records": [ … ], "total": N }`
+— plus `"capped": true` when the walk hit its ceiling (see below).
+
+**Bounded work.** A traversal visits at most **8192** records; past that it
+returns what it reached and adds `"capped": true`, exactly as a truncated `count`
+does. The result is then a prefix of the reachable set, not all of it. The
+ceiling matters most in reverse: a record's *outdegree* is capped at 4096
+relationships, but its *indegree* is not capped at all, so a backward walk from
+a heavily-referenced record is the case this bounds. It is set clear of the
+outdegree limit, so no single forward hop can be truncated.
+
+**Edge-kind filter (`kinds`)**: a relationship's `kind` is set by `relate`, and
+until now a walk followed every edge regardless of it — so retrieving one
+relation type (a `supersedes` chain, a `derived_from` lineage) meant walking the
+whole neighbourhood and filtering client-side. `kinds` pushes that filter into
+the walk, which also bounds it: an excluded edge is never followed, so its
+subtree is never read.
+
+```json
+{ "operation": "traverse", "id": 42, "depth": 3, "kinds": ["supersedes"] }
+```
+
+An edge carrying **no** kind is followed only by an unfiltered walk. Once a
+caller names the kinds it wants, an unkinded edge is not one of them.
+
+Filtering costs nothing extra: a walk already reads each record it returns, and
+the kinds are stored in the record. Only the *reverse* direction needs an index
+(`--no-edge-index` disables it), because a record lists the edges it points
+along, not the ones pointing at it.
+
+**Direction.** A relationship is directed, so half the questions about it can
+only be asked backwards. `relate` records "v2 supersedes v1" as an edge from v2
+to v1, which makes *"what did v1 turn into?"* a `direction: "in"` walk:
+
+```json
+{ "operation": "traverse", "id": 42, "depth": 3,
+  "direction": "in", "kinds": ["supersedes"] }
+```
+
+`both` follows either orientation from each hop; `traversal.via_direction` then
+says which one reached a given record, since an id can be reachable both ways
+and `via_id` alone would not distinguish them. Namespace scoping applies
+identically in reverse: a record you do not own never appears, so a backward
+walk cannot be used to discover that someone else's memory links to yours.
+
+**Caveat — consolidation lineage is not reachable this way.** `consolidate`
+records a `supersedes` edge from the survivor to each record it absorbs, and then
+tombstones those records. Deleting a record drops every edge pointing at it, so
+the lineage edge leaves the reverse index immediately, and a tombstoned record
+cannot start or appear in a walk in any case. Consolidation lineage is therefore
+visible only in the survivor's `relationships` array (via `get`/`search`), not
+through `traverse` in either direction. A backward `supersedes` walk works for
+links you wrote yourself with `relate` between records that both stay live.
+
+**Per-hop attribution (`traversal`)**: every returned record carries a
+`traversal` object saying how the walk reached it, so a result reads as a path
+rather than a set whose shape has to be inferred:
+
+```json
+{
+  "id": 99,
+  "data": "…",
+  "traversal": { "depth": 2, "via_id": 42, "via_kind": "derived_from" }
+}
+```
+
+| Field | Notes |
+|-------|-------|
+| `depth` | Hops from the starting record; `0` is the starting record itself |
+| `via_id` | The record at the other end of the reaching edge; absent at depth `0` |
+| `via_kind` | That edge's `kind`; absent at depth `0`, and absent for an unkinded edge |
+| `via_direction` | `out` if the edge was followed forwards (`via_id` points at this record), `in` if backwards (this record points at `via_id`); absent at depth `0` |
+| `via_kind_unknown` | Present and `true` only on a reverse hop whose edge kind the index could not determine, so `via_kind` is *unknown* rather than absent — and, under a `kinds` filter, this hop is a candidate rather than a confirmed match. Requires a corpus with more than 4096 distinct edge kinds; normally absent |
+
+The walk is breadth-first and records **first** discovery, so `via_*` describes
+the shortest path found; a record reachable by several edges reports whichever
+reached it first. This is unconditional — there is no flag — because it is a
+handful of bytes next to a record that already carries its payload.
 
 ---
 
@@ -774,8 +858,8 @@ authentication when enabled (unlike `ping`). Available at every phase.
 | `tombstones` | Deleted-but-not-yet-compacted records still in the log |
 | `log_bytes` | Current size of `memory.log` on disk |
 | `log_flush_pending` | `true` if writes have not yet been `fsync`'d — the current durability lag |
-| `indexes` | Per-index entry counts (`semantic` is the brute-force vector count; watch it for scale). `lexical_terms`/`lexical_docs` are the distinct terms and indexed payloads in the BM25 index, both `0` under `--no-lexical-index` |
-| `memory` | Approximate resident bytes per in-RAM index — `hash_bytes`, `time_bytes`, `tag_bytes`, `lexical_bytes`, `semantic_bytes`, `index_bytes_total`, and `index_bytes_limit` (the configured `--max-index-bytes` cap; 0 = unlimited). Indexes are held in memory and grow with the dataset (the semantic vectors usually dominate), so this is the figure to monitor/alert on; past the limit inserts return `MEMORY_LIMIT`. Excludes allocator overhead. |
+| `indexes` | Per-index entry counts (`semantic` is the brute-force vector count; watch it for scale). `lexical_terms`/`lexical_docs` are the distinct terms and indexed payloads in the BM25 index, both `0` under `--no-lexical-index`. `edges`/`edge_kinds` are the indexed incoming edges and the distinct kinds they carry, both `0` under `--no-edge-index` |
+| `memory` | Approximate resident bytes per in-RAM index — `hash_bytes`, `time_bytes`, `tag_bytes`, `lexical_bytes`, `edge_bytes`, `usage_bytes`, `semantic_bytes`, `index_bytes_total`, and `index_bytes_limit` (the configured `--max-index-bytes` cap; 0 = unlimited). Indexes are held in memory and grow with the dataset (the semantic vectors usually dominate), so this is the figure to monitor/alert on; past the limit inserts return `MEMORY_LIMIT`. Excludes allocator overhead. |
 | `next_id` | The id the next persisted insert will receive |
 | `metrics` | Monotonic operational counters since startup (below) |
 

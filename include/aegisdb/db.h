@@ -6,6 +6,7 @@
 #include <stdatomic.h>
 
 #include "aegisdb/config.h"
+#include "aegisdb/edge_index.h"
 #include "aegisdb/hash_index.h"
 #include "aegisdb/lexical_index.h"
 #include "aegisdb/log.h"
@@ -83,6 +84,10 @@ typedef struct {
     TagIndex *tags;        /* tag -> ids (Phase 2) */
     LexicalIndex *lex;     /* term -> postings, BM25 (ROADMAP 4.1); NULL when
                             * --no-lexical-index disabled it */
+    EdgeIndex *edges;      /* to_id -> incoming sources (ROADMAP 5.1); NULL when
+                            * --no-edge-index disabled it. Only the *reverse*
+                            * direction: a record is its own forward adjacency
+                            * list, so a forward walk needs no index. */
     SemanticIndex *sem;    /* embedding ANN (Phase 3) */
     UsageIndex *usage;     /* id -> recall count/recency; NULL when
                             * --no-usage-feedback disabled it */

@@ -252,6 +252,12 @@ static void stats_add_storage(cJSON *o, AegisDB *db) {
                                 (double)lexical_index_terms(db->lex));
         cJSON_AddNumberToObject(idx, "lexical_docs",
                                 (double)lexical_index_docs(db->lex));
+        /* Indexed incoming edges and the distinct kinds they carry; both 0
+         * with --no-edge-index. */
+        cJSON_AddNumberToObject(idx, "edges",
+                                (double)edge_index_edges(db->edges));
+        cJSON_AddNumberToObject(idx, "edge_kinds",
+                                (double)edge_index_kinds(db->edges));
         cJSON_AddNumberToObject(idx, "usage_tracked",
                                 (double)usage_index_count(db->usage));
         cJSON_AddNumberToObject(idx, "semantic",
@@ -269,16 +275,18 @@ static void stats_add_storage(cJSON *o, AegisDB *db) {
         size_t tb = time_index_bytes(db->time);
         size_t gb = tag_index_bytes(db->tags);
         size_t lb = lexical_index_bytes(db->lex);
+        size_t eb = edge_index_bytes(db->edges);
         size_t ub = usage_index_bytes(db->usage);
         size_t sb = semantic_index_bytes(db->sem);
         cJSON_AddNumberToObject(mem, "hash_bytes", (double)hb);
         cJSON_AddNumberToObject(mem, "time_bytes", (double)tb);
         cJSON_AddNumberToObject(mem, "tag_bytes", (double)gb);
         cJSON_AddNumberToObject(mem, "lexical_bytes", (double)lb);
+        cJSON_AddNumberToObject(mem, "edge_bytes", (double)eb);
         cJSON_AddNumberToObject(mem, "usage_bytes", (double)ub);
         cJSON_AddNumberToObject(mem, "semantic_bytes", (double)sb);
         cJSON_AddNumberToObject(mem, "index_bytes_total",
-                                (double)(hb + tb + gb + lb + ub + sb));
+                                (double)(hb + tb + gb + lb + eb + ub + sb));
         /* The configured backpressure cap (0 = unlimited), so a scraper can
          * alert on index_bytes_total approaching it. */
         cJSON_AddNumberToObject(mem, "index_bytes_limit",
@@ -1130,6 +1138,38 @@ static cJSON *handle_relate(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     return o;
 }
 
+/* Which edge reached this hop (ROADMAP 5.1). Emitted for every returned record
+ * so a walk reads as a path rather than a set whose shape must be inferred. The
+ * start record has no reaching edge, so it reports only its depth. */
+static cJSON *traversal_json(const TraverseHop *h) {
+    cJSON *o = cJSON_CreateObject();
+    if (!o) {
+        return NULL;
+    }
+    cJSON_AddNumberToObject(o, "depth", h->depth);
+    if (h->depth > 0) {
+        cJSON_AddNumberToObject(o, "via_id", (double)h->via_id);
+        /* Absent rather than null when the edge carries no kind: `relate`
+         * permits an unkinded edge, and an absent field says "no label" without
+         * inviting a client to match on the empty string. */
+        if (h->via_kind) {
+            cJSON_AddStringToObject(o, "via_kind", h->via_kind);
+        } else if (h->via_kind_uncertain) {
+            /* An absent via_kind means "this edge has no kind". This edge has
+             * one; the reverse index just could not intern it, so it cannot say
+             * what it is — and under a kind filter this hop is a candidate it
+             * could not rule out. Saying so beats letting it read as unkinded. */
+            cJSON_AddBoolToObject(o, "via_kind_unknown", 1);
+        }
+        /* Which way the edge was walked. Always reported, not just under
+         * `direction: both`, so a client never has to remember what it asked
+         * for to read the answer. */
+        cJSON_AddStringToObject(o, "via_direction",
+                                h->via_incoming ? "in" : "out");
+    }
+    return o;
+}
+
 static cJSON *handle_traverse(AegisDB *db, const cJSON *req,
                               const AuthCtx *ctx) {
     const char *ns = ctx->ns;
@@ -1145,10 +1185,53 @@ static cJSON *handle_traverse(AegisDB *db, const cJSON *req,
     if (depth > MAX_TRAVERSE_DEPTH) {
         depth = MAX_TRAVERSE_DEPTH;
     }
-    const char *agent = ns ? ns : jr_str(req, "agent_id", NULL);
+    /* Rejected rather than ignored on an unknown value: silently walking the
+     * wrong way is worse than an error. `in`/`both` need the reverse index, and
+     * qe_traverse_ex reports NOT_READY when --no-edge-index disabled it. */
+    const char *dir = jr_str(req, "direction", "out");
+    TraverseDirection tdir;
+    if (strcmp(dir, "out") == 0) {
+        tdir = TRAVERSE_OUT;
+    } else if (strcmp(dir, "in") == 0) {
+        tdir = TRAVERSE_IN;
+    } else if (strcmp(dir, "both") == 0) {
+        tdir = TRAVERSE_BOTH;
+    } else {
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
+    const char **kinds = NULL;
+    size_t kn = 0;
+    if (jr_str_array(req, "kinds", &kinds, &kn, MAX_TRAVERSE_KINDS) != 0) {
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
+    /* jr_str_array skips non-string elements and treats a non-array as absent,
+     * both of which land on kn == 0 — which every filter downstream reads as
+     * "follow every kind". A caller that asked to narrow would silently get the
+     * widest possible walk, which is the same failure `direction` is strict
+     * about just above. So require the array to be an array and to have parsed
+     * whole. */
+    const cJSON *karr = cJSON_GetObjectItemCaseSensitive(req, "kinds");
+    if (karr && !cJSON_IsNull(karr) &&
+        (!cJSON_IsArray(karr) || (size_t)cJSON_GetArraySize(karr) != kn)) {
+        free(kinds);
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
+
+    TraverseParams p;
+    memset(&p, 0, sizeof(p));
+    p.start_id = id;
+    p.depth = (int)depth;
+    p.agent_filter = ns ? ns : jr_str(req, "agent_id", NULL);
+    p.direction = tdir;
+    p.kinds = kinds;
+    p.kind_count = kn;
+
     MemoryRecord *recs = NULL;
+    TraverseHop *hops = NULL;
     size_t n = 0;
-    aegis_status_t st = qe_traverse(db, id, (int)depth, agent, &recs, &n);
+    int capped = 0;
+    aegis_status_t st = qe_traverse_ex(db, &p, &recs, &hops, &n, &capped);
+    free(kinds);
     if (st != AEGIS_OK) {
         return json_error_status(st);
     }
@@ -1156,11 +1239,22 @@ static cJSON *handle_traverse(AegisDB *db, const cJSON *req,
     cJSON *o = json_ok();
     cJSON *arr = cJSON_AddArrayToObject(o, "records");
     for (size_t i = 0; i < n; i++) {
-        cJSON_AddItemToArray(arr, json_record(&recs[i], emb));
+        cJSON *jr = json_record(&recs[i], emb);
+        if (hops) {
+            cJSON_AddItemToObject(jr, "traversal", traversal_json(&hops[i]));
+        }
+        cJSON_AddItemToArray(arr, jr);
         record_free(&recs[i]);
     }
     free(recs);
+    traverse_hops_free(hops, n);
     cJSON_AddNumberToObject(o, "total", (double)n);
+    /* Same signal `count` uses: the walk hit its node ceiling, so `records` is a
+     * prefix of the reachable set rather than all of it. Reported only when it
+     * happens, so a normal response is unchanged. */
+    if (capped) {
+        cJSON_AddBoolToObject(o, "capped", 1);
+    }
     return o;
 }
 

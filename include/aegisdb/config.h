@@ -97,7 +97,13 @@ typedef struct {
      * turns it off, which trades keyword search for the index RAM a text index
      * over every payload costs. Disabled, a `query` returns NOT_READY. */
     int lexical_index;
-    /* Soft cap on total in-RAM index bytes (hash+time+tag+lexical+semantic).
+    /* Build the reverse relationship index (ROADMAP 5.1), which is what lets a
+     * `traverse` walk edges backwards. On by default; --no-edge-index turns it
+     * off, trading reverse traversal for the RAM an incoming-edge map costs.
+     * Disabled, a reverse `traverse` returns NOT_READY and the forward walk is
+     * unaffected (the record is its own forward adjacency list). */
+    int edge_index;
+    /* Soft cap on total in-RAM index bytes (hash+time+tag+lexical+edge+semantic).
      * Inserts are
      * refused with MEMORY_LIMIT once the sampled index size reaches this, so a
      * growing dataset backpressures instead of getting OOM-killed. Sampled

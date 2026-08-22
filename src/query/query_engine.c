@@ -14,6 +14,7 @@
 #include <time.h>
 
 #include "aegisdb/compaction.h"
+#include "aegisdb/hash_mix.h"
 #include "aegisdb/json_request.h"
 #include "aegisdb/json_response.h"
 #include "aegisdb/logging.h"
@@ -306,6 +307,15 @@ aegis_status_t qe_insert(AegisDB *db, const MemoryRecord *in,
             tag_index_add(db->tags, rec->tags[i], rec->id);
         }
         lexical_index_add(db->lex, rec->id, rec->data, rec->data_len);
+        /* An `insert` carries no relationships today — they arrive only via
+         * `relate` — so this indexes nothing. It is here so the insert path
+         * stays uniform with db_replica_apply, which *does* receive records
+         * with edges, rather than encoding "inserts have no edges" as an
+         * invariant a future promote/batch path could quietly break. */
+        for (size_t i = 0; i < rec->rel_count; i++) {
+            edge_index_add(db->edges, rec->id, rec->relationships[i].to_id,
+                           rec->relationships[i].kind);
+        }
         usage_index_track(db->usage, rec->id);
         if (rec->embedding_dim && rec->vec_count) {
             semantic_index_add(db->sem, rec->id, rec->embedding, rec->vec_count,
@@ -438,6 +448,9 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
             tag_index_add(db->tags, cur.tags[i], cur.id);
         }
     }
+    /* No edge-index work here on purpose: an update patch reaches only tags and
+     * the payload, never `relationships` (those move through relate/delete), so
+     * the incoming-edge map is unaffected by a semantic update. */
     if (st == AEGIS_OK && patch->has_data) {
         /* Same discipline for the payload text: unindex the version that just
          * stopped being current, then index the one that replaced it. */
@@ -487,6 +500,19 @@ aegis_status_t qe_delete(AegisDB *db, uint64_t id, const char *ns) {
         tag_index_remove(db->tags, cur.tags[i], cur.id);
     }
     lexical_index_remove(db->lex, cur.id, cur.data, cur.data_len);
+    /* Outgoing: the record in hand lists its own edges. */
+    for (size_t i = 0; i < cur.rel_count; i++) {
+        edge_index_remove(db->edges, cur.id, cur.relationships[i].to_id,
+                          cur.relationships[i].kind);
+    }
+    /* Incoming: O(indegree) precisely *because* this index exists — without it
+     * finding who points here would be a corpus scan. The peers' records still
+     * list the tombstoned id and are deliberately not rewritten (a tombstone
+     * never touches other records); a forward walk already skips a target whose
+     * hash entry is absent or deleted. So the invariant is: the edge index never
+     * reports an edge whose endpoint is not live, though a record's own
+     * relationships array may still name one. */
+    edge_index_remove_target(db->edges, cur.id);
     usage_index_untrack(db->usage, cur.id);
     if (cur.embedding_dim) {
         semantic_index_remove(db->sem, cur.id);
@@ -563,6 +589,13 @@ aegis_status_t qe_relate(AegisDB *db, uint64_t from_id, uint64_t to_id,
     if (from_id == to_id) {
         return AEGIS_ERR_INVALID_REQUEST;
     }
+    /* Bound the kind so the reverse index can always intern it. Beyond this the
+     * edge would still be indexed, but with its label unknown, which turns a
+     * filtered reverse walk into a candidate set — a silent loss of precision
+     * that no caller asked for. Rejecting is the honest answer. */
+    if (kind && strlen(kind) > MAX_REL_KIND_LEN) {
+        return AEGIS_ERR_INVALID_REQUEST;
+    }
 
     pthread_rwlock_wrlock(&db->index_lock);
     MemoryRecord from;
@@ -616,6 +649,14 @@ aegis_status_t qe_relate(AegisDB *db, uint64_t from_id, uint64_t to_id,
     }
     from.updated = db_now_ms();
     st = append_and_hash(db, &from); /* relationship metadata, content intact */
+    if (st == AEGIS_OK) {
+        /* The primary maintenance site for the reverse index: `relate` is the
+         * only operation that creates an edge. Indexed after the append commits,
+         * so a failed write leaves no phantom edge behind. Both endpoints were
+         * verified live above, which is what upholds the liveness invariant
+         * documented in qe_delete. */
+        edge_index_add(db->edges, from_id, to_id, kind);
+    }
     pthread_rwlock_unlock(&db->index_lock);
     if (st == AEGIS_OK && durably_flush(db) != 0) {
         st = AEGIS_ERR_INTERNAL; /* not durable: do not acknowledge the write */
@@ -624,31 +665,175 @@ aegis_status_t qe_relate(AegisDB *db, uint64_t from_id, uint64_t to_id,
     return st;
 }
 
+/* Does an edge of kind `kind` pass the filter? An empty filter follows
+ * everything (the pre-5.1 behaviour). A NULL edge kind passes only the empty
+ * filter: once a caller names the kinds it wants, an unkinded edge is not one
+ * of them. */
+static int kind_wanted(const char *const *kinds, size_t n, const char *kind) {
+    if (n == 0) {
+        return 1;
+    }
+    if (!kind) {
+        return 0;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (kinds[i] && strcmp(kinds[i], kind) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* One BFS frontier entry: an id to visit, plus the edge that reached it.
+ *
+ * `via_kind` is **owned**, copied at enqueue time. It would be tempting to
+ * borrow it — a forward edge's kind lives in the parent record, which the walk
+ * holds in `acc` for the duration — but a *reverse* edge's kind is an interned
+ * string in the shared EdgeIndex, and the frontier outlives the index_lock
+ * acquisition that produced it. A replica re-bootstrapping in that window
+ * (follower_reset takes index_lock for write and frees the whole index) would
+ * leave the pointer dangling. Uniform ownership is the only version of this
+ * whose correctness does not depend on which branch created the entry. */
+typedef struct {
+    uint64_t id;
+    uint64_t via_id;
+    char *via_kind;
+    int incoming; /* 1 if this id was reached by walking an edge backwards */
+    int kind_uncertain; /* reverse only: the edge's kind could not be interned,
+                         * so via_kind is unknown rather than absent */
+} TravEdge;
+
+/* One accumulated hit: the record plus how the walk reached it. */
+typedef struct {
+    MemoryRecord rec;
+    int depth;
+    uint64_t via_id;
+    char *via_kind; /* owned */
+    int via_incoming;
+    int via_kind_uncertain;
+} TravNode;
+
+/* Release a frontier and every label it still owns. */
+static void travedges_free(TravEdge *e, size_t n) {
+    if (!e) {
+        return;
+    }
+    for (size_t i = 0; i < n; i++) {
+        free(e[i].via_kind);
+    }
+    free(e);
+}
+
+/* Enqueue one neighbour, copying the reaching edge's kind. A failed copy costs
+ * the label, not the hop. Returns 0, or -1 if the frontier could not grow. */
+static int travedge_push(TravEdge **next, size_t *n, size_t *cap, uint64_t id,
+                         uint64_t via_id, const char *via_kind, int incoming,
+                         int kind_uncertain) {
+    if (*n == *cap) {
+        size_t nc = *cap ? *cap * 2 : 8;
+        TravEdge *tmp = realloc(*next, nc * sizeof(**next));
+        if (!tmp) {
+            return -1;
+        }
+        *next = tmp;
+        *cap = nc;
+    }
+    (*next)[*n].id = id;
+    (*next)[*n].via_id = via_id;
+    (*next)[*n].via_kind = via_kind ? strdup(via_kind) : NULL;
+    (*next)[*n].incoming = incoming;
+    (*next)[*n].kind_uncertain = kind_uncertain;
+    (*n)++;
+    return 0;
+}
+
+/* Visited set for one traversal: open-addressed, linear probing, fixed at
+ * TRAVERSE_SEEN_SLOTS so it never grows (the node cap keeps its load factor at
+ * or under 0.5). Record ids start at 1, so 0 marks an empty slot.
+ *
+ * This replaced a linear scan of a growing array. That was O(frontier x seen)
+ * *while holding index_lock*, which only became a real hazard when reverse
+ * traversal exposed unbounded indegree: writers need the write lock, so a
+ * quadratic scan over a hub's sources starved every one of them. Returns 1 if
+ * `id` was newly inserted, 0 if it was already present. */
+static int seen_insert(uint64_t *tbl, uint64_t id) {
+    size_t mask = TRAVERSE_SEEN_SLOTS - 1;
+    size_t i = (size_t)mix64(id) & mask;
+    for (;;) {
+        if (tbl[i] == 0) {
+            tbl[i] = id;
+            return 1;
+        }
+        if (tbl[i] == id) {
+            return 0;
+        }
+        i = (i + 1) & mask;
+    }
+}
+
+void traverse_hops_free(TraverseHop *hops, size_t n) {
+    if (!hops) {
+        return;
+    }
+    for (size_t i = 0; i < n; i++) {
+        free(hops[i].via_kind);
+    }
+    free(hops);
+}
+
 aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
                            const char *agent_filter, MemoryRecord **out,
                            size_t *out_n) {
+    TraverseParams p;
+    memset(&p, 0, sizeof(p));
+    p.start_id = start_id;
+    p.depth = depth;
+    p.agent_filter = agent_filter;
+    p.direction = TRAVERSE_OUT;
+    return qe_traverse_ex(db, &p, out, NULL, out_n, NULL);
+}
+
+aegis_status_t qe_traverse_ex(AegisDB *db, const TraverseParams *p,
+                              MemoryRecord **out, TraverseHop **out_hops,
+                              size_t *out_n, int *out_capped) {
+    if (out_capped) {
+        *out_capped = 0;
+    }
     aegis_status_t st = require_phase(db, 4);
     if (st != AEGIS_OK) {
         return st;
     }
-    if (depth < 0) {
-        depth = 0;
+    int depth = p->depth < 0 ? 0 : p->depth;
+    const char *agent_filter = p->agent_filter;
+    int walk_out = p->direction != TRAVERSE_IN;
+    int walk_in = p->direction != TRAVERSE_OUT;
+    /* Walking backwards is the one direction that needs an index: a record
+     * lists the edges it points along, not the ones pointing at it. */
+    if (walk_in && !db->edges) {
+        return AEGIS_ERR_NOT_READY;
     }
     uint64_t now =
         db_now_ms(); /* for expiry, sampled once for the whole walk */
 
     /* BFS over relationship edges */
-    uint64_t *seen = NULL;
+    uint64_t *seen = calloc(TRAVERSE_SEEN_SLOTS, sizeof(uint64_t));
     size_t seen_n = 0;
-    size_t seen_cap = 0;
-    uint64_t *frontier = malloc(sizeof(uint64_t));
+    int capped = 0;
+    TravEdge *frontier = malloc(sizeof(TravEdge));
     size_t front_n = 0;
-    if (!frontier) {
+    if (!frontier || !seen) {
+        free(frontier);
+        free(seen);
         return AEGIS_ERR_INTERNAL;
     }
-    frontier[front_n++] = start_id;
+    frontier[front_n].id = p->start_id;
+    frontier[front_n].via_id = 0;
+    frontier[front_n].via_kind = NULL;
+    frontier[front_n].incoming = 0;
+    frontier[front_n].kind_uncertain = 0;
+    front_n++;
 
-    Cand *acc = NULL;
+    TravNode *acc = NULL;
     size_t acc_n = 0;
     size_t acc_cap = 0;
 
@@ -656,53 +841,65 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
      * (like the malloc(offs) guard below), rather than dereferencing a failed
      * realloc's NULL or leaking the old buffer it left untouched. */
     int oom = 0;
-    for (int level = 0; level <= depth && front_n > 0 && !oom; level++) {
+    for (int level = 0; level <= depth && front_n > 0 && !oom && !capped;
+         level++) {
         /* Resolve this level's not-yet-seen ids to log offsets under the index
          * lock, then read+decode them off it (disk I/O under log_lock only). */
         uint64_t *offs = malloc(front_n * sizeof(uint64_t));
-        if (!offs) {
+        /* Parallel to `offs`: the edge that reached each id, carried across the
+         * lock handoff so the read phase can attribute a decoded record without
+         * having to resolve it again. */
+        TravEdge *vias = malloc(front_n * sizeof(TravEdge));
+        if (!offs || !vias) {
+            free(offs);
+            free(vias);
             break; /* frontier freed after the loop; return what we have */
         }
         size_t off_n = 0;
 
         pthread_rwlock_rdlock(&db->index_lock);
         for (size_t i = 0; i < front_n; i++) {
-            uint64_t id = frontier[i];
-            int dup = 0;
-            for (size_t s = 0; s < seen_n; s++) {
-                if (seen[s] == id) {
-                    dup = 1;
-                    break;
-                }
+            uint64_t id = frontier[i].id;
+            /* Stop before exceeding the node cap rather than after: the result
+             * is a prefix of the graph, and the caller is told so. Remaining
+             * labels are released by the loop after this one. */
+            if (seen_n >= TRAVERSE_MAX_NODES) {
+                capped = 1;
+                break;
             }
-            if (dup) {
+            if (!seen_insert(seen, id)) {
+                free(frontier[i].via_kind);
+                frontier[i].via_kind = NULL;
                 continue;
             }
-            if (seen_n == seen_cap) {
-                size_t nc = seen_cap ? seen_cap * 2 : 8;
-                uint64_t *tmp = realloc(seen, nc * sizeof(uint64_t));
-                if (!tmp) {
-                    oom = 1;
-                    break;
-                }
-                seen = tmp;
-                seen_cap = nc;
-            }
-            seen[seen_n++] = id;
+            seen_n++;
             const HashEntry *e = hash_index_get(db->hash, id);
             if (!e) {
+                free(frontier[i].via_kind);
+                frontier[i].via_kind = NULL;
                 continue;
             }
+            vias[off_n] = frontier[i];   /* moves ownership of via_kind */
+            frontier[i].via_kind = NULL; /* ...so only `vias` owns it now */
             offs[off_n++] = e->offset;
         }
         pthread_rwlock_rdlock(&db->log_lock);
         pthread_rwlock_unlock(&db->index_lock);
+        /* Release whatever labels are still owned here. Every entry consumed
+         * above nulled its own pointer — freed or moved — so this is safe from
+         * index 0 no matter where the loop stopped. Keying it on the break index
+         * instead would be one off-by-one away from a double free, and the oom
+         * path has no test that would catch that. */
+        for (size_t i = 0; i < front_n; i++) {
+            free(frontier[i].via_kind);
+        }
         free(frontier);
         frontier = NULL;
 
-        uint64_t *next = NULL;
+        TravEdge *next = NULL;
         size_t next_n = 0;
         size_t next_cap = 0;
+        size_t level_start = acc_n; /* first hit accumulated at this level */
         for (size_t i = 0; i < off_n && !oom; i++) {
             uint8_t *buf = NULL;
             size_t len = 0;
@@ -725,7 +922,7 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
             /* collect */
             if (acc_n == acc_cap) {
                 size_t nc = acc_cap ? acc_cap * 2 : 8;
-                Cand *tmp = realloc(acc, nc * sizeof(Cand));
+                TravNode *tmp = realloc(acc, nc * sizeof(TravNode));
                 if (!tmp) {
                     record_free(&r);
                     oom = 1;
@@ -735,45 +932,106 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
                 acc_cap = nc;
             }
             acc[acc_n].rec = r; /* keep; do not free */
-            acc[acc_n].score = 0;
+            acc[acc_n].depth = level;
+            acc[acc_n].via_id = vias[i].via_id;
+            acc[acc_n].via_kind = vias[i].via_kind; /* move */
+            vias[i].via_kind = NULL;
+            acc[acc_n].via_incoming = vias[i].incoming;
+            acc[acc_n].via_kind_uncertain = vias[i].kind_uncertain;
             acc_n++;
-            /* enqueue neighbours */
-            for (size_t k = 0; k < r.rel_count; k++) {
-                if (next_n == next_cap) {
-                    size_t nc = next_cap ? next_cap * 2 : 8;
-                    uint64_t *tmp = realloc(next, nc * sizeof(uint64_t));
-                    if (!tmp) {
-                        oom = 1;
-                        break;
-                    }
-                    next = tmp;
-                    next_cap = nc;
+            /* Enqueue outgoing neighbours. `r` still aliases the record just
+             * moved into acc, so its relationship strings outlive this level. */
+            for (size_t k = 0; walk_out && k < r.rel_count; k++) {
+                if (!kind_wanted(p->kinds, p->kind_count,
+                                 r.relationships[k].kind)) {
+                    continue;
                 }
-                next[next_n++] = r.relationships[k].to_id;
+                if (travedge_push(&next, &next_n, &next_cap,
+                                  r.relationships[k].to_id, r.id,
+                                  r.relationships[k].kind, 0, 0) != 0) {
+                    oom = 1;
+                    break;
+                }
             }
         }
         pthread_rwlock_unlock(&db->log_lock);
+
+        /* Reverse expansion. Incoming edges live in the edge index, so they are
+         * gathered under index_lock — a separate phase from the forward
+         * expansion above, which reads them straight out of the record under
+         * log_lock. Both feed the same frontier. log_lock is dropped first
+         * because the lock order is index -> log; re-taking index while holding
+         * log would invert it. Only hits that survived this level's filters are
+         * expanded, matching the forward rule that a filtered node is skipped
+         * entirely, edges and all. */
+        if (walk_in && !oom) {
+            pthread_rwlock_rdlock(&db->index_lock);
+            for (size_t a = level_start; a < acc_n && !oom; a++) {
+                EdgeSource *srcs = NULL;
+                size_t sn = 0;
+                if (edge_index_sources(db->edges, acc[a].rec.id, p->kinds,
+                                       p->kind_count, &srcs, &sn) != 0) {
+                    oom = 1;
+                    break;
+                }
+                for (size_t j = 0; j < sn; j++) {
+                    if (travedge_push(&next, &next_n, &next_cap,
+                                      srcs[j].from_id, acc[a].rec.id,
+                                      srcs[j].kind, 1,
+                                      srcs[j].kind_unknown) != 0) {
+                        oom = 1;
+                        break;
+                    }
+                }
+                free(srcs);
+            }
+            pthread_rwlock_unlock(&db->index_lock);
+        }
+
         free(offs);
+        travedges_free(vias, off_n); /* frees only labels not moved into acc */
         frontier = next;
         front_n = next_n;
         (void)next_cap;
     }
-    free(frontier);
+    travedges_free(frontier, front_n);
     free(seen);
+    if (out_capped) {
+        *out_capped = capped;
+    }
 
     MemoryRecord *res = malloc((acc_n ? acc_n : 1) * sizeof(MemoryRecord));
-    if (!res) {
+    TraverseHop *hops = NULL;
+    if (out_hops) {
+        hops = malloc((acc_n ? acc_n : 1) * sizeof(TraverseHop));
+    }
+    if (!res || (out_hops && !hops)) {
+        free(res);
+        free(hops);
         for (size_t i = 0; i < acc_n; i++) {
             record_free(&acc[i].rec);
+            free(acc[i].via_kind);
         }
         free(acc);
         return AEGIS_ERR_INTERNAL;
     }
     for (size_t i = 0; i < acc_n; i++) {
         res[i] = acc[i].rec;
+        if (hops) {
+            hops[i].depth = acc[i].depth;
+            hops[i].via_id = acc[i].via_id;
+            hops[i].via_incoming = acc[i].via_incoming;
+            hops[i].via_kind_uncertain = acc[i].via_kind_uncertain;
+            hops[i].via_kind = acc[i].via_kind; /* move ownership */
+        } else {
+            free(acc[i].via_kind); /* attribution not wanted; drop the label */
+        }
     }
     free(acc);
     *out = res;
+    if (out_hops) {
+        *out_hops = hops;
+    }
     *out_n = acc_n;
     return AEGIS_OK;
 }

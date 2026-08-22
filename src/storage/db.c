@@ -73,7 +73,8 @@ uint64_t db_index_bytes(AegisDB *db) {
     uint64_t total =
         (uint64_t)hash_index_bytes(db->hash) + time_index_bytes(db->time) +
         tag_index_bytes(db->tags) + lexical_index_bytes(db->lex) +
-        usage_index_bytes(db->usage) + semantic_index_bytes(db->sem);
+        edge_index_bytes(db->edges) + usage_index_bytes(db->usage) +
+        semantic_index_bytes(db->sem);
     pthread_rwlock_unlock(&db->index_lock);
     return total;
 }
@@ -238,6 +239,12 @@ int db_replica_apply(AegisDB *db, uint64_t offset, const uint8_t *payload,
                     tag_index_remove(db->tags, p.tags[i], p.id);
                 }
                 lexical_index_remove(db->lex, p.id, p.data, p.data_len);
+                /* Only this record's *outgoing* edges: superseding a version
+                 * does not change who points at it. */
+                for (size_t i = 0; i < p.rel_count; i++) {
+                    edge_index_remove(db->edges, p.id, p.relationships[i].to_id,
+                                      p.relationships[i].kind);
+                }
                 usage_index_untrack(db->usage, p.id);
                 if (p.embedding_dim && p.vec_count) {
                     semantic_index_remove(db->sem, p.id);
@@ -259,12 +266,35 @@ int db_replica_apply(AegisDB *db, uint64_t offset, const uint8_t *payload,
             tag_index_add(db->tags, r.tags[i], r.id);
         }
         lexical_index_add(db->lex, r.id, r.data, r.data_len);
+        /* Only edges whose *target* is still live, exactly as recovery.c does
+         * when it rebuilds. A record's relationships array outlives its targets:
+         * a tombstone never rewrites its peers, so an applied record can still
+         * name an id this replica has already buried. Re-adding those would
+         * resurrect edges the primary dropped, and the divergence is permanent
+         * — the replica would also then disagree with its own recovery rebuild.
+         * Replication applies in log order, so the target's tombstone has
+         * already landed by the time we ask. */
+        for (size_t i = 0; i < r.rel_count; i++) {
+            const HashEntry *te =
+                hash_index_get(db->hash, r.relationships[i].to_id);
+            if (te && !te->deleted) {
+                edge_index_add(db->edges, r.id, r.relationships[i].to_id,
+                               r.relationships[i].kind);
+            }
+        }
         usage_index_track(db->usage, r.id);
         if (r.embedding_dim == db->config.embedding_dimensions && r.embedding &&
             r.vec_count) {
             semantic_index_add(db->sem, r.id, r.embedding, r.vec_count,
                                r.embedding_dim);
         }
+    }
+
+    else {
+        /* A tombstone arriving: drop the *incoming* edges too, exactly as
+         * qe_delete does on the primary. Without this a replica keeps reporting
+         * sources for a record the primary has already forgotten. */
+        edge_index_remove_target(db->edges, r.id);
     }
 
     pthread_mutex_lock(&db->id_lock);
@@ -285,12 +315,15 @@ int db_reset_replica(AegisDB *db) {
     TagIndex *ntag = tag_index_create();
     /* Only replace the lexical index if this server builds one at all. */
     LexicalIndex *nlex = db->lex ? lexical_index_create() : NULL;
+    EdgeIndex *nedges = db->edges ? edge_index_create() : NULL;
     UsageIndex *nusage = db->usage ? usage_index_create() : NULL;
-    if (!nh || !nt || !ntag || (db->lex && !nlex) || (db->usage && !nusage)) {
+    if (!nh || !nt || !ntag || (db->lex && !nlex) || (db->edges && !nedges) ||
+        (db->usage && !nusage)) {
         hash_index_free(nh);
         time_index_free(nt);
         tag_index_free(ntag);
         lexical_index_free(nlex);
+        edge_index_free(nedges);
         usage_index_free(nusage);
         return -1;
     }
@@ -303,6 +336,10 @@ int db_reset_replica(AegisDB *db) {
     if (db->lex) {
         lexical_index_free(db->lex);
         db->lex = nlex;
+    }
+    if (db->edges) {
+        edge_index_free(db->edges);
+        db->edges = nedges;
     }
     if (db->usage) {
         usage_index_free(db->usage);
@@ -655,6 +692,9 @@ int db_open(AegisDB *db, const Config *cfg) {
     /* Opt-out (--no-lexical-index) leaves db->lex NULL; every call site treats
      * NULL as "no lexical index", and `search` with a query reports NOT_READY. */
     db->lex = cfg->lexical_index ? lexical_index_create() : NULL;
+    /* Opt-out (--no-edge-index) leaves db->edges NULL; every call site treats
+     * NULL as "no edge index", and a reverse `traverse` reports NOT_READY. */
+    db->edges = cfg->edge_index ? edge_index_create() : NULL;
     db->usage = cfg->usage_feedback ? usage_index_create() : NULL;
     db->sem = semantic_index_create(cfg->embedding_dimensions,
                                     cfg->ann_threshold, cfg->ann_ef_search,
@@ -664,6 +704,7 @@ int db_open(AegisDB *db, const Config *cfg) {
     db->tenants = tenant_table_create();
     if (!db->hash || !db->time || !db->tags || !db->sem || !db->working ||
         !db->tenants || (cfg->lexical_index && !db->lex) ||
+        (cfg->edge_index && !db->edges) ||
         (cfg->usage_feedback && !db->usage)) {
         LOG_ERROR("index allocation failed");
         goto fail_indexes;
@@ -698,6 +739,7 @@ fail_indexes:
     time_index_free(db->time);
     tag_index_free(db->tags);
     lexical_index_free(db->lex);
+    edge_index_free(db->edges);
     usage_index_free(db->usage);
     semantic_index_free(db->sem);
     working_store_free(db->working);
@@ -722,6 +764,7 @@ void db_close(AegisDB *db) {
     time_index_free(db->time);
     tag_index_free(db->tags);
     lexical_index_free(db->lex);
+    edge_index_free(db->edges);
     usage_index_free(db->usage);
     semantic_index_free(db->sem);
     working_store_free(db->working);
