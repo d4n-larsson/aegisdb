@@ -109,41 +109,78 @@ Two pieces, mirroring `tag_index`'s bucket-chain-plus-sorted-postings shape.
 
 **Kind interning.** A string → `uint16_t` table. Edge kinds are a low-cardinality
 vocabulary by nature (`supersedes`, `derived_from`, …), so interning turns every
-per-edge kind comparison into an integer compare and keeps the reverse postings
-fixed-width. A client can nonetheless send a unique `kind` per edge, so the
-table is capped (`EDGE_MAX_KINDS`); past the cap a kind interns to a reserved
-`KIND_UNINDEXED` and reverse queries for it fall back to comparing the string on
-the decoded record — correct, merely unaccelerated. Bounded RAM without
-rejecting a write.
+per-edge kind comparison into an integer compare and keeps the postings
+fixed-width. A client can nonetheless send a unique `kind` per edge, so the table
+is capped (`EDGE_MAX_KINDS`, 4096) and so is a single kind's length
+(`EDGE_MAX_KIND_LEN`, 64). Past either limit the edge is **still indexed**; only
+its label is lost, recorded as `kind_unknown`, and such an edge is returned by
+*every* kind filter as a candidate for the caller to confirm against the record.
+Completeness before precision: dropping the edge would make "what depends on
+this?" answer wrongly, whereas an imprecise filter that says so is merely
+unaccelerated. An over-long kind is likewise flagged rather than truncated —
+truncating would silently collapse two distinct kinds into one and answer the
+filter *wrongly*. Interned strings are allocated once and never moved or freed
+while the index lives, so a returned `kind` pointer stays valid past the lock it
+was read under — which is what lets a traversal carry it across the
+`index_lock` → `log_lock` handoff.
 
-**Reverse adjacency.** `to_id` → a sorted array of `(from_id, kind_id)` packed
-12 bytes each, in an open-chained bucket table keyed by `to_id`. Sorted so
-insertion is dedup-checked (matching `relate`'s existing idempotency) and
-removal is a binary search rather than a scan.
+**Reverse adjacency.** `to_id` → a sorted array of `(from_id, kind_id)`
+postings, in an open-addressed table keyed by `to_id` (the lexical index's
+doc-table shape: power-of-two, linear probing, grown at a 3/4 load factor, with
+tombstones dropped on rehash). String-keyed structures get `tag_index`'s chained
+buckets; this one is id-keyed and scales with the corpus, so it grows. Postings
+are sorted so insertion is dedup-checked (matching `relate`'s existing
+idempotency) and removal is a binary search rather than a scan.
 
-Sizing: ~12 bytes per edge plus array slack and a node per distinct target —
-call it 16–24 bytes per edge. A corpus with 1M edges costs ~16–24 MB. Reported
-in `stats` and counted toward `--max-index-bytes` like every other index (§9),
-so it is watchable rather than a surprise.
+**Sizing — measured, not estimated.** A posting is 16 bytes (8-byte `from_id`,
+interned kind, alignment). But the per-edge figure is dominated by the *target*
+table, not the postings, so it depends entirely on fan-in:
+
+| Shape | Bytes/edge |
+|---|---|
+| 1 source per target (a `supersedes` chain) | ~121 |
+| 2 sources per target | ~69 |
+| 4 sources per target | ~42 |
+| 1000 sources per target (a hub) | ~17 |
+
+So 1M edges of the sparsest, most provenance-like shape costs ~120 MB, and the
+same edges concentrated on fewer targets cost a fraction of that. That is a
+larger number than a naive per-posting estimate suggests, and the reason is
+worth stating: a target slot is ~40 bytes and the table runs at a 3/4 load
+factor, so a target holding *one* incoming edge pays ~107 bytes of table for 16
+bytes of payload. Reported in `stats` and counted toward `--max-index-bytes`
+like every other index (§9), so it is watchable rather than a surprise.
 
 ```c
 typedef struct EdgeIndex EdgeIndex;
 
+/* One source pointing at the queried record. `kind` is an interned string, or
+ * NULL for an edge stored without one; `kind_unknown` says the label could not
+ * be interned, so `kind` is unknown rather than absent. */
+typedef struct {
+    uint64_t from_id;
+    const char *kind;
+    int kind_unknown;
+} EdgeSource;
+
 EdgeIndex *edge_index_create(void);
 void edge_index_free(EdgeIndex *e);
 
-/* Both tolerate a NULL index as "no edge index configured", so write-path
- * call sites stay unguarded — the lexical_index convention. */
-int  edge_index_add(EdgeIndex *e, uint64_t from_id, uint64_t to_id, const char *kind);
-void edge_index_remove(EdgeIndex *e, uint64_t from_id, uint64_t to_id, const char *kind);
+/* All of these tolerate a NULL index as "no edge index configured", so
+ * write-path call sites stay unguarded — the lexical_index convention. */
+int edge_index_add(EdgeIndex *e, uint64_t from_id, uint64_t to_id,
+                   const char *kind);
+void edge_index_remove(EdgeIndex *e, uint64_t from_id, uint64_t to_id,
+                       const char *kind);
 /* Drop every edge with `id` as its *target*. O(indegree), no scan. */
 void edge_index_remove_target(EdgeIndex *e, uint64_t id);
 
-/* Sources pointing at `to_id`, optionally restricted to `kinds`. Allocates
- * *out_ids and *out_kinds (parallel, free with free()). Returns 0/-1. */
+/* Sources pointing at `to_id`, optionally restricted to `kinds`. Allocates *out
+ * (free with free()). Sorted by from_id ascending; the order among edges
+ * sharing a from_id is internal and not contractual. Returns 0/-1. */
 int edge_index_sources(const EdgeIndex *e, uint64_t to_id,
                        const char *const *kinds, size_t n_kinds,
-                       uint64_t **out_ids, const char ***out_kinds, size_t *out_n);
+                       EdgeSource **out, size_t *out_n);
 
 size_t edge_index_edges(const EdgeIndex *e);
 size_t edge_index_kinds(const EdgeIndex *e);
@@ -323,11 +360,13 @@ stops after PR 1, the tree is still better off.
 
 ## 12. Open questions
 
-- **`EDGE_MAX_KINDS` and the fallback.** Is the `KIND_UNINDEXED` path worth its
-  branch, or should a kind past the cap be rejected with `QUOTA_EXCEEDED`? The
-  fallback is friendlier and costs a comparison on a path that is already
-  reading records off disk; rejection is simpler and makes the cap visible to
-  whoever tripped it. Leaning fallback, weakly.
+- ~~**`EDGE_MAX_KINDS` and the fallback.**~~ **Decided (PR 2):** the fallback,
+  and for a firmer reason than the original "leaning weakly". The alternative —
+  refusing to index an edge whose kind will not intern — makes reverse results
+  *incomplete*, and an incomplete answer to "what depends on this?" is a
+  correctness bug, whereas an imprecise-but-labelled one is a caller-side
+  confirmation the caller was going to do anyway (it is already reading the
+  record). Same argument settles over-long kinds: flag, never truncate.
 - **Dangling forward edges (§5.4).** Compaction already rewrites live records,
   so it *could* prune edges whose target is gone — cheap, and it would make the
   record agree with the index. But compaction currently only relocates bytes and
@@ -339,6 +378,15 @@ stops after PR 1, the tree is still better off.
   Deliberately deferred: it is the first step toward 5.2's `pattern`, and
   bundling it here would make 5.1 the thin end of a query language. Revisit when
   5.2 lands, not before.
+- **Shrinking the sparse case.** The table above says the cost is per *target*,
+  not per edge, and that a single-incoming-edge target is the expensive shape —
+  which is also the common one. Two levers, neither taken in PR 2: store the
+  first posting *inline* in the target slot (removing both the separate
+  allocation and its slack for 1-in targets, at the price of a branch on every
+  posting access), or narrow the slot's `n`/`cap` from `size_t` to `uint32_t`
+  (40 → 32 bytes, ~20% off the dominant term, at the price of a bound that is
+  unreachable in practice but silent if ever reached). Worth doing only if
+  `edge_bytes` in a real deployment says so — which §9 makes visible.
 - **When to move edges out of the record.** In-record storage caps a node at
   `MAX_RELATIONSHIPS` and rewrites the whole record per `relate`. 5.1 does not
   need this changed and should not change it. 5.2's typed facts will force the
