@@ -328,7 +328,7 @@ performs is one nobody can regression-test. Note that today the arrangement is
 (`judge_supersedes`, 2.1) doing work that a single-valued-predicate constraint
 does deterministically, at write time, for free.
 
-### 5.1 A queryable relationship graph *(foundational — do first)*
+### 5.1 A queryable relationship graph *(foundational — do first)* — *designed (`symbolic-layer-design.md`)*
 
 - **Why now:** `kind` is inert. `qe_traverse` enqueues every outgoing neighbour
   with no kind filter (`query_engine.c:741`) and there is no reverse adjacency,
