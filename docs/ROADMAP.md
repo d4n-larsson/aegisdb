@@ -362,6 +362,11 @@ does deterministically, at write time, for free.
   kinds, derived and never checkpointed, rebuilt by recovery, `--no-edge-index`
   opts out and makes a reverse walk `NOT_READY`). `stats` reports
   `edges`/`edge_kinds`/`edge_bytes`, counted toward `--max-index-bytes`.
+- **Bounded:** a traversal visits at most `TRAVERSE_MAX_NODES` (8192) records
+  and reports `capped` when it stops early. Reverse traversal is what made this
+  necessary: outdegree is capped per record at 4096, indegree at nothing, so a
+  backward walk from a heavily-referenced record was unbounded work under the
+  index read lock.
 - **Cost, measured:** dominated by the *target* table rather than the postings,
   so it tracks fan-in — ~121 B/edge at one source per target (the provenance
   shape), ~17 at a thousand. The design doc carries the table and two further

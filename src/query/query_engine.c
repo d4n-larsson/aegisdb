@@ -14,6 +14,7 @@
 #include <time.h>
 
 #include "aegisdb/compaction.h"
+#include "aegisdb/hash_mix.h"
 #include "aegisdb/json_request.h"
 #include "aegisdb/json_response.h"
 #include "aegisdb/logging.h"
@@ -746,6 +747,30 @@ static int travedge_push(TravEdge **next, size_t *n, size_t *cap, uint64_t id,
     return 0;
 }
 
+/* Visited set for one traversal: open-addressed, linear probing, fixed at
+ * TRAVERSE_SEEN_SLOTS so it never grows (the node cap keeps its load factor at
+ * or under 0.5). Record ids start at 1, so 0 marks an empty slot.
+ *
+ * This replaced a linear scan of a growing array. That was O(frontier x seen)
+ * *while holding index_lock*, which only became a real hazard when reverse
+ * traversal exposed unbounded indegree: writers need the write lock, so a
+ * quadratic scan over a hub's sources starved every one of them. Returns 1 if
+ * `id` was newly inserted, 0 if it was already present. */
+static int seen_insert(uint64_t *tbl, uint64_t id) {
+    size_t mask = TRAVERSE_SEEN_SLOTS - 1;
+    size_t i = (size_t)mix64(id) & mask;
+    for (;;) {
+        if (tbl[i] == 0) {
+            tbl[i] = id;
+            return 1;
+        }
+        if (tbl[i] == id) {
+            return 0;
+        }
+        i = (i + 1) & mask;
+    }
+}
+
 void traverse_hops_free(TraverseHop *hops, size_t n) {
     if (!hops) {
         return;
@@ -765,12 +790,15 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
     p.depth = depth;
     p.agent_filter = agent_filter;
     p.direction = TRAVERSE_OUT;
-    return qe_traverse_ex(db, &p, out, NULL, out_n);
+    return qe_traverse_ex(db, &p, out, NULL, out_n, NULL);
 }
 
 aegis_status_t qe_traverse_ex(AegisDB *db, const TraverseParams *p,
                               MemoryRecord **out, TraverseHop **out_hops,
-                              size_t *out_n) {
+                              size_t *out_n, int *out_capped) {
+    if (out_capped) {
+        *out_capped = 0;
+    }
     aegis_status_t st = require_phase(db, 4);
     if (st != AEGIS_OK) {
         return st;
@@ -788,12 +816,14 @@ aegis_status_t qe_traverse_ex(AegisDB *db, const TraverseParams *p,
         db_now_ms(); /* for expiry, sampled once for the whole walk */
 
     /* BFS over relationship edges */
-    uint64_t *seen = NULL;
+    uint64_t *seen = calloc(TRAVERSE_SEEN_SLOTS, sizeof(uint64_t));
     size_t seen_n = 0;
-    size_t seen_cap = 0;
+    int capped = 0;
     TravEdge *frontier = malloc(sizeof(TravEdge));
     size_t front_n = 0;
-    if (!frontier) {
+    if (!frontier || !seen) {
+        free(frontier);
+        free(seen);
         return AEGIS_ERR_INTERNAL;
     }
     frontier[front_n].id = p->start_id;
@@ -811,7 +841,8 @@ aegis_status_t qe_traverse_ex(AegisDB *db, const TraverseParams *p,
      * (like the malloc(offs) guard below), rather than dereferencing a failed
      * realloc's NULL or leaking the old buffer it left untouched. */
     int oom = 0;
-    for (int level = 0; level <= depth && front_n > 0 && !oom; level++) {
+    for (int level = 0; level <= depth && front_n > 0 && !oom && !capped;
+         level++) {
         /* Resolve this level's not-yet-seen ids to log offsets under the index
          * lock, then read+decode them off it (disk I/O under log_lock only). */
         uint64_t *offs = malloc(front_n * sizeof(uint64_t));
@@ -829,29 +860,19 @@ aegis_status_t qe_traverse_ex(AegisDB *db, const TraverseParams *p,
         pthread_rwlock_rdlock(&db->index_lock);
         for (size_t i = 0; i < front_n; i++) {
             uint64_t id = frontier[i].id;
-            int dup = 0;
-            for (size_t s = 0; s < seen_n; s++) {
-                if (seen[s] == id) {
-                    dup = 1;
-                    break;
-                }
+            /* Stop before exceeding the node cap rather than after: the result
+             * is a prefix of the graph, and the caller is told so. Remaining
+             * labels are released by the loop after this one. */
+            if (seen_n >= TRAVERSE_MAX_NODES) {
+                capped = 1;
+                break;
             }
-            if (dup) {
+            if (!seen_insert(seen, id)) {
                 free(frontier[i].via_kind);
                 frontier[i].via_kind = NULL;
                 continue;
             }
-            if (seen_n == seen_cap) {
-                size_t nc = seen_cap ? seen_cap * 2 : 8;
-                uint64_t *tmp = realloc(seen, nc * sizeof(uint64_t));
-                if (!tmp) {
-                    oom = 1;
-                    break;
-                }
-                seen = tmp;
-                seen_cap = nc;
-            }
-            seen[seen_n++] = id;
+            seen_n++;
             const HashEntry *e = hash_index_get(db->hash, id);
             if (!e) {
                 free(frontier[i].via_kind);
@@ -975,6 +996,9 @@ aegis_status_t qe_traverse_ex(AegisDB *db, const TraverseParams *p,
     }
     travedges_free(frontier, front_n);
     free(seen);
+    if (out_capped) {
+        *out_capped = capped;
+    }
 
     MemoryRecord *res = malloc((acc_n ? acc_n : 1) * sizeof(MemoryRecord));
     TraverseHop *hops = NULL;

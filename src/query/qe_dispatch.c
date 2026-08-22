@@ -1229,7 +1229,8 @@ static cJSON *handle_traverse(AegisDB *db, const cJSON *req,
     MemoryRecord *recs = NULL;
     TraverseHop *hops = NULL;
     size_t n = 0;
-    aegis_status_t st = qe_traverse_ex(db, &p, &recs, &hops, &n);
+    int capped = 0;
+    aegis_status_t st = qe_traverse_ex(db, &p, &recs, &hops, &n, &capped);
     free(kinds);
     if (st != AEGIS_OK) {
         return json_error_status(st);
@@ -1248,6 +1249,12 @@ static cJSON *handle_traverse(AegisDB *db, const cJSON *req,
     free(recs);
     traverse_hops_free(hops, n);
     cJSON_AddNumberToObject(o, "total", (double)n);
+    /* Same signal `count` uses: the walk hit its node ceiling, so `records` is a
+     * prefix of the reachable set rather than all of it. Reported only when it
+     * happens, so a normal response is unchanged. */
+    if (capped) {
+        cJSON_AddBoolToObject(o, "capped", 1);
+    }
     return o;
 }
 

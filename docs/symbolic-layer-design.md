@@ -317,6 +317,17 @@ re-taking `index_lock`: the order is index → log, so holding log while acquiri
 index would invert it. The cost is one extra read-lock acquisition per level,
 against a depth capped at 64.
 
+**A reverse walk needs a work ceiling that a forward walk did not.** Outdegree is
+capped per record by `MAX_RELATIONSHIPS` (4096), so a forward hop is inherently
+bounded. Indegree is capped by nothing — any number of records may point at one —
+so reverse traversal introduced the first genuinely unbounded expansion, and it
+expands while `index_lock` is held for read, against writers that need it
+exclusively. `TRAVERSE_MAX_NODES` (8192) bounds the visited set and the response
+reports `capped`, the same signal a truncated `count` uses. The visited set also
+became an open-addressed table rather than the original linear scan: at the
+ceiling that scan was ~17ms of quadratic comparison under the read lock, which is
+a long time to hold off every write on the server.
+
 **Frontier labels must be owned, not borrowed.** The forward path could borrow an
 edge's `kind` from the parent record — the walk holds that record in `acc` for
 the duration — and the first implementation did. A *reverse* edge's kind is an

@@ -23,6 +23,12 @@
 #define MAX_OFFSET                                                             \
     100000 /* clamp pagination offset to bound ranking work/allocs */
 #define MAX_VECS_PER_RECORD 64 /* cap embeddings per record (#85) */
+/* TRAVERSE_MAX_NODES is public (query_engine.h): it bounds what a caller gets
+ * back, so it is part of the contract rather than an implementation detail. */
+#define TRAVERSE_SEEN_SLOTS                                                    \
+    16384 /* visited-set slots: a power of two at twice TRAVERSE_MAX_NODES, so
+           * the load factor stays at or under 0.5 and the table needs no growth
+           * path at all. */
 #define MAX_REL_KIND_LEN                                                       \
     64 /* max bytes in a relationship `kind` (ROADMAP 5.1). Matches
         * EDGE_MAX_KIND_LEN so every accepted kind is internable by the reverse

@@ -1004,6 +1004,63 @@ static void test_relate_and_traverse(void) {
     TEST_ASSERT_TRUE(saw_to);
 }
 
+/* Outdegree is capped per record by MAX_RELATIONSHIPS, but indegree is capped by
+ * nothing — so before TRAVERSE_MAX_NODES existed, a reverse walk from a
+ * heavily-referenced record was unbounded work performed while holding
+ * index_lock, starving every writer. The walk must now stop at the ceiling and
+ * say that it did, rather than run to the end of whatever it can reach. */
+static void test_traverse_reverse_node_cap(void) {
+    MemoryRecord ih = make_input(MEM_SEMANTIC, "hub");
+    MemoryRecord oh;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &ih, NULL, 0, &oh));
+    uint64_t hub = oh.id;
+    record_free(&oh);
+
+    /* Comfortably past the ceiling, so the cap is what stops the walk. */
+    const size_t SOURCES = TRAVERSE_MAX_NODES + 200;
+    for (size_t i = 0; i < SOURCES; i++) {
+        MemoryRecord in = make_input(MEM_SEMANTIC, "src");
+        MemoryRecord out;
+        TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_insert(&g_db, &in, NULL, 0, &out));
+        TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                              qe_relate(&g_db, out.id, hub, "mentions", NULL));
+        record_free(&out);
+    }
+
+    TraverseParams p;
+    memset(&p, 0, sizeof(p));
+    p.start_id = hub;
+    p.depth = 1;
+    p.direction = TRAVERSE_IN;
+
+    MemoryRecord *recs = NULL;
+    size_t n = 0;
+    int capped = -1;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_traverse_ex(&g_db, &p, &recs, NULL, &n, &capped));
+    TEST_ASSERT_EQUAL_INT(1, capped);
+    TEST_ASSERT_EQUAL_size_t((size_t)TRAVERSE_MAX_NODES, n);
+    /* Every returned record is distinct: the visited set still dedups at the
+     * ceiling, it does not just stop checking. */
+    for (size_t i = 0; i < n; i++) {
+        TEST_ASSERT_TRUE(recs[i].id != 0);
+        record_free(&recs[i]);
+    }
+    free(recs);
+
+    /* A walk that fits reports no cap, and out_capped may be omitted entirely
+     * (the qe_traverse wrapper passes NULL). */
+    p.start_id = hub;
+    p.depth = 0;
+    capped = -1;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_traverse_ex(&g_db, &p, &recs, NULL, &n, &capped));
+    TEST_ASSERT_EQUAL_INT(0, capped);
+    TEST_ASSERT_EQUAL_size_t(1, n);
+    record_free(&recs[0]);
+    free(recs);
+}
+
 /* A hub linked to more nodes than the traversal's initial buffer capacity (8)
  * forces the seen/acc/next arrays to grow. Guards the realloc growth paths in
  * qe_traverse (which were hardened to check for allocation failure). */
@@ -1168,6 +1225,7 @@ int main(void) {
     RUN_TEST(test_working_memory_promote);
     RUN_TEST(test_relate_and_traverse);
     RUN_TEST(test_traverse_wide_graph);
+    RUN_TEST(test_traverse_reverse_node_cap);
     RUN_TEST(test_relate_dedup_and_selfedge);
     RUN_TEST(test_agent_namespace_filter);
     RUN_TEST(test_ns_scoped_writes);

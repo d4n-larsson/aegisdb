@@ -206,6 +206,14 @@ aegis_status_t qe_relate(AegisDB *db, uint64_t from_id, uint64_t to_id,
 
 /* ----- traversal (ROADMAP 5.1) ------------------------------------------- */
 
+/* Max records one traversal may visit. Outdegree is capped per record by
+ * MAX_RELATIONSHIPS, but *indegree* is capped by nothing, so a reverse walk from
+ * a heavily-referenced record would otherwise be unbounded work performed while
+ * holding index_lock — starving writers, which need it exclusively. Set clear of
+ * MAX_RELATIONSHIPS + 1 so no single-hop forward walk, even of a record at its
+ * relationship limit, can be truncated. */
+#define TRAVERSE_MAX_NODES 8192
+
 /* Which way a traversal walks an edge. OUT is the zero value, so a zeroed
  * TraverseParams reproduces the pre-5.1 walk. */
 typedef enum {
@@ -270,9 +278,16 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
 /* Like qe_traverse, but takes the 5.1 edge filter and, when out_hops is
  * non-NULL, also allocates a parallel array of TraverseHop (one per returned
  * record, same order; free it with traverse_hops_free). Pass NULL for out_hops
- * to skip the attribution bookkeeping entirely. */
+ * to skip the attribution bookkeeping entirely.
+ *
+ * A walk visits at most TRAVERSE_MAX_NODES records. On hitting that ceiling it
+ * returns what it has and sets *out_capped (may be NULL) to 1 — the result is
+ * then a prefix of the graph, not the whole reachable set. Indegree is
+ * unbounded (unlike outdegree, which MAX_RELATIONSHIPS caps per record), so a
+ * reverse walk from a heavily-referenced record is exactly the case this
+ * bounds. */
 aegis_status_t qe_traverse_ex(AegisDB *db, const TraverseParams *p,
                               MemoryRecord **out, TraverseHop **out_hops,
-                              size_t *out_n);
+                              size_t *out_n, int *out_capped);
 
 #endif /* AEGISDB_QUERY_ENGINE_H */

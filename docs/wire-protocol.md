@@ -711,7 +711,16 @@ the records reached within `depth` hops.
 | `kinds` | string[] | No | Follow only edges of these kinds (union); up to 16. Omit to follow every kind, as before. Must be an array of strings — a malformed one is `INVALID_REQUEST` rather than a silent unfiltered walk |
 | `direction` | string | No | `out` (default) \| `in` \| `both`. `in`/`both` need the reverse edge index and return `NOT_READY` under `--no-edge-index`; any other value is `INVALID_REQUEST` |
 
-**Response**: Same shape as `search` — `{ "ok": true, "records": [ … ], "total": N }`.
+**Response**: Same shape as `search` — `{ "ok": true, "records": [ … ], "total": N }`
+— plus `"capped": true` when the walk hit its ceiling (see below).
+
+**Bounded work.** A traversal visits at most **8192** records; past that it
+returns what it reached and adds `"capped": true`, exactly as a truncated `count`
+does. The result is then a prefix of the reachable set, not all of it. The
+ceiling matters most in reverse: a record's *outdegree* is capped at 4096
+relationships, but its *indegree* is not capped at all, so a backward walk from
+a heavily-referenced record is the case this bounds. It is set clear of the
+outdegree limit, so no single forward hop can be truncated.
 
 **Edge-kind filter (`kinds`)**: a relationship's `kind` is set by `relate`, and
 until now a walk followed every edge regardless of it — so retrieving one
