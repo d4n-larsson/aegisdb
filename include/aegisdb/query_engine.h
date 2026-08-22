@@ -204,9 +204,51 @@ aegis_status_t qe_promote(AegisDB *db, const char *session_id,
 aegis_status_t qe_relate(AegisDB *db, uint64_t from_id, uint64_t to_id,
                          const char *kind, const char *ns);
 
+/* ----- traversal (ROADMAP 5.1) ------------------------------------------- */
+
+/* Which edges a traversal follows. A zeroed struct with only start_id/depth set
+ * reproduces the pre-5.1 walk exactly: every outgoing edge, whatever its kind. */
+typedef struct {
+    uint64_t start_id;
+    int depth;                /* max hops to follow; negative treated as 0 */
+    const char *agent_filter; /* NULL = no namespace restriction */
+    /* Follow only edges of these kinds; an empty filter follows every kind
+     * (the pre-5.1 behaviour). Strings are borrowed for the duration of the
+     * call. An edge carrying no kind at all matches only the empty filter:
+     * once a caller names the kinds it wants, an unkinded edge is not one of
+     * them. */
+    const char *const *kinds;
+    size_t kind_count;
+} TraverseParams;
+
+/* How the walk first reached one returned record; one entry parallel to each
+ * returned record, in the same order. This is what turns a result from an
+ * unordered bag whose shape has to be inferred into a legible path.
+ *
+ * BFS records *first* discovery, so `via_*` names the shortest path found, and
+ * a record reachable by several edges reports whichever reached it first. The
+ * start record reports depth 0 with via_id 0 and via_kind NULL. */
+typedef struct {
+    int depth;       /* hops from the start record; 0 is the start record */
+    uint64_t via_id; /* record the reaching edge came from; 0 at depth 0 */
+    char *via_kind;  /* owned copy of that edge's kind; NULL if unkinded */
+} TraverseHop;
+
+/* Free `n` hops as returned by qe_traverse_ex (each via_kind, then the array).
+ * Safe on NULL. */
+void traverse_hops_free(TraverseHop *hops, size_t n);
+
 /* Breadth-first relationship traversal from start_id up to `depth` hops. */
 aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
                            const char *agent_filter, MemoryRecord **out,
                            size_t *out_n);
+
+/* Like qe_traverse, but takes the 5.1 edge filter and, when out_hops is
+ * non-NULL, also allocates a parallel array of TraverseHop (one per returned
+ * record, same order; free it with traverse_hops_free). Pass NULL for out_hops
+ * to skip the attribution bookkeeping entirely. */
+aegis_status_t qe_traverse_ex(AegisDB *db, const TraverseParams *p,
+                              MemoryRecord **out, TraverseHop **out_hops,
+                              size_t *out_n);
 
 #endif /* AEGISDB_QUERY_ENGINE_H */

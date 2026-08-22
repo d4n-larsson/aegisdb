@@ -703,8 +703,47 @@ the records reached within `depth` hops.
 | `id` | integer | Yes | Starting record |
 | `depth` | integer | No | Max hops to follow; default `1` |
 | `agent_id` | string | No | Restrict the walk to one namespace |
+| `kinds` | string[] | No | Follow only edges of these kinds (union); up to 16. Omit to follow every kind, as before |
+| `direction` | string | No | `out` (default). Only the outgoing walk exists today; `in`/`both` are rejected with `INVALID_REQUEST` until the reverse index lands |
 
 **Response**: Same shape as `search` — `{ "ok": true, "records": [ … ], "total": N }`.
+
+**Edge-kind filter (`kinds`)**: a relationship's `kind` is set by `relate`, and
+until now a walk followed every edge regardless of it — so retrieving one
+relation type (a `supersedes` chain, a `derived_from` lineage) meant walking the
+whole neighbourhood and filtering client-side. `kinds` pushes that filter into
+the walk, which also bounds it: an excluded edge is never followed, so its
+subtree is never read.
+
+```json
+{ "operation": "traverse", "id": 42, "depth": 3, "kinds": ["supersedes"] }
+```
+
+An edge carrying **no** kind is followed only by an unfiltered walk. Once a
+caller names the kinds it wants, an unkinded edge is not one of them.
+
+**Per-hop attribution (`traversal`)**: every returned record carries a
+`traversal` object saying how the walk reached it, so a result reads as a path
+rather than a set whose shape has to be inferred:
+
+```json
+{
+  "id": 99,
+  "data": "…",
+  "traversal": { "depth": 2, "via_id": 42, "via_kind": "derived_from" }
+}
+```
+
+| Field | Notes |
+|-------|-------|
+| `depth` | Hops from the starting record; `0` is the starting record itself |
+| `via_id` | The record the reaching edge came from; absent at depth `0` |
+| `via_kind` | That edge's `kind`; absent at depth `0`, and absent for an unkinded edge |
+
+The walk is breadth-first and records **first** discovery, so `via_*` describes
+the shortest path found; a record reachable by several edges reports whichever
+reached it first. This is unconditional — there is no flag — because it is a
+handful of bytes next to a record that already carries its payload.
 
 ---
 

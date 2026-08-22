@@ -23,6 +23,10 @@
 #define MAX_OFFSET                                                             \
     100000 /* clamp pagination offset to bound ranking work/allocs */
 #define MAX_VECS_PER_RECORD 64 /* cap embeddings per record (#85) */
+#define MAX_TRAVERSE_KINDS                                                     \
+    16 /* max edge kinds one traverse may filter on (ROADMAP 5.1). The
+        * vocabulary is low-cardinality by nature; the cap bounds the
+        * per-edge comparison the filter does on every walked record. */
 #define MAX_TRAVERSE_DEPTH                                                     \
     64 /* clamp graph-traversal depth (bounds work + the int cast) */
 #define MIN_HALF_LIFE_MS                                                       \

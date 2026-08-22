@@ -1130,6 +1130,27 @@ static cJSON *handle_relate(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     return o;
 }
 
+/* Which edge reached this hop (ROADMAP 5.1). Emitted for every returned record
+ * so a walk reads as a path rather than a set whose shape must be inferred. The
+ * start record has no reaching edge, so it reports only its depth. */
+static cJSON *traversal_json(const TraverseHop *h) {
+    cJSON *o = cJSON_CreateObject();
+    if (!o) {
+        return NULL;
+    }
+    cJSON_AddNumberToObject(o, "depth", h->depth);
+    if (h->depth > 0) {
+        cJSON_AddNumberToObject(o, "via_id", (double)h->via_id);
+        /* Absent rather than null when the edge carries no kind: `relate`
+         * permits an unkinded edge, and an absent field says "no label" without
+         * inviting a client to match on the empty string. */
+        if (h->via_kind) {
+            cJSON_AddStringToObject(o, "via_kind", h->via_kind);
+        }
+    }
+    return o;
+}
+
 static cJSON *handle_traverse(AegisDB *db, const cJSON *req,
                               const AuthCtx *ctx) {
     const char *ns = ctx->ns;
@@ -1145,10 +1166,33 @@ static cJSON *handle_traverse(AegisDB *db, const cJSON *req,
     if (depth > MAX_TRAVERSE_DEPTH) {
         depth = MAX_TRAVERSE_DEPTH;
     }
-    const char *agent = ns ? ns : jr_str(req, "agent_id", NULL);
+    /* `direction` is accepted so a client can be explicit and forward-
+     * compatible, but only the outgoing walk exists: reversing one needs the
+     * edge index (ROADMAP 5.1 Half B) and arrives with it. Rejected rather than
+     * ignored — silently walking the wrong way is worse than an error. */
+    const char *dir = jr_str(req, "direction", "out");
+    if (strcmp(dir, "out") != 0) {
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
+    const char **kinds = NULL;
+    size_t kn = 0;
+    if (jr_str_array(req, "kinds", &kinds, &kn, MAX_TRAVERSE_KINDS) != 0) {
+        return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+    }
+
+    TraverseParams p;
+    memset(&p, 0, sizeof(p));
+    p.start_id = id;
+    p.depth = (int)depth;
+    p.agent_filter = ns ? ns : jr_str(req, "agent_id", NULL);
+    p.kinds = kinds;
+    p.kind_count = kn;
+
     MemoryRecord *recs = NULL;
+    TraverseHop *hops = NULL;
     size_t n = 0;
-    aegis_status_t st = qe_traverse(db, id, (int)depth, agent, &recs, &n);
+    aegis_status_t st = qe_traverse_ex(db, &p, &recs, &hops, &n);
+    free(kinds);
     if (st != AEGIS_OK) {
         return json_error_status(st);
     }
@@ -1156,10 +1200,15 @@ static cJSON *handle_traverse(AegisDB *db, const cJSON *req,
     cJSON *o = json_ok();
     cJSON *arr = cJSON_AddArrayToObject(o, "records");
     for (size_t i = 0; i < n; i++) {
-        cJSON_AddItemToArray(arr, json_record(&recs[i], emb));
+        cJSON *jr = json_record(&recs[i], emb);
+        if (hops) {
+            cJSON_AddItemToObject(jr, "traversal", traversal_json(&hops[i]));
+        }
+        cJSON_AddItemToArray(arr, jr);
         record_free(&recs[i]);
     }
     free(recs);
+    traverse_hops_free(hops, n);
     cJSON_AddNumberToObject(o, "total", (double)n);
     return o;
 }

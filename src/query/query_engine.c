@@ -624,16 +624,73 @@ aegis_status_t qe_relate(AegisDB *db, uint64_t from_id, uint64_t to_id,
     return st;
 }
 
+/* Does an edge of kind `kind` pass the filter? An empty filter follows
+ * everything (the pre-5.1 behaviour). A NULL edge kind passes only the empty
+ * filter: once a caller names the kinds it wants, an unkinded edge is not one
+ * of them. */
+static int kind_wanted(const char *const *kinds, size_t n, const char *kind) {
+    if (n == 0) {
+        return 1;
+    }
+    if (!kind) {
+        return 0;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (kinds[i] && strcmp(kinds[i], kind) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* One BFS frontier entry: an id to visit, plus the edge that reached it.
+ * `via_kind` is *borrowed* from the parent record's relationships array. That
+ * record is moved into `acc` (never freed mid-walk), so the pointer stays valid
+ * until it is copied at accumulation time. */
+typedef struct {
+    uint64_t id;
+    uint64_t via_id;
+    const char *via_kind;
+} TravEdge;
+
+/* One accumulated hit: the record plus how the walk reached it. */
+typedef struct {
+    MemoryRecord rec;
+    int depth;
+    uint64_t via_id;
+    char *via_kind; /* owned */
+} TravNode;
+
+void traverse_hops_free(TraverseHop *hops, size_t n) {
+    if (!hops) {
+        return;
+    }
+    for (size_t i = 0; i < n; i++) {
+        free(hops[i].via_kind);
+    }
+    free(hops);
+}
+
 aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
                            const char *agent_filter, MemoryRecord **out,
                            size_t *out_n) {
+    TraverseParams p;
+    memset(&p, 0, sizeof(p));
+    p.start_id = start_id;
+    p.depth = depth;
+    p.agent_filter = agent_filter;
+    return qe_traverse_ex(db, &p, out, NULL, out_n);
+}
+
+aegis_status_t qe_traverse_ex(AegisDB *db, const TraverseParams *p,
+                              MemoryRecord **out, TraverseHop **out_hops,
+                              size_t *out_n) {
     aegis_status_t st = require_phase(db, 4);
     if (st != AEGIS_OK) {
         return st;
     }
-    if (depth < 0) {
-        depth = 0;
-    }
+    int depth = p->depth < 0 ? 0 : p->depth;
+    const char *agent_filter = p->agent_filter;
     uint64_t now =
         db_now_ms(); /* for expiry, sampled once for the whole walk */
 
@@ -641,14 +698,17 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
     uint64_t *seen = NULL;
     size_t seen_n = 0;
     size_t seen_cap = 0;
-    uint64_t *frontier = malloc(sizeof(uint64_t));
+    TravEdge *frontier = malloc(sizeof(TravEdge));
     size_t front_n = 0;
     if (!frontier) {
         return AEGIS_ERR_INTERNAL;
     }
-    frontier[front_n++] = start_id;
+    frontier[front_n].id = p->start_id;
+    frontier[front_n].via_id = 0;
+    frontier[front_n].via_kind = NULL;
+    front_n++;
 
-    Cand *acc = NULL;
+    TravNode *acc = NULL;
     size_t acc_n = 0;
     size_t acc_cap = 0;
 
@@ -660,14 +720,20 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
         /* Resolve this level's not-yet-seen ids to log offsets under the index
          * lock, then read+decode them off it (disk I/O under log_lock only). */
         uint64_t *offs = malloc(front_n * sizeof(uint64_t));
-        if (!offs) {
+        /* Parallel to `offs`: the edge that reached each id, carried across the
+         * lock handoff so the read phase can attribute a decoded record without
+         * having to resolve it again. */
+        TravEdge *vias = malloc(front_n * sizeof(TravEdge));
+        if (!offs || !vias) {
+            free(offs);
+            free(vias);
             break; /* frontier freed after the loop; return what we have */
         }
         size_t off_n = 0;
 
         pthread_rwlock_rdlock(&db->index_lock);
         for (size_t i = 0; i < front_n; i++) {
-            uint64_t id = frontier[i];
+            uint64_t id = frontier[i].id;
             int dup = 0;
             for (size_t s = 0; s < seen_n; s++) {
                 if (seen[s] == id) {
@@ -693,6 +759,7 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
             if (!e) {
                 continue;
             }
+            vias[off_n] = frontier[i];
             offs[off_n++] = e->offset;
         }
         pthread_rwlock_rdlock(&db->log_lock);
@@ -700,7 +767,7 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
         free(frontier);
         frontier = NULL;
 
-        uint64_t *next = NULL;
+        TravEdge *next = NULL;
         size_t next_n = 0;
         size_t next_cap = 0;
         for (size_t i = 0; i < off_n && !oom; i++) {
@@ -725,7 +792,7 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
             /* collect */
             if (acc_n == acc_cap) {
                 size_t nc = acc_cap ? acc_cap * 2 : 8;
-                Cand *tmp = realloc(acc, nc * sizeof(Cand));
+                TravNode *tmp = realloc(acc, nc * sizeof(TravNode));
                 if (!tmp) {
                     record_free(&r);
                     oom = 1;
@@ -735,13 +802,27 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
                 acc_cap = nc;
             }
             acc[acc_n].rec = r; /* keep; do not free */
-            acc[acc_n].score = 0;
+            acc[acc_n].depth = level;
+            acc[acc_n].via_id = vias[i].via_id;
+            /* Copy the reaching edge's kind: the borrowed pointer is valid now
+             * but the caller frees the parent record, so a borrowed label would
+             * dangle before it could be read. A failed copy costs the label,
+             * not the hit. */
+            acc[acc_n].via_kind = NULL;
+            if (vias[i].via_kind) {
+                acc[acc_n].via_kind = strdup(vias[i].via_kind);
+            }
             acc_n++;
-            /* enqueue neighbours */
+            /* Enqueue neighbours. `r` still aliases the record just moved into
+             * acc, so its relationship strings outlive this level. */
             for (size_t k = 0; k < r.rel_count; k++) {
+                if (!kind_wanted(p->kinds, p->kind_count,
+                                 r.relationships[k].kind)) {
+                    continue;
+                }
                 if (next_n == next_cap) {
                     size_t nc = next_cap ? next_cap * 2 : 8;
-                    uint64_t *tmp = realloc(next, nc * sizeof(uint64_t));
+                    TravEdge *tmp = realloc(next, nc * sizeof(TravEdge));
                     if (!tmp) {
                         oom = 1;
                         break;
@@ -749,11 +830,15 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
                     next = tmp;
                     next_cap = nc;
                 }
-                next[next_n++] = r.relationships[k].to_id;
+                next[next_n].id = r.relationships[k].to_id;
+                next[next_n].via_id = r.id;
+                next[next_n].via_kind = r.relationships[k].kind;
+                next_n++;
             }
         }
         pthread_rwlock_unlock(&db->log_lock);
         free(offs);
+        free(vias);
         frontier = next;
         front_n = next_n;
         (void)next_cap;
@@ -762,18 +847,35 @@ aegis_status_t qe_traverse(AegisDB *db, uint64_t start_id, int depth,
     free(seen);
 
     MemoryRecord *res = malloc((acc_n ? acc_n : 1) * sizeof(MemoryRecord));
-    if (!res) {
+    TraverseHop *hops = NULL;
+    if (out_hops) {
+        hops = malloc((acc_n ? acc_n : 1) * sizeof(TraverseHop));
+    }
+    if (!res || (out_hops && !hops)) {
+        free(res);
+        free(hops);
         for (size_t i = 0; i < acc_n; i++) {
             record_free(&acc[i].rec);
+            free(acc[i].via_kind);
         }
         free(acc);
         return AEGIS_ERR_INTERNAL;
     }
     for (size_t i = 0; i < acc_n; i++) {
         res[i] = acc[i].rec;
+        if (hops) {
+            hops[i].depth = acc[i].depth;
+            hops[i].via_id = acc[i].via_id;
+            hops[i].via_kind = acc[i].via_kind; /* move ownership */
+        } else {
+            free(acc[i].via_kind); /* attribution not wanted; drop the label */
+        }
     }
     free(acc);
     *out = res;
+    if (out_hops) {
+        *out_hops = hops;
+    }
     *out_n = acc_n;
     return AEGIS_OK;
 }

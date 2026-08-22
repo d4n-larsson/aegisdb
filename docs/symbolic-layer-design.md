@@ -307,8 +307,9 @@ harness enters at 5.3, where inference has recall consequences.
 
 1. **Half A** — `kinds` + `direction: "out"` + the `traversal` object in
    `qe_traverse`/`handle_traverse`, plus wire-protocol docs and contract tests
-   1–2, 8. No new state, no flag, no RAM. Independently useful: it is what the
-   inspector's provenance tree needs.
+   2 and 8 (test 1 needs the reverse walk, so it lands with PR 4). No new state,
+   no flag, no RAM. Independently useful: it is what the inspector's provenance
+   tree needs.
 2. **`edge_index.h/.c`** + unit tests, unwired. Reviewable in isolation.
 3. **Wiring** — the six sites of §5, `--no-edge-index`, recovery rebuild, stats
    and exporter (§9). Still no reader, so a bug here is invisible to clients and

@@ -586,6 +586,104 @@ def test_bulk_ops(binary, port):
         check(r.get("ok") is True and r.get("count") == 1, "count bulk -> 1 remains")
 
 
+def test_traverse_kinds(binary, port):
+    print("[traverse: edge-kind filter + per-hop attribution (ROADMAP 5.1)]")
+    with Server(binary, port, phase=4) as srv:
+        def ins(data):
+            return srv.req({"operation": "insert", "type": "semantic",
+                            "data": data})["record"]["id"]
+
+        def rel(a, b, kind=None):
+            p = {"operation": "relate", "from_id": a, "to_id": b}
+            if kind is not None:
+                p["kind"] = kind
+            check(srv.req(p).get("ok") is True, f"relate {a}->{b} ({kind})")
+
+        def walk(start, **kw):
+            p = {"operation": "traverse", "id": start, "include_embeddings": False}
+            p.update(kw)
+            return srv.req(p)
+
+        # a -derived_from-> b -derived_from-> d,  a -supersedes-> c
+        a, b, c, d = ins("a"), ins("b"), ins("c"), ins("d")
+        rel(a, b, "derived_from")
+        rel(a, c, "supersedes")
+        rel(b, d, "derived_from")
+
+        # unfiltered walk is unchanged by 5.1: every kind is followed
+        r = walk(a, depth=2)
+        ids = sorted(rec["id"] for rec in r.get("records", []))
+        check(r.get("ok") is True and ids == sorted([a, b, c, d]),
+              "unfiltered traverse still follows every edge kind")
+
+        # the filter is the point: `supersedes` is not followed
+        r = walk(a, depth=2, kinds=["derived_from"])
+        ids = sorted(rec["id"] for rec in r.get("records", []))
+        check(r.get("ok") is True and ids == sorted([a, b, d]),
+              "kinds filter excludes an unrequested edge kind")
+
+        # ...and the converse, one hop of the other kind only
+        r = walk(a, depth=2, kinds=["supersedes"])
+        ids = sorted(rec["id"] for rec in r.get("records", []))
+        check(r.get("ok") is True and ids == sorted([a, c]),
+              "kinds filter follows only the requested kind")
+
+        # several kinds at once = union
+        r = walk(a, depth=1, kinds=["supersedes", "derived_from"])
+        ids = sorted(rec["id"] for rec in r.get("records", []))
+        check(r.get("ok") is True and ids == sorted([a, b, c]),
+              "multiple kinds are a union")
+
+        # a kind nobody wrote reaches only the start record
+        r = walk(a, depth=2, kinds=["no_such_kind"])
+        ids = [rec["id"] for rec in r.get("records", [])]
+        check(r.get("ok") is True and ids == [a],
+              "unknown kind yields just the start record")
+
+        # per-hop attribution: every non-start hop names the edge that reached it
+        r = walk(a, depth=2, kinds=["derived_from"])
+        hop = {rec["id"]: rec.get("traversal") for rec in r["records"]}
+        check(hop[a] == {"depth": 0},
+              "start record reports depth 0 and no reaching edge")
+        check(hop[b] == {"depth": 1, "via_id": a, "via_kind": "derived_from"},
+              "depth-1 hop names its reaching edge")
+        check(hop[d] == {"depth": 2, "via_id": b, "via_kind": "derived_from"},
+              "depth-2 hop names the edge from its actual parent")
+
+        # an unkinded edge is followed only when no kinds are named
+        e, f = ins("e"), ins("f")
+        rel(e, f)  # no kind
+        r = walk(e, depth=1)
+        ids = sorted(rec["id"] for rec in r.get("records", []))
+        check(r.get("ok") is True and ids == sorted([e, f]),
+              "unkinded edge followed by an unfiltered walk")
+        r = walk(e, depth=1, kinds=["derived_from"])
+        ids = [rec["id"] for rec in r.get("records", [])]
+        check(r.get("ok") is True and ids == [e],
+              "unkinded edge not followed once kinds are named")
+        # ...and it reports no via_kind rather than an empty one
+        r = walk(e, depth=1)
+        hop = {rec["id"]: rec.get("traversal") for rec in r["records"]}
+        check(hop[f] == {"depth": 1, "via_id": e},
+              "unkinded edge reports via_id with no via_kind")
+
+        # direction: only the outgoing walk exists in 5.1 Half A
+        r = walk(a, depth=1, direction="out")
+        check(r.get("ok") is True, 'direction "out" is accepted')
+        for bad in ("in", "both", "sideways"):
+            r = walk(a, depth=1, direction=bad)
+            check(r.get("ok") is False
+                  and r["error"]["code"] == "INVALID_REQUEST",
+                  f'direction "{bad}" rejected, not silently ignored')
+
+        # the kinds list is capped (MAX_TRAVERSE_KINDS = 16)
+        r = walk(a, depth=1, kinds=[f"k{i}" for i in range(16)])
+        check(r.get("ok") is True, "16 kinds accepted")
+        r = walk(a, depth=1, kinds=[f"k{i}" for i in range(17)])
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "17 kinds rejected")
+
+
 def test_consolidate(binary, port):
     print("[consolidate: merge near-duplicate semantic memories]")
     with Server(binary, port, phase=4) as srv:
@@ -2463,6 +2561,7 @@ def main():
     test_connection_guards(binary, 19506)  # uses port, +1, +2
     test_bulk_ops(binary, 19480)
     test_consolidate(binary, 19481)
+    test_traverse_kinds(binary, 19540)
     test_forget(binary, 19499)
     test_export_and_purge(binary, 19500)
     test_export_purge_isolation(binary, 19501)
