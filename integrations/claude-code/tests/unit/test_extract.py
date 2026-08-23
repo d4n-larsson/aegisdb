@@ -120,8 +120,6 @@ class TestFactory(unittest.TestCase):
         self.assertIsInstance(p, NoneExtractionProvider)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 class TestTripleVocabulary(unittest.TestCase):
     """The registry as a contract (ROADMAP 5.4 §3)."""
@@ -150,11 +148,17 @@ class TestTripleVocabulary(unittest.TestCase):
         self.assertEqual(res.rejected, [("is_part_of", "undeclared")])
         self.assertEqual(res.in_vocabulary_rate, 0.5)
 
-    def test_id_predicate_needs_something_to_ground(self):
-        cands = [CandidateTriple("hnsw.c", "part_of", "   ")]
-        res = validate_triples(cands, self._vocab())
-        self.assertEqual(res.accepted, [])
-        self.assertEqual(res.rejected, [("part_of", "empty id object")])
+    def test_an_empty_mention_is_rejected_with_or_without_a_registry(self):
+        """Not a vocabulary question: grounding cannot resolve a blank mention
+        either way, so the check sits above the registry rather than inside
+        it."""
+        cands = [CandidateTriple("hnsw.c", "part_of", "   "),
+                 CandidateTriple("  ", "defaults_to", "none")]
+        for vocab in (self._vocab(), None):
+            res = validate_triples(cands, vocab)
+            self.assertEqual(res.accepted, [])
+            self.assertEqual([r[1] for r in res.rejected],
+                             ["empty mention", "empty mention"])
 
     def test_no_registry_accepts_everything(self):
         """The server accepts any predicate with no registry configured, so
@@ -268,6 +272,25 @@ class TestFakeTriples(unittest.TestCase):
         self.assertEqual(res.accepted, [])
         self.assertEqual(res.rejected, [("invented_by_the_model", "undeclared")])
 
+
+    def test_a_file_line_mention_survives_the_parser(self):
+        """`hnsw.c:214` is the shape this corpus is full of and the design's own
+        worked example. A bare ":" split produced four parts and dropped it."""
+        p = FakeExtractionProvider()
+        out = p.extract_triples("hnsw.c:214 : part_of : src/hnsw.c", None, 16)
+        self.assertEqual(len(out), 1)
+        self.assertEqual((out[0].subject, out[0].obj),
+                         ("hnsw.c:214", "src/hnsw.c"))
+
+    def test_prose_with_colons_is_not_a_triple(self):
+        """A bare split turned any two-colon log line into a triple, and the
+        cap then let that noise crowd out the intended ones."""
+        p = FakeExtractionProvider()
+        out = p.extract_triples("INFO: hnsw: rebuilt index\n"
+                                "a : part_of : b\n", None, 16)
+        self.assertEqual([(t.subject, t.predicate, t.obj) for t in out],
+                         [("a", "part_of", "b")])
+
     def test_respects_the_cap(self):
         p = FakeExtractionProvider()
         text = "\n".join(f"s{i} : part_of : o{i}" for i in range(30))
@@ -276,3 +299,7 @@ class TestFakeTriples(unittest.TestCase):
     def test_other_providers_propose_nothing_by_default(self):
         self.assertEqual(NoneExtractionProvider().extract_triples("x", None, 5),
                          [])
+
+
+if __name__ == "__main__":
+    unittest.main()

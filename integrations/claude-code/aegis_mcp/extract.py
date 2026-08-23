@@ -111,7 +111,7 @@ def load_vocabulary(path: str):
     if not path:
         return None
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             raw = json.load(fh)
     except OSError as e:
         raise VocabularyError(f"cannot read predicate registry {path}: {e}")
@@ -152,19 +152,21 @@ def validate_triples(candidates: list, vocab) -> TripleResult:
     searchable, so the failure degrades rather than loses.
     """
     res = TripleResult(proposed=len(candidates))
-    if vocab is None:
-        res.accepted = list(candidates)
-        return res
-    by_name = {p.name: p for p in vocab}
+    by_name = None if vocab is None else {p.name: p for p in vocab}
     for c in candidates:
+        # Checked before the vocabulary, because it is not a vocabulary
+        # question: an empty mention cannot become a record reference whether
+        # or not a registry is configured, and grounding would receive
+        # something it cannot resolve either way.
+        if not c.subject.strip() or not c.obj.strip():
+            res.rejected.append((c.predicate, "empty mention"))
+            continue
+        if by_name is None:
+            res.accepted.append(c)
+            continue
         spec = by_name.get(c.predicate)
         if spec is None:
             res.rejected.append((c.predicate, "undeclared"))
-            continue
-        if spec.object == "id" and not c.obj.strip():
-            # An id-valued predicate needs something to ground; an empty
-            # mention cannot become a record reference.
-            res.rejected.append((c.predicate, "empty id object"))
             continue
         res.accepted.append(c)
     return res
@@ -352,13 +354,19 @@ class FakeExtractionProvider(ExtractionProvider):
         """
         out = []
         for line in text.splitlines():
-            parts = line.strip().split(":")
-            if len(parts) != 3:
+            # Anchored on " : " with spaces, and split at most twice. A bare
+            # ":" split broke both ways: `hnsw.c:214` — the identifier shape
+            # this corpus is full of, and the design's own worked example —
+            # produced four parts and was dropped, while any prose line with
+            # two colons ("INFO: hnsw: rebuilt index") became a triple and ate
+            # a slot from the cap.
+            if " : " not in line:
                 continue
-            subj, pred, obj = (p.strip() for p in parts)
-            if not subj or not pred or not obj:
+            parts = [p.strip() for p in line.strip().split(" : ", 2)]
+            if len(parts) != 3 or not all(parts):
                 continue
-            out.append(CandidateTriple(subject=subj, predicate=pred, obj=obj))
+            out.append(CandidateTriple(subject=parts[0], predicate=parts[1],
+                                       obj=parts[2]))
             if len(out) >= max_triples:
                 break
         return out

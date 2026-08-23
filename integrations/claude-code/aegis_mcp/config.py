@@ -132,7 +132,8 @@ _ENV = {
     "extract_max_triples": "AEGIS_EXTRACT_MAX_TRIPLES",
 }
 
-_BOOL = {"recall_enabled", "capture_enabled", "extract_supersede"}
+_BOOL = {"recall_enabled", "capture_enabled", "extract_supersede",
+         "extract_triples"}
 _INT = {
     "aegis_port", "connect_timeout_ms", "read_timeout_ms",
     "embedding_dimensions", "recall_time_budget_ms", "recall_top_k",
@@ -140,6 +141,7 @@ _INT = {
     "summary_min_age_ms", "summary_min_cluster", "summary_max_cluster",
     "summary_max_clusters_per_run", "summary_scan_top_k",
     "extract_max_facts", "extract_max_input_chars", "extract_supersede_top_k",
+    "extract_max_triples",
 }
 _FLOAT = {"recall_min_score", "recall_dedup_threshold", "capture_min_salience",
           "summary_max_importance", "summary_min_confidence",
