@@ -439,6 +439,13 @@ static size_t merge_cluster(AegisDB *db, MemoryRecord *recs, size_t n,
             continue;
         }
         qe_relate(db, survivor, recs[i].id, "supersedes", ns);
+        /* Noted before the tombstone, while both ids still mean something, so
+         * truth maintenance can tell a merged premise from a lost one
+         * (ROADMAP 5.3 §6). Without this a conclusion drawn from an absorbed
+         * record is retracted and then re-derived from the survivor on the
+         * next pass — correct in the end, but churn in the log and a
+         * retraction in `history` that the corpus never justified. */
+        db_supersede_note(db, recs[i].id, survivor);
         if (qe_delete(db, recs[i].id, ns) == AEGIS_OK) {
             merged++;
         }

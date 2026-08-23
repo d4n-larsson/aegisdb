@@ -476,6 +476,13 @@ stops after PR 1, the tree is still better off.
   lets recovery reconcile dependents against premises with no reverse index at
   all. The same answer would work for `consolidate`'s `supersedes`, but 5.3
   does not touch consolidation, so this entry stays open for that case.
+  **Now partly closed:** truth maintenance does not need the reverse
+  `supersedes` edge after all. Consolidation records the merge in RAM before
+  tombstoning the loser, and recovery rebuilds that mapping by walking live
+  records' own `supersedes` relationships — the forward edge, which never left.
+  The reverse edge is still absent from the index, so a backward `supersedes`
+  walk over the graph API remains broken; what changed is that nothing in 5.3
+  depends on it.
 - **Shrinking the sparse case.** The table above says the cost is per *target*,
   not per edge, and that a single-incoming-edge target is the expensive shape —
   which is also the common one. Two levers, neither taken in PR 2: store the

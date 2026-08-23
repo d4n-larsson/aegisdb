@@ -134,6 +134,14 @@ typedef struct {
         uint64_t *ids;
         size_t n;
         size_t cap;
+        /* Tombstoned id -> the record that superseded it, so retraction can
+         * tell "this premise is gone" from "this premise was merged into
+         * something that is still here". Rebuilt from the live set by recovery,
+         * so it survives a restart without being durable itself. */
+        uint64_t *sup_from;
+        uint64_t *sup_to;
+        size_t sup_n;
+        size_t sup_cap;
         pthread_mutex_t lock; /* ordered BELOW index_lock: qe_delete takes this
                                * while holding index_lock, never the reverse */
     } retract;
@@ -246,6 +254,19 @@ size_t db_retract_step(AegisDB *db);
  * for write — and these rwlocks are not recursive, so that would self-deadlock
  * rather than merely block. */
 int db_derivation_stands(AegisDB *db, const MemoryRecord *r);
+
+/* Record that `old_id` was superseded by `new_id` — consolidation merging a
+ * record into a survivor, or recovery finding a `supersedes` edge from a live
+ * record to a tombstoned one. Retraction consults this so a premise that was
+ * *merged* is not mistaken for a premise that was *lost*: the supporting fact
+ * still exists, under a new id, and withdrawing the conclusion would only have
+ * the next pass re-derive it. Cheap to lose — recovery rebuilds it. */
+void db_supersede_note(AegisDB *db, uint64_t old_id, uint64_t new_id);
+
+/* Follow the supersession chain from `id` to the record that stands in its
+ * place, or 0 if nothing does. Bounded: a chain longer than a few hops is a
+ * pathological merge history, not a case worth unbounded work. */
+uint64_t db_supersede_resolve(AegisDB *db, uint64_t id);
 
 /* Apply one replicated log frame on a read-only replica: append the payload to
  * the local log (producing a byte-identical frame at `offset`) is done by the

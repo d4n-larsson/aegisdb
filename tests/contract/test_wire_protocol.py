@@ -1403,6 +1403,67 @@ def test_retraction_survives_a_lost_queue(binary, port):
               "no live derived record is left with a dead premise")
 
 
+def test_retraction_follows_supersedes(binary, port):
+    print("[inference: a merged premise is not a lost premise]")
+    d = tempfile.mkdtemp(prefix="aegis_retract_merge_")
+    datadir = tempfile.mkdtemp(prefix="aegis_retract_merge_data_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"part_of": {"object": "id", "transitive": True}}, fh)
+    args = ["--predicate-registry", reg, "--inference",
+            "--inference-interval-sec", "1"]
+
+    with Server(binary, port, phase=4, datadir=datadir,
+                extra_args=args) as srv:
+        def ins(data, fact=None, **kw):
+            p = {"operation": "insert", "type": "semantic", "data": data}
+            if fact:
+                p["fact"] = fact
+            p.update(kw)
+            return srv.req(p)["record"]["id"]
+
+        a, b, c = (ins(x) for x in ("a", "b", "c"))
+        # Two near-identical premises, so consolidate merges one into the other
+        # rather than deleting it: the supporting fact survives under a new id.
+        vec = [1.0] + [0.0] * 383  # default --embedding-dim 384
+        p1 = ins("a is part of b", {"s": a, "p": "part_of", "o": {"id": b}},
+                 embedding=vec)
+        ins("a is part of b too", embedding=vec)
+        ins("b in c", {"s": b, "p": "part_of", "o": {"id": c}})
+        _await_fixpoint(srv)
+        conc = srv.req({"operation": "search",
+                        "pattern": {"s": a, "p": "part_of", "o": {"id": c}},
+                        "top_k": 5})["records"][0]["id"]
+        before = srv.req({"operation": "stats"})["indexes"]["retracted"]
+
+        r = srv.req({"operation": "consolidate", "min_similarity": 0.9})
+        check(r.get("ok") is True, f"consolidate runs ({r.get('merged')})")
+        time.sleep(3)
+
+        # If the merged premise read as *lost*, the conclusion would be
+        # retracted and re-derived under a new id — correct in the end, but
+        # churn in the log and a retraction in history the corpus never
+        # justified.
+        alive = srv.req({"operation": "get", "id": conc}).get("ok") is True
+        after = srv.req({"operation": "stats"})["indexes"]["retracted"]
+        if srv.req({"operation": "get", "id": p1}).get("ok") is True:
+            check(True, "nothing was absorbed; the mapping was not exercised")
+        else:
+            check(alive, "a conclusion drawn from an absorbed premise stands")
+            check(after == before, f"and nothing was retracted ({after})")
+
+        srv.graceful_stop()
+
+    # The mapping is in RAM only. Recovery has to rebuild it from the
+    # survivor's own supersedes edge, or a restart turns every absorbed
+    # premise back into a lost one.
+    with Server(binary, port, phase=4, datadir=datadir,
+                extra_args=args) as srv:
+        time.sleep(3)
+        check(srv.req({"operation": "get", "id": conc}).get("ok") is True,
+              "and still stands after a restart rebuilds the mapping")
+
+
 def test_inference_flag_validation(binary, port):
     print("[inference: a cap that cannot mean what it says refuses to start]")
 
@@ -3961,6 +4022,7 @@ def main():
     test_inference_flag_validation(binary, 19575)
     test_retraction(binary, 19576)
     test_retraction_survives_a_lost_queue(binary, 19577)
+    test_retraction_follows_supersedes(binary, 19579)
     test_predicate_registry_refuses_to_start(binary, 19551)
     test_codec_gate_with_a_real_v3_frame(binary, 19568)  # uses port, +1
     test_typed_facts_replica_parity(binary, 19548)  # uses port, +1 (repl stream), +2 (replica)

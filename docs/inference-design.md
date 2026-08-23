@@ -637,10 +637,15 @@ revertible. If the horizon stops after 4, nothing is left in a half state.
   age out ahead of its premises, which is probably right (it is recomputable)
   but is currently an accident rather than a decision. Wants a look when 5.3 and
   2.3 are both in front of someone.
-- **Interaction with `consolidate`.** Consolidation merges similar records and
-  writes `supersedes`. If it absorbs a premise, the derived record's premise id
-  points at a tombstone and §6 retracts the conclusion — even though the merged
-  survivor still asserts the same thing. Correct but wasteful: the conclusion
-  will be re-derived on the next pass from the survivor. Acceptable churn, or an
-  argument for teaching retraction to follow `supersedes` one hop before giving
-  up. Not decided.
+- ~~**Interaction with `consolidate`.**~~ **Decided:** retraction follows
+  supersession. Consolidation records the merge (`db_supersede_note`) while both
+  ids still mean something — before the tombstone, since `qe_delete` drops the
+  reverse edge the moment it is created — and a premise that was *merged* counts
+  as standing while its heir is live. The premise ids on the derived record are
+  deliberately **not** rewritten: a derivation should say what it was actually
+  drawn from, and the supersession chain explains the rest. The mapping is
+  in-RAM and rebuilt by recovery from the survivor's own `supersedes` edge, so
+  it needs no durability of its own — the same argument as the retraction queue.
+  Chains are followed up to a small hop cap; past `SUPERSEDE_MAX` entries a
+  merged premise reads as lost again, which costs a retraction and a
+  re-derivation rather than a wrong answer.
