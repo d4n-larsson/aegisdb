@@ -86,6 +86,19 @@ class Config:
     extract_triples: bool = False
     extract_registry: str = ""  # path to the server's --predicate-registry file
     extract_max_triples: int = 16  # cap candidates proposed per transcript
+    # Grounding a mention to an entity record (ROADMAP 5.4 §4). The floor is
+    # high on purpose: conflating two entities writes facts about the wrong
+    # thing and inference then compounds them undetectably, while splitting one
+    # entity in two only loses inferences and `consolidate` can merge them
+    # later. A near-miss mints rather than guesses.
+    #
+    # Deliberately *not* shared with extract_supersede_min_score, though both
+    # ask "are these the same?": consolidation's two errors are symmetric — a
+    # missed merge and a wrong merge both cost a duplicate — so it can sit near
+    # the middle, where this cannot.
+    grounding_min_score: float = 0.85  # cosine floor for reusing an entity
+    grounding_top_k: int = 5  # entity candidates considered per mention
+    grounding_max_mint: int = 8  # new entity records per extraction
 
 
 # Map each config field to its environment variable name.
@@ -130,6 +143,9 @@ _ENV = {
     "extract_triples": "AEGIS_EXTRACT_TRIPLES",
     "extract_registry": "AEGIS_EXTRACT_REGISTRY",
     "extract_max_triples": "AEGIS_EXTRACT_MAX_TRIPLES",
+    "grounding_min_score": "AEGIS_GROUNDING_MIN_SCORE",
+    "grounding_top_k": "AEGIS_GROUNDING_TOP_K",
+    "grounding_max_mint": "AEGIS_GROUNDING_MAX_MINT",
 }
 
 _BOOL = {"recall_enabled", "capture_enabled", "extract_supersede",
@@ -141,9 +157,10 @@ _INT = {
     "summary_min_age_ms", "summary_min_cluster", "summary_max_cluster",
     "summary_max_clusters_per_run", "summary_scan_top_k",
     "extract_max_facts", "extract_max_input_chars", "extract_supersede_top_k",
-    "extract_max_triples",
+    "extract_max_triples", "grounding_top_k", "grounding_max_mint",
 }
 _FLOAT = {"recall_min_score", "recall_dedup_threshold", "capture_min_salience",
+          "grounding_min_score",
           "summary_max_importance", "summary_min_confidence",
           "extract_supersede_min_score"}
 
