@@ -37,7 +37,21 @@ static int matches_pattern(const MemoryRecord *r, const SearchParams *p) {
         return 0; /* a record asserting nothing matches no pattern */
     }
     if (p->pat_has_subject && r->fact.subject != p->pat_subject) {
-        return 0;
+        /* With `subsume`, a fact about anything that reaches the bound subject
+         * through `is_a` answers too — a memory about hnsw.c answering a
+         * question about the storage layer. Membership is checked here, on the
+         * loaded record, for the same reason every other position is: the
+         * candidate source is not always the fact index. */
+        int member = 0;
+        for (size_t i = 0; i < p->subsume_n; i++) {
+            if (p->subsume_ids[i] == r->fact.subject) {
+                member = 1;
+                break;
+            }
+        }
+        if (!member) {
+            return 0;
+        }
     }
     if (p->pat_predicate && strcmp(r->fact.predicate, p->pat_predicate) != 0) {
         return 0;
@@ -464,7 +478,34 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
          * post-filter. The set is complete either way, so nothing is exhausted
          * early. */
         int rc;
-        if (p->pat_has_subject) {
+        if (p->pat_has_subject && p->subsume_n) {
+            /* One lookup per subject in the expansion, unioned. The exact
+             * post-filter above still decides, so a duplicate id here costs a
+             * reload rather than a wrong answer. */
+            rc = 0;
+            for (size_t i = 0; i <= p->subsume_n && rc == 0; i++) {
+                uint64_t subj =
+                    (i == 0) ? p->pat_subject : p->subsume_ids[i - 1];
+                uint64_t *part = NULL;
+                size_t pn = 0;
+                rc = fact_index_by_subject(db->facts, subj, p->pat_predicate,
+                                           &part, &pn);
+                if (rc != 0 || pn == 0) {
+                    free(part);
+                    continue;
+                }
+                uint64_t *grown = realloc(ids, (nids + pn) * sizeof(*grown));
+                if (!grown) {
+                    free(part);
+                    rc = -1;
+                    break;
+                }
+                ids = grown;
+                memcpy(ids + nids, part, pn * sizeof(*part));
+                nids += pn;
+                free(part);
+            }
+        } else if (p->pat_has_subject) {
             rc = fact_index_by_subject(db->facts, p->pat_subject,
                                        p->pat_predicate, &ids, &nids);
         } else if (p->pat_has_object) {
@@ -613,12 +654,79 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
 
 aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
                          MemoryRecord **out_records, size_t *out_n) {
-    return qe_search_ex(db, p, out_records, NULL, out_n);
+    /* A copy, so this one keeps its const contract: qe_search_ex writes
+     * subsume_truncated back, and a caller of the plain form has nowhere to
+     * read it from anyway. */
+    SearchParams q = *p;
+    return qe_search_ex(db, &q, out_records, NULL, out_n);
 }
 
-aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
-                            MemoryRecord **out_records,
-                            SearchExplain **out_explain, size_t *out_n) {
+/* Resolve `subsume`: every record that reaches the bound subject through the
+ * `is_a` taxonomy.
+ *
+ * One index lookup, not a walk — the inference job materializes `is_a`'s
+ * transitive closure, so a single {p: "is_a", o: {id: S}} query already names
+ * every descendant however deep. That composition is why subsumption is a
+ * query-time expansion here rather than the third closure the roadmap asked
+ * for: materializing it would write facts that are false (the storage layer
+ * does not default to what hnsw.c defaults to) and go quadratic in taxonomy
+ * depth times facts per entity.
+ *
+ * The is_a records name the descendant in their *subject*, which the index
+ * does not carry, so each one is loaded. Bounded by the cap for exactly that
+ * reason. Returns 0, or -1 on allocation failure; a missing index or an empty
+ * taxonomy is simply an empty expansion. */
+static int resolve_subsume(AegisDB *db, SearchParams *p) {
+    p->subsume_ids = NULL;
+    p->subsume_n = 0;
+    p->subsume_truncated = 0;
+    if (!p->subsume || !p->pat_has_subject || !db->facts) {
+        return 0;
+    }
+    uint64_t *ids = NULL;
+    size_t n = 0;
+    pthread_rwlock_rdlock(&db->index_lock);
+    int rc = fact_index_by_object(db->facts, FACT_OBJ_ID, p->pat_subject, NULL,
+                                  "is_a", &ids, &n);
+    pthread_rwlock_unlock(&db->index_lock);
+    if (rc != 0) {
+        return -1;
+    }
+    if (n == 0) {
+        free(ids);
+        return 0;
+    }
+    size_t cap = db->config.inference_max_subsume;
+    if (cap && n > cap) {
+        n = cap;
+        p->subsume_truncated = 1;
+    }
+    uint64_t *subs = malloc(n * sizeof(*subs));
+    if (!subs) {
+        free(ids);
+        return -1;
+    }
+    size_t m = 0;
+    for (size_t i = 0; i < n; i++) {
+        MemoryRecord r;
+        if (qe_get(db, ids[i], NULL, &r) != AEGIS_OK) {
+            continue;
+        }
+        if (r.fact.kind == FACT_OBJ_ID && r.fact.subject != p->pat_subject) {
+            subs[m++] = r.fact.subject;
+        }
+        record_free(&r);
+    }
+    free(ids);
+    p->subsume_ids = subs;
+    p->subsume_n = m;
+    return 0;
+}
+
+static aegis_status_t search_ex_body(AegisDB *db, const SearchParams *p,
+                                     MemoryRecord **out_records,
+                                     SearchExplain **out_explain,
+                                     size_t *out_n) {
     aegis_status_t st = require_phase(db, p->embedding_dim ? 3 : 2);
     if (st != AEGIS_OK) {
         return st;
@@ -627,6 +735,7 @@ aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
         p->embedding_dim != db->config.embedding_dimensions) {
         return AEGIS_ERR_INVALID_REQUEST;
     }
+
     /* A text query needs the lexical index, which --no-lexical-index omits.
      * Report that as NOT_READY (the server cannot serve this yet) rather than
      * silently ignoring the query and returning unranked filter results. */
@@ -775,6 +884,25 @@ aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
     return AEGIS_OK;
 }
 
+/* Resolve the subsumption expansion once, run the search, release it. A
+ * wrapper rather than an inline prologue because the body has several exits and
+ * the expansion is the search's to own, not the caller's. */
+aegis_status_t qe_search_ex(AegisDB *db, SearchParams *p,
+                            MemoryRecord **out_records,
+                            SearchExplain **out_explain, size_t *out_n) {
+    SearchParams q = *p;
+    if (resolve_subsume(db, &q) != 0) {
+        return AEGIS_ERR_INTERNAL;
+    }
+    aegis_status_t st = search_ex_body(db, &q, out_records, out_explain, out_n);
+    free((void *)q.subsume_ids);
+    /* Reported back rather than swallowed: a caller that asked about a
+     * category and silently got an answer over some of its members would have
+     * no way to tell a narrow result from a truncated one. */
+    p->subsume_truncated = q.subsume_truncated;
+    return st;
+}
+
 /* Count live records matching the filters (type/tags/time/agent_id). Ignores
  * any embedding — count is over the filter predicate, not vector ranking. */
 aegis_status_t qe_count(AegisDB *db, const SearchParams *p, size_t *out_count,
@@ -783,11 +911,20 @@ aegis_status_t qe_count(AegisDB *db, const SearchParams *p, size_t *out_count,
     if (st != AEGIS_OK) {
         return st;
     }
+    /* `count` takes `pattern`, so it takes `subsume` with it — "how many
+     * records assert this?" should mean the same thing under both ops. */
+    SearchParams q = *p;
+    if (resolve_subsume(db, &q) != 0) {
+        return AEGIS_ERR_INTERNAL;
+    }
+    p = &q;
     Cand *cands = NULL;
     size_t m = 0;
     int exhausted = 0;
     st = gather_candidates(db, p, 0, 0, db->config.query_scan_cap, &cands, &m,
                            &exhausted);
+    free((void *)q.subsume_ids);
+    q.subsume_ids = NULL;
     if (st != AEGIS_OK) {
         return st;
     }

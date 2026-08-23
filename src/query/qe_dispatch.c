@@ -24,6 +24,59 @@
  * score == weight * relevance * recency_factor, where relevance is the cosine
  * similarity, the BM25 score, or the fused reciprocal rank (ROADMAP 4.1). Only
  * the fields that contributed are emitted, so a response stays readable. */
+/* "Why do you believe this at all?", alongside "why did this rank here?"
+ * (ROADMAP 5.3 §9).
+ *
+ * One level, not a tree: a premise that is itself derived carries its own
+ * derivation when fetched, so a client walks the chain by following ids — the
+ * shape `traverse` already uses, and what keeps one response from expanding to
+ * the size of a derivation forest. `live` is what makes a mid-retraction state
+ * legible instead of merely confusing. */
+static void add_derivation_explain(AegisDB *db, cJSON *ex,
+                                   const MemoryRecord *r) {
+    if (!ex || r->derivation.route_count == 0) {
+        return;
+    }
+    cJSON *d = cJSON_AddObjectToObject(ex, "derivation");
+    if (!d) {
+        return;
+    }
+    cJSON_AddNumberToObject(d, "depth", derivation_depth(&r->derivation));
+    cJSON *routes = cJSON_AddArrayToObject(d, "routes");
+    if (!routes) {
+        return;
+    }
+    static const char *const RULE[] = {"", "transitive", "symmetric",
+                                       "inverse"};
+    for (size_t i = 0; i < r->derivation.route_count; i++) {
+        const DerivRoute *rt = &r->derivation.routes[i];
+        cJSON *jr = cJSON_CreateObject();
+        if (!jr) {
+            return;
+        }
+        cJSON_AddStringToObject(
+            jr, "rule",
+            (rt->rule >= 1 && rt->rule <= 3) ? RULE[rt->rule] : "?");
+        cJSON_AddNumberToObject(jr, "depth", rt->depth);
+        cJSON *prem = cJSON_AddArrayToObject(jr, "premises");
+        for (size_t j = 0; prem && j < rt->premise_count; j++) {
+            cJSON *pj = cJSON_CreateObject();
+            if (!pj) {
+                break;
+            }
+            cJSON_AddNumberToObject(pj, "id", (double)rt->premises[j]);
+            MemoryRecord pr;
+            int live = qe_get(db, rt->premises[j], NULL, &pr) == AEGIS_OK;
+            cJSON_AddBoolToObject(pj, "live", live);
+            if (live) {
+                record_free(&pr);
+            }
+            cJSON_AddItemToArray(prem, pj);
+        }
+        cJSON_AddItemToArray(routes, jr);
+    }
+}
+
 static cJSON *search_explain_json(const SearchExplain *e) {
     cJSON *o = cJSON_CreateObject();
     if (!o) {
@@ -696,6 +749,11 @@ static aegis_status_t parse_pattern(AegisDB *db, const cJSON *req,
         return AEGIS_ERR_NOT_READY;
     }
     p->has_pattern = 1;
+    /* Sibling of `pattern`, not a position inside it: it changes how the
+     * subject is read, and reads better next to `top_k` than buried in the
+     * triple. Ignored without a bound subject, since there is nothing to
+     * broaden. */
+    p->subsume = jr_bool(req, "subsume", 0);
 
     const cJSON *js = cJSON_GetObjectItemCaseSensitive(pat, "s");
     if (js && !cJSON_IsNull(js)) {
@@ -1304,12 +1362,19 @@ static cJSON *handle_search(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
 
     int inc_emb = want_embeddings(req);
     cJSON *o = json_ok();
+    /* Only when it happened: a flag that is always present invites a client to
+     * ignore it, and the truncating case is the one worth noticing. */
+    if (p.subsume_truncated) {
+        cJSON_AddBoolToObject(o, "subsume_truncated", 1);
+    }
     cJSON *arr = cJSON_AddArrayToObject(o, "records");
     for (size_t i = 0; i < n; i++) {
         cJSON *jr = json_record(&recs[i], inc_emb);
         add_usage(jr, db, recs[i].id);
         if (explain && expl) {
-            cJSON_AddItemToObject(jr, "explain", search_explain_json(&expl[i]));
+            cJSON *ex = search_explain_json(&expl[i]);
+            add_derivation_explain(db, ex, &recs[i]);
+            cJSON_AddItemToObject(jr, "explain", ex);
         }
         cJSON_AddItemToArray(arr, jr);
         record_free(&recs[i]);

@@ -89,6 +89,19 @@ typedef struct {
     int has_pattern;
     int pat_has_subject;
     uint64_t pat_subject;
+    /* Broaden the bound subject through the `is_a` taxonomy (ROADMAP 5.3
+     * §4.2): a fact about a member also answers a question about the category
+     * it belongs to. Opt-in, because it changes what a pattern *means* — a
+     * caller asking what record 42 defaults to should not silently get an
+     * answer about a different record.
+     *
+     * The expansion reads the `is_a` closure the inference job materializes,
+     * so it is one index lookup rather than a graph walk. `subsume_ids` is
+     * resolved per query and owned by the search; a caller never sets it. */
+    int subsume;
+    const uint64_t *subsume_ids;
+    size_t subsume_n;
+    int subsume_truncated;     /* the cap stopped the expansion short */
     const char *pat_predicate; /* NULL = any predicate */
     int pat_has_object;
     FactKind pat_object_kind; /* FACT_OBJ_ID or FACT_OBJ_STRING */
@@ -133,7 +146,10 @@ aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
 /* Like qe_search, but when out_explain is non-NULL also allocates a parallel
  * array of SearchExplain (one per returned record, same order; free it with a
  * single free()). Pass NULL to behave exactly like qe_search. ROADMAP 1.2. */
-aegis_status_t qe_search_ex(AegisDB *db, const SearchParams *p,
+/* Non-const `p`: the search resolves the `subsume` expansion itself and reports
+ * back through `subsume_truncated`, which the caller surfaces. Nothing else in
+ * the struct is written. */
+aegis_status_t qe_search_ex(AegisDB *db, SearchParams *p,
                             MemoryRecord **out_records,
                             SearchExplain **out_explain, size_t *out_n);
 

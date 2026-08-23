@@ -1294,6 +1294,90 @@ def _await_stat(srv, key, at_least, timeout=20.0):
     return n
 
 
+def test_subsume_and_explain_derivation(binary, port):
+    print("[inference: asking about a category, and why a record is believed]")
+    d = tempfile.mkdtemp(prefix="aegis_subsume_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"is_a": {"object": "id", "transitive": True},
+                   "defaults_to": {"object": "string"}}, fh)
+
+    with Server(binary, port, phase=4,
+                extra_args=["--predicate-registry", reg, "--inference",
+                            "--inference-interval-sec", "1"]) as srv:
+        def ins(data, fact=None):
+            p = {"operation": "insert", "type": "semantic", "data": data}
+            if fact:
+                p["fact"] = fact
+            return srv.req(p)["record"]["id"]
+
+        # hnsw.c:214 is_a hnsw.c is_a the storage layer — two hops, so the
+        # answer depends on the transitive closure the job materializes.
+        storage = ins("the storage layer")
+        hnsw = ins("hnsw.c")
+        line = ins("hnsw.c:214")
+        ins("hnsw is storage", {"s": hnsw, "p": "is_a", "o": {"id": storage}})
+        ins("line is hnsw", {"s": line, "p": "is_a", "o": {"id": hnsw}})
+        ins("the line defaults to none",
+            {"s": line, "p": "defaults_to", "o": "none"})
+        _await_fixpoint(srv)
+
+        ask = {"operation": "search",
+               "pattern": {"s": storage, "p": "defaults_to"}, "top_k": 5}
+        # Off by default: it changes what a pattern means, so a caller asking
+        # about record 42 must not silently get an answer about another one.
+        check(len(srv.req(ask).get("records", [])) == 0,
+              "without subsume, a question about the category finds nothing")
+
+        r = srv.req(dict(ask, subsume=True))
+        recs = r.get("records", [])
+        check(len(recs) == 1,
+              f"with subsume, a member's fact answers it ({len(recs)})")
+        check(recs[0]["fact"]["o"] == "none",
+              "and it is the member's assertion that comes back")
+        check("subsume_truncated" not in r,
+              "no truncation flag when the expansion fit")
+        # Two hops: this only works because is_a's closure is materialized, so
+        # one index lookup already names every descendant however deep.
+        check(recs[0]["fact"]["s"] == line,
+              "including a descendant two levels down")
+
+        check(srv.req({"operation": "count",
+                       "pattern": {"s": storage, "p": "defaults_to"},
+                       "subsume": True}).get("count") == 1,
+              "count honours subsume too")
+
+        # explain gains a second, disjoint answer: not "why did this rank
+        # here?" but "why do you believe this at all?"
+        e = srv.req({"operation": "search",
+                     "pattern": {"s": line, "p": "is_a", "o": {"id": storage}},
+                     "top_k": 5, "explain": True}).get("records", [])
+        check(len(e) == 1, "the derived is_a record is findable")
+        dv = e[0].get("explain", {}).get("derivation")
+        check(dv is not None, "and explain says why it is believed")
+        check(dv["routes"][0]["rule"] == "transitive",
+              "naming the rule that fired")
+        prem = dv["routes"][0]["premises"]
+        check(len(prem) == 2 and all(x["live"] for x in prem),
+              "and both premises, each marked live")
+
+        # An asserted record has no derivation to explain, and must not grow a
+        # spurious empty one.
+        a = srv.req({"operation": "search",
+                     "pattern": {"s": line, "p": "defaults_to"},
+                     "top_k": 5, "explain": True})["records"][0]
+        check("derivation" not in a.get("explain", {}),
+              "an asserted record explains no derivation")
+
+        # A retracted premise is what makes `live` worth reporting.
+        prem_id = prem[0]["id"]
+        srv.req({"operation": "delete", "id": prem_id})
+        time.sleep(3)
+        gone = srv.req({"operation": "get", "id": e[0]["id"]})
+        check(gone.get("ok") is False,
+              "and losing a premise retracts the conclusion it explained")
+
+
 def test_contradiction_detection(binary, port):
     print("[inference: a contradiction is reported, never resolved]")
     d = tempfile.mkdtemp(prefix="aegis_conflict_")
@@ -4159,6 +4243,7 @@ def main():
     test_inference_flag_validation(binary, 19575)
     test_retraction(binary, 19576)
     test_contradiction_detection(binary, 19582)
+    test_subsume_and_explain_derivation(binary, 19584)
     test_retraction_survives_a_lost_queue(binary, 19577)
     test_retraction_follows_supersedes(binary, 19579)
     test_retraction_when_a_merge_destroys_the_fact(binary, 19581)
