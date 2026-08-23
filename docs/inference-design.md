@@ -647,16 +647,24 @@ revertible. If the horizon stops after 4, nothing is left in a half state.
 
 ## 15. Open questions
 
-- **`consolidate` destroys a typed fact.** Found while wiring retraction to
-  supersession: `merge_cluster` migrates tags, importance, confidence and
-  relationships onto the survivor, but not the `fact` — `UpdatePatch` has no
-  such field, since 5.2 made facts immutable. So merging a fact-bearing record
-  into one without a fact silently loses the assertion, and `stats.facts` drops.
-  This predates 5.3 and is not caused by it; 5.3 only made it visible, by asking
-  for the first time whether a merged record still supports anything. The fix is
-  a decision about consolidation, not inference: either refuse to merge a
-  fact-bearing record, or let a merge carry a fact onto a survivor that has
-  none — which is the one case where doing so does not overwrite a claim.
+- ~~**`consolidate` destroys a typed fact.**~~ **Fixed.** `merge_cluster`
+  migrated tags, importance, confidence and relationships onto the survivor but
+  not the `fact`, so absorbing a fact-bearing record silently lost the
+  assertion and `stats.facts` fell. It predates 5.3; the horizon only made it
+  visible by asking for the first time whether a merged record still supports
+  anything.
+
+  Both halves of the choice turned out to be right, for different clusters. A
+  survivor that asserts nothing **adopts** the loser's fact — the one case where
+  writing a fact overwrites no claim, so the immutability rule is untouched
+  (it is about *changing* an assertion, and there is none to change). A loser
+  that asserts something the survivor does not is **not merged at all**: two
+  records that disagree are not duplicates in the sense that matters, a merge
+  cannot carry two claims, and a smaller merge is better than a lost assertion.
+
+  `UpdatePatch` gained a fact field for this, refused outright when the record
+  already asserts something, and `update` still rejects the field at the wire
+  layer — adoption is an internal path, not a new client capability.
 
 - **Should `subsume` also expand the object position?** `{p: "part_of",
   o: {id: storage_layer}}` arguably ought to find things that are part of a
@@ -692,11 +700,11 @@ revertible. If the horizon stops after 4, nothing is left in a half state.
   applies. Both cost a retraction and a re-derivation rather than a wrong
   answer.
 
-  The rule is also narrower than "merged": a merge does **not** carry the
-  loser's typed fact onto the survivor — `UpdatePatch` has no fact field,
-  because a fact is immutable — so absorbing a fact-bearing record destroys
-  that assertion outright. Recording a supersession there would keep alive a
-  conclusion whose supporting fact exists nowhere and which no later pass could
-  re-derive, so the mapping is only recorded when the survivor asserts the same
-  triple (or the loser asserted none). That consolidation silently drops a fact
-  at all is a separate defect, noted below.
+  The mapping is recorded for every absorbed record, which is only safe
+  because consolidation no longer drops a fact. It used to: `UpdatePatch` had
+  no fact field, so absorbing a fact-bearing record destroyed the assertion,
+  and recording a supersession there would have kept alive a conclusion whose
+  supporting fact existed nowhere. A survivor now adopts the fact where it has
+  none, and a member asserting something the survivor will not is excluded from
+  the merge rather than being silently emptied — so anything reaching the
+  tombstone is genuinely represented by the survivor. See §15.

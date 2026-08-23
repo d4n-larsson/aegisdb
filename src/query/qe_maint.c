@@ -401,13 +401,91 @@ static size_t merge_cluster(AegisDB *db, MemoryRecord *recs, size_t n,
     }
     uint64_t survivor = recs[sv].id;
 
-    /* union of all tags + max importance/confidence across the cluster */
+    /* What the survivor will assert once this is done: its own fact, or the
+     * first one in the cluster if it has none.
+     *
+     * A merge must not destroy an assertion. UpdatePatch carried tags,
+     * importance and confidence but never the fact, so absorbing a
+     * fact-bearing record into one without a fact silently dropped what it
+     * asserted — stats.facts fell and no pattern could find it again. That
+     * predates 5.3 and was invisible until truth maintenance started asking
+     * whether a merged record still supports anything. Adoption only, never a
+     * rewrite: writing a fact where none existed overwrites no claim, which is
+     * what makes it compatible with facts being immutable. */
+    const Fact *adopt = NULL;
+    if (recs[sv].fact.kind == FACT_NONE) {
+        /* The triple the most members agree on, not whichever the search
+         * ranked first. Every member asserting something *else* is excluded
+         * below, so this choice decides how much of the cluster folds — and
+         * deciding that by scoring order would make the merge's completeness
+         * depend on something unrelated to the cluster. Ties break toward the
+         * earlier member, which is stable for a given result set. */
+        size_t best = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (i == sv || recs[i].fact.kind == FACT_NONE) {
+                continue;
+            }
+            size_t votes = 0;
+            for (size_t j = 0; j < n; j++) {
+                if (j != sv && recs[j].fact.kind != FACT_NONE &&
+                    facts_equal(&recs[j].fact, &recs[i].fact)) {
+                    votes++;
+                }
+            }
+            if (votes > best) {
+                best = votes;
+                adopt = &recs[i].fact;
+            }
+        }
+    }
+    const Fact *sv_fact = adopt ? adopt : &recs[sv].fact;
+
+    /* Partition before doing any work. A member asserting something the
+     * survivor will not is not part of this merge *at all* — and deciding that
+     * here rather than at the tombstone is what stops it donating its tags,
+     * weights and edges to a record it is never folded into. */
+    unsigned char *keep = calloc(n ? n : 1, 1);
+    if (!keep) {
+        return 0;
+    }
+    size_t n_merge = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (i == sv) {
+            keep[i] = 1;
+            continue;
+        }
+        if (recs[i].fact.kind == FACT_NONE ||
+            facts_equal(&recs[i].fact, sv_fact)) {
+            keep[i] = 1;
+            n_merge++;
+        } else {
+            /* Two records that disagree are not duplicates in the sense that
+             * matters, and a merge cannot carry two claims. */
+            LOG_DEBUG("consolidate: keeping %llu; it asserts a fact the "
+                      "survivor does not",
+                      (unsigned long long)recs[i].id);
+        }
+    }
+    if (n_merge == 0) {
+        /* Nothing to fold, so write nothing. A cluster that rewrote its
+         * survivor anyway would append a record and fsync on every pass
+         * forever — the losers are still live, so they re-enter this function
+         * next time — and refreshing `updated` each pass would also stop
+         * forget's decay clock from ever advancing. */
+        free(keep);
+        return 0;
+    }
+
+    /* union of the merging members' tags + max importance/confidence */
     const char **utags = NULL;
     size_t un = 0;
     size_t ucap = 0;
     float imp = 0;
     float conf = 0;
     for (size_t i = 0; i < n; i++) {
+        if (!keep[i]) {
+            continue;
+        }
         if (recs[i].importance > imp) {
             imp = recs[i].importance;
         }
@@ -438,17 +516,6 @@ static size_t merge_cluster(AegisDB *db, MemoryRecord *recs, size_t n,
         }
     }
 
-    /* migrate the losers' relationships onto the survivor */
-    for (size_t i = 0; i < n; i++) {
-        if (recs[i].id == survivor) {
-            continue;
-        }
-        for (size_t r = 0; r < recs[i].rel_count; r++) {
-            qe_relate(db, survivor, recs[i].relationships[r].to_id,
-                      recs[i].relationships[r].kind, ns);
-        }
-    }
-
     /* fold the merged tags + fields into the survivor */
     UpdatePatch patch;
     memset(&patch, 0, sizeof(patch));
@@ -459,52 +526,68 @@ static size_t merge_cluster(AegisDB *db, MemoryRecord *recs, size_t n,
     patch.importance = imp;
     patch.has_confidence = 1;
     patch.confidence = conf;
-    MemoryRecord upd;
-    if (qe_update(db, survivor, &patch, ns, &upd) == AEGIS_OK) {
-        record_free(&upd);
+    if (adopt) {
+        patch.has_fact = 1;
+        patch.fact = adopt;
     }
+    MemoryRecord upd;
+    aegis_status_t ust = qe_update(db, survivor, &patch, ns, &upd);
     free(utags);
+    if (ust != AEGIS_OK) {
+        /* The survivor did not take the merged content, so tombstoning the
+         * records it was supposed to absorb would lose exactly what this
+         * function exists to preserve. Leave the cluster alone; the next pass
+         * sees the same shape and tries again. */
+        LOG_WARN("consolidate: survivor %llu could not absorb the cluster "
+                 "(%d); nothing merged",
+                 (unsigned long long)survivor, (int)ust);
+        free(keep);
+        return 0;
+    }
+    record_free(&upd);
 
-    /* tombstone the losers, recording provenance first: the survivor `supersedes`
-     * each loser (a merge should be auditable lineage, not silent data loss — the
-     * inspector can then show what a memory absorbed). The link is added while the
-     * loser still exists (qe_relate requires both endpoints), then it's deleted.
-     * Best-effort: a failed relate (e.g. rel cap hit) doesn't block the merge. */
+    /* Migrate the losers' relationships — after the update, not before. The
+     * abort above claims to leave the cluster alone, and it only does if
+     * nothing has been written to the survivor yet; migrating first left it
+     * holding every loser's edges while the losers stayed live, and a
+     * persistently failing survivor would accumulate duplicates against the
+     * relationship cap until that cap was itself the reason it kept failing. */
+    for (size_t i = 0; i < n; i++) {
+        if (!keep[i] || recs[i].id == survivor) {
+            continue;
+        }
+        for (size_t r = 0; r < recs[i].rel_count; r++) {
+            qe_relate(db, survivor, recs[i].relationships[r].to_id,
+                      recs[i].relationships[r].kind, ns);
+        }
+    }
+
+    /* Tombstone the losers, recording provenance first: the survivor
+     * `supersedes` each one, so a merge is auditable lineage rather than silent
+     * loss. The link is added while the loser still exists (qe_relate needs
+     * both endpoints), then it is deleted. */
     size_t merged = 0;
     for (size_t i = 0; i < n; i++) {
-        if (recs[i].id == survivor) {
+        if (!keep[i] || recs[i].id == survivor) {
             continue;
         }
         qe_relate(db, survivor, recs[i].id, "supersedes", ns);
         /* Noted before the tombstone, while both ids still mean something, so
-         * truth maintenance can tell a merged premise from a lost one
-         * (ROADMAP 5.3 §6). Without this a conclusion drawn from an absorbed
-         * record is retracted and then re-derived from the survivor on the
-         * next pass — correct in the end, but churn in the log and a
-         * retraction in `history` that the corpus never justified.
-         *
-         * Only when nothing a conclusion could rest on is actually lost.
-         * A merge does *not* carry the loser's typed fact across — UpdatePatch
-         * has no fact field, because a fact is immutable — so absorbing a
-         * fact-bearing record destroys that assertion outright. Calling that
-         * "merged" would keep alive a conclusion whose supporting fact exists
-         * nowhere, and which no later pass could re-derive. Retracting is the
-         * correct answer there, so the mapping is deliberately not recorded. */
-        int fact_survives = recs[i].fact.kind == FACT_NONE ||
-                            facts_equal(&recs[i].fact, &recs[sv].fact);
-        if (fact_survives) {
-            db_supersede_note(db, recs[i].id, survivor);
-            /* Re-point the provenance edges too. The routes on a derived record
-             * still name the absorbed id — deliberately, since that is what it
-             * was drawn from — but the *edges* are what a later delete walks,
-             * and without this a subsequent delete of the survivor would find
-             * no dependents to re-judge. */
-            repoint_dependents(db, recs[i].id, survivor, ns);
-        }
+         * truth maintenance can tell a merged premise from a lost one (ROADMAP
+         * 5.3 §6). Reaching here means nothing a conclusion could rest on was
+         * lost: the survivor asserts the same triple, or this record asserted
+         * none. */
+        db_supersede_note(db, recs[i].id, survivor);
+        /* Re-point the provenance edges too. The routes on a derived record
+         * still name the absorbed id — deliberately, since that is what it was
+         * drawn from — but the *edges* are what a later delete walks. */
+        repoint_dependents(db, recs[i].id, survivor, ns);
+
         if (qe_delete(db, recs[i].id, ns) == AEGIS_OK) {
             merged++;
         }
     }
+    free(keep);
     return merged;
 }
 

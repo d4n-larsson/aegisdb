@@ -1680,13 +1680,12 @@ def test_retraction_follows_supersedes(binary, port):
               "and still stands after a restart rebuilds the mapping")
 
 
-def test_retraction_when_a_merge_destroys_the_fact(binary, port):
-    print("[inference: absorbing a fact-bearing record IS a loss]")
-    d = tempfile.mkdtemp(prefix="aegis_merge_lossy_")
+def test_consolidate_preserves_facts(binary, port):
+    print("[consolidate: a merge never destroys an assertion]")
+    d = tempfile.mkdtemp(prefix="aegis_merge_facts_")
     reg = os.path.join(d, "predicates.json")
     with open(reg, "w") as fh:
         json.dump({"part_of": {"object": "id", "transitive": True}}, fh)
-    vec = [0.0, 1.0] + [0.0] * 382
 
     with Server(binary, port, phase=4,
                 extra_args=["--predicate-registry", reg, "--inference",
@@ -1698,30 +1697,118 @@ def test_retraction_when_a_merge_destroys_the_fact(binary, port):
             p.update(kw)
             return srv.req(p)["record"]["id"]
 
+        def facts():
+            return srv.req({"operation": "stats"})["indexes"]["facts"]
+
+        def finds(f):
+            return len(srv.req({"operation": "search", "pattern": f,
+                                "top_k": 5}).get("records", []))
+
         a, b, c = (ins(x) for x in ("a", "b", "c"))
-        f = {"s": a, "p": "part_of", "o": {"id": b}}
-        # This time the near-duplicate carries NO fact, and wins the survivor
-        # tie-break — so the merge destroys the assertion rather than moving
-        # it. consolidate does not migrate a fact: UpdatePatch has no such
-        # field, because a fact is immutable. The conclusion must therefore be
-        # retracted, not kept alive by a mapping that would be lying.
-        ins("a is part of b", f, embedding=vec)
-        ins("a is part of b, roughly", embedding=vec)
+        v1 = [1.0] + [0.0] * 383
+
+        # The survivor carries no fact; the record it absorbs does. Before this
+        # fix the assertion was simply destroyed — UpdatePatch had no fact
+        # field, so `stats.facts` fell and no pattern could find the triple
+        # again. Quiet data loss, and it predates the inference work.
+        f1 = {"s": a, "p": "part_of", "o": {"id": b}}
+        p1 = ins("a is part of b", f1, embedding=v1)
+        dup = ins("a is part of b, roughly", embedding=v1)
         ins("b in c", {"s": b, "p": "part_of", "o": {"id": c}})
         _await_fixpoint(srv)
-        got = srv.req({"operation": "search",
-                       "pattern": {"s": a, "p": "part_of", "o": {"id": c}},
-                       "top_k": 5}).get("records", [])
-        check(len(got) == 1, "the conclusion was derived to begin with")
-        conc = got[0]["id"]
+        conc = srv.req({"operation": "search",
+                        "pattern": {"s": a, "p": "part_of", "o": {"id": c}},
+                        "top_k": 5})["records"][0]["id"]
+        before = facts()
 
-        srv.req({"operation": "consolidate", "min_similarity": 0.9})
-        check(len(srv.req({"operation": "search", "pattern": f,
-                           "top_k": 5}).get("records", [])) == 0,
-              "the merge destroyed the premise's fact (a separate defect)")
-        _await_stat(srv, "retracted", at_least=1)
-        check(srv.req({"operation": "get", "id": conc}).get("ok") is False,
-              "so the conclusion is retracted, not kept alive on nothing")
+        r = srv.req({"operation": "consolidate", "min_similarity": 0.9})
+        check(r.get("merged", 0) >= 1, f"consolidate merged ({r.get('merged')})")
+        check(srv.req({"operation": "get", "id": p1}).get("ok") is False,
+              "the fact-bearing record was absorbed")
+        check(facts() == before, f"and the fact count is unchanged ({facts()})")
+        check(finds(f1) == 1, "the triple is still findable")
+        check(srv.req({"operation": "get", "id": dup})["record"].get("fact")
+              == f1, "because the survivor adopted it")
+
+        # And the conclusion drawn from it therefore stands, with no churn:
+        # this is the case the supersession mapping exists for.
+        time.sleep(3)
+        check(srv.req({"operation": "get", "id": conc}).get("ok") is True,
+              "so the conclusion drawn from it stands")
+
+        # Two near-duplicates asserting *different* things are not duplicates
+        # in the sense that matters. A merge cannot carry two claims, so the
+        # smaller merge is the right answer — better than a lost assertion.
+        v2 = [0.0, 1.0] + [0.0] * 382
+        # x1 carries the tag and is inserted first, so x2 (later id, later
+        # updated) is the survivor and x1 is the record the fact check
+        # excludes. Tagging at insert rather than by update matters: an update
+        # would refresh x1's `updated` and make *it* the survivor, which is how
+        # the first version of this check ended up tagging the survivor and
+        # passing whether or not the fix was present.
+        x1 = ins("c is part of a", {"s": c, "p": "part_of", "o": {"id": a}},
+                 embedding=v2, tags=["donor-tag"])
+        x2 = ins("c is part of b", {"s": c, "p": "part_of", "o": {"id": b}},
+                 embedding=v2)
+        # These close a cycle under a transitive predicate, so the job has more
+        # to derive. Sample the count only once it has settled, or a tick
+        # landing mid-window fails the assertion below with a message that
+        # points at the wrong cause.
+        _await_fixpoint(srv)
+        before = facts()
+        r = srv.req({"operation": "consolidate", "min_similarity": 0.9})
+        check(r.get("merged", 0) == 0,
+              f"disagreeing records are not merged ({r.get('merged')})")
+        check(facts() == before, "so neither assertion is lost")
+        check(srv.req({"operation": "get", "id": x1}).get("ok") is True and
+              srv.req({"operation": "get", "id": x2}).get("ok") is True,
+              "and both records are still live")
+
+        # "Not merged" has to mean it donated nothing either — and that needs a
+        # cluster that *partly* merges, or the no-write early return above
+        # hides the question. A fact-less survivor (y3, inserted last) adopts
+        # y1's triple, folds y1, and must leave y2 alone: y2 asserts something
+        # else and carries a tag nothing should acquire.
+        v3 = [0.0, 0.0, 1.0] + [0.0] * 381
+        y1 = ins("d relates to a", {"s": a, "p": "part_of", "o": {"id": c}},
+                 embedding=v3)
+        ins("d relates to b", {"s": b, "p": "part_of", "o": {"id": a}},
+            embedding=v3, tags=["donor-tag"])
+        y3 = ins("d, no assertion", embedding=v3)
+        _await_fixpoint(srv)
+        r = srv.req({"operation": "consolidate", "min_similarity": 0.9})
+        check(r.get("merged", 0) == 1,
+              f"the agreeing member folds, the other does not ({r.get('merged')})")
+        check(srv.req({"operation": "get", "id": y1}).get("ok") is False,
+              "the agreeing member was absorbed")
+        tagged = srv.req({"operation": "search", "tags": ["donor-tag"],
+                          "top_k": 10}).get("records", [])
+        check(y3 not in [t["id"] for t in tagged],
+              "and the excluded member donated no tag to the survivor")
+
+        # And an unmergeable cluster must converge: it stays live, so it
+        # re-enters merge_cluster on every pass. Rewriting the survivor anyway
+        # would append a record and fsync forever, for no progress — and would
+        # keep refreshing `updated`, so forget's decay clock never advances.
+        # x2 is the survivor of this cluster (later id, later updated), so it
+        # is the record a needless rewrite would touch.
+        before_upd = {rid: srv.req({"operation": "get", "id": rid})
+                      ["record"]["updated"] for rid in (x1, x2)}
+        for _ in range(3):
+            r = srv.req({"operation": "consolidate", "min_similarity": 0.9})
+            check(r.get("merged", 0) == 0, "repeated passes merge nothing")
+        after_upd = {rid: srv.req({"operation": "get", "id": rid})
+                     ["record"]["updated"] for rid in (x1, x2)}
+        check(after_upd == before_upd,
+              "and write nothing — `updated` is untouched, so forget's decay "
+              "clock still advances")
+
+        # The wire is unchanged: a client still cannot edit a fact. Adoption is
+        # an internal path for a record that asserts nothing.
+        r = srv.req({"operation": "update", "id": x1,
+                     "fact": {"s": c, "p": "part_of", "o": {"id": a}}})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "and `update` still refuses a client-supplied fact")
 
 
 def test_inference_flag_validation(binary, port):
@@ -4286,7 +4373,7 @@ def main():
     test_subsume_requires_inference(binary, 19585)
     test_retraction_survives_a_lost_queue(binary, 19577)
     test_retraction_follows_supersedes(binary, 19579)
-    test_retraction_when_a_merge_destroys_the_fact(binary, 19581)
+    test_consolidate_preserves_facts(binary, 19581)
     test_predicate_registry_refuses_to_start(binary, 19551)
     test_codec_gate_with_a_real_v3_frame(binary, 19568)  # uses port, +1
     test_typed_facts_replica_parity(binary, 19548)  # uses port, +1 (repl stream), +2 (replica)

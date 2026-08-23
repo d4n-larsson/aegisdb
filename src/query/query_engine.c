@@ -411,6 +411,36 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
         pthread_rwlock_unlock(&db->index_lock);
         return AEGIS_ERR_IMMUTABLE;
     }
+    /* A fact can be *adopted* onto a record that asserts none, but never
+     * changed: the immutability rule is about altering a claim, and there is
+     * none to alter when the field is empty. Refused rather than ignored, so a
+     * caller cannot quietly get the opposite of what it asked for — and
+     * refused here, before anything is detached from the record, so the error
+     * path has nothing to leak. `update` rejects the field at the wire layer
+     * regardless; this exists for consolidation, which would otherwise destroy
+     * the assertion of the record it absorbs. */
+    if (patch->has_fact && patch->fact && cur.fact.kind != FACT_NONE) {
+        record_free(&cur);
+        pthread_rwlock_unlock(&db->index_lock);
+        return AEGIS_ERR_INVALID_REQUEST;
+    }
+    /* Applied here, before the payload and tags are staged, so its failure
+     * path has nothing detached to put back. An earlier version reattached
+     * `old_tags` the way the record_set_tags failure below does — but that
+     * idiom depends on cur.tags having been deliberately NULLed first, which
+     * is only true there. Copied without its precondition it leaked the newly
+     * set tags, or nulled out the record's own. */
+    int adopted_fact = 0;
+    if (patch->has_fact && patch->fact) {
+        if (record_set_fact(&cur, patch->fact->kind, patch->fact->subject,
+                            patch->fact->predicate, patch->fact->object_id,
+                            patch->fact->object_str) != 0) {
+            record_free(&cur);
+            pthread_rwlock_unlock(&db->index_lock);
+            return AEGIS_ERR_INTERNAL;
+        }
+        adopted_fact = 1;
+    }
 
     /* old tags for index diff */
     /* Detach (rather than free) the superseded payload: the lexical index is
@@ -478,11 +508,17 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
             tag_index_add(db->tags, cur.tags[i], cur.id);
         }
     }
-    /* No edge- or fact-index work here on purpose. An update patch reaches only
-     * tags and the payload — never `relationships` (relate/delete own those),
-     * and never `fact`, which is immutable by design: changing what a record
-     * asserts is a supersession, not an edit, so it leaves the auditable chain
-     * 2.1/2.2 already provide instead of silently rewriting history. */
+    if (st == AEGIS_OK && adopted_fact) {
+        /* The only fact-index work an update ever does. It is an add, never a
+         * swing: the record had no fact a moment ago, so there is nothing to
+         * unindex. */
+        db_fact_index_apply(db, &cur, 1);
+    }
+    /* No edge-index work here on purpose, and no fact *change*. An update patch
+     * reaches tags, the payload, and a fact only where none existed — never
+     * `relationships` (relate/delete own those), and never a rewrite of an
+     * existing claim, which is a supersession rather than an edit and leaves
+     * the auditable chain 2.1/2.2 already provide. */
     if (st == AEGIS_OK && patch->has_data) {
         /* Same discipline for the payload text: unindex the version that just
          * stopped being current, then index the one that replaced it. */

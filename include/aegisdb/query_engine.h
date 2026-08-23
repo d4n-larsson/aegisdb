@@ -38,6 +38,14 @@ typedef struct {
     int has_tags;
     const char *const *tags;
     size_t tag_count;
+    /* Adopt a fact onto a record that has none (ROADMAP 5.3). Not a general
+     * edit: qe_update refuses it outright when the record already asserts
+     * something, because changing a claim is a supersession — and `update`
+     * refuses the field at the wire layer regardless, so no client can reach
+     * this. It exists for consolidation, which would otherwise destroy the
+     * assertion of a record it absorbs. */
+    int has_fact;
+    const Fact *fact;
 } UpdatePatch;
 /* Update a semantic record. When `ns` is non-NULL the record must belong to that
  * namespace, or it reads back as NOT_FOUND (no cross-tenant leak). */
