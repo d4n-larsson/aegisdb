@@ -79,3 +79,30 @@ class TestConfig(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestCoercionCoverage(unittest.TestCase):
+    """Every non-str field must appear in a coercion set.
+
+    Two fields shipped without one: AEGIS_EXTRACT_TRIPLES=false coerced to the
+    string "false", which is truthy, so explicitly disabling the feature turned
+    it on; and extract_max_triples arrived as a str that raised TypeError the
+    moment it met a comparison. Both are invisible until an operator sets the
+    env var, so the guard is structural rather than per-field."""
+
+    def test_every_non_string_field_is_coerced(self):
+        import dataclasses
+        from aegis_mcp import config as cfg
+        typed = cfg._BOOL | cfg._INT | cfg._FLOAT
+        missing = []
+        for f in dataclasses.fields(cfg.Config):
+            if f.type in ("bool", "int", "float") and f.name not in typed:
+                missing.append(f.name)
+        self.assertEqual(missing, [],
+                         f"non-str Config fields absent from _BOOL/_INT/_FLOAT: "
+                         f"{missing}")
+
+    def test_a_false_string_disables_a_bool_field(self):
+        from aegis_mcp.config import load_config
+        for off in ("false", "0", "no", "off"):
+            c = load_config(env={"AEGIS_EXTRACT_TRIPLES": off})
+            self.assertFalse(c.extract_triples, f"{off!r} should disable")

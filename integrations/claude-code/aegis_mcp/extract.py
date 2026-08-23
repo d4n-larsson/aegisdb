@@ -38,6 +38,140 @@ class Fact:
     tags: list = field(default_factory=list)
 
 
+# ----- typed triples (ROADMAP 5.4 §3) ---------------------------------------
+#
+# A candidate names its subject and object as *strings* — the mentions as they
+# appeared — not as record ids. The model has no way to know an id, and letting
+# it guess one is the single failure that would be unrecoverable: a well-formed
+# triple about the wrong record is indistinguishable from a correct one, and
+# inference would compound it. Turning a mention into an id is grounding's job
+# (PR 2); until then a candidate is a proposal, not a record.
+
+
+@dataclass
+class CandidateTriple:
+    subject: str  # mention, not an id
+    predicate: str
+    obj: str  # mention for an id-valued predicate, literal for a string one
+    confidence: float = 0.6
+
+
+@dataclass
+class PredicateSpec:
+    """One declared predicate, as the server's registry file spells it."""
+
+    name: str
+    object: str  # "id" | "string"
+
+
+@dataclass
+class TripleResult:
+    """What one extraction proposed, and what survived the vocabulary.
+
+    Both counts are kept because the *ratio* is the number 5.4 is judged on —
+    the in-vocabulary rate. Reporting only what was accepted would make a
+    registry that rejects most of what the model proposes look identical to one
+    that fits the corpus."""
+
+    accepted: list = field(default_factory=list)
+    proposed: int = 0
+    rejected: list = field(default_factory=list)  # (predicate, reason)
+
+    @property
+    def in_vocabulary_rate(self) -> float:
+        return len(self.accepted) / self.proposed if self.proposed else 0.0
+
+
+class VocabularyError(Exception):
+    """A registry was configured and could not be read.
+
+    Distinct from "no registry configured" on purpose. 5.2 refuses to *start*
+    the server on a bad registry file, on the grounds that an operator who
+    configured a vocabulary is relying on it and degrading to "accept
+    everything" is the opposite of what they asked for. The same reasoning
+    applies here: a typo in the path would otherwise turn the contract off
+    silently, and the only symptom would be predicates the server later
+    refuses.
+    """
+
+
+def load_vocabulary(path: str):
+    """Read the predicate registry the server was started with.
+
+    Returns None when no registry is configured, a list when one is — including
+    the empty list for a registry that declares nothing, which is a meaningful
+    state and not the same as being unconfigured. Raises VocabularyError when a
+    configured registry cannot be read or is malformed.
+
+    The same file as the server's, deliberately: a second copy would drift from
+    the vocabulary the server enforces, and extraction would then propose
+    triples that insert refuses — a failure that looks like a bad model rather
+    than a misconfiguration.
+    """
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except OSError as e:
+        raise VocabularyError(f"cannot read predicate registry {path}: {e}")
+    except ValueError as e:
+        raise VocabularyError(f"predicate registry {path} is not valid JSON: {e}")
+    if not isinstance(raw, dict):
+        raise VocabularyError(f"predicate registry {path} is not an object")
+    out = []
+    for name, spec in raw.items():
+        if not isinstance(spec, dict) or spec.get("object") not in ("id",
+                                                                    "string"):
+            # Refused rather than skipped, for the reason the server refuses to
+            # start on one: a predicate silently missing from the vocabulary
+            # becomes triples silently rejected, and the operator sees a low
+            # in-vocabulary rate with nothing pointing at the typo.
+            raise VocabularyError(
+                f"predicate registry {path}: '{name}' needs an \"object\" of "
+                f'"id" or "string"')
+        out.append(PredicateSpec(name=name, object=spec["object"]))
+    return out
+
+
+def validate_triples(candidates: list, vocab) -> TripleResult:
+    """Keep the candidates the registry declares; count and name the rest.
+
+    `vocab` is None when no registry is configured and a list when one is. The
+    two are not the same: an unconfigured server accepts any predicate, so this
+    does too — being stricter than the thing that enforces it would reject
+    writes that would have succeeded. A registry that declares *nothing*
+    rejects everything, which is what the server does with an empty one, and
+    conflating the two would turn a misconfiguration into silent permissiveness.
+
+    Rejection is deliberate, and deliberately not repair. Nothing here maps
+    `is_part_of` onto `part_of` or picks the closest declared predicate:
+    coercion would turn the in-vocabulary rate — the measurable thing — into a
+    silent change to what the corpus asserts. A dropped triple costs the
+    machine-readable half of one record; the prose is still captured and still
+    searchable, so the failure degrades rather than loses.
+    """
+    res = TripleResult(proposed=len(candidates))
+    by_name = None if vocab is None else {p.name: p for p in vocab}
+    for c in candidates:
+        # Checked before the vocabulary, because it is not a vocabulary
+        # question: an empty mention cannot become a record reference whether
+        # or not a registry is configured, and grounding would receive
+        # something it cannot resolve either way.
+        if not c.subject.strip() or not c.obj.strip():
+            res.rejected.append((c.predicate, "empty mention"))
+            continue
+        if by_name is None:
+            res.accepted.append(c)
+            continue
+        spec = by_name.get(c.predicate)
+        if spec is None:
+            res.rejected.append((c.predicate, "undeclared"))
+            continue
+        res.accepted.append(c)
+    return res
+
+
 # The transcript is UNTRUSTED (it may contain attacker-influenced text — the
 # transcript-poisoning concern). The prompt frames it strictly as data and tells
 # the model to ignore any instructions inside it.
@@ -165,6 +299,16 @@ class ExtractionProvider:
         and should replace. Default: supersede nothing."""
         return []
 
+    def extract_triples(self, text: str, vocab: list,
+                        max_triples: int) -> list | None:
+        """Propose typed triples for `text`, drawn from `vocab` (ROADMAP 5.4).
+
+        Returns a list of CandidateTriple (possibly empty), or None if the
+        backend could not answer — the same contract as `extract`, so the caller
+        falls back rather than failing. Default: propose nothing, which is what
+        every backend does until PR 4 gives the model ones a prompt."""
+        return []
+
 
 class NoneExtractionProvider(ExtractionProvider):
     """Feature disabled (default): capture keeps its heuristic behavior."""
@@ -193,6 +337,39 @@ class FakeExtractionProvider(ExtractionProvider):
             if len(facts) >= max_facts:
                 break
         return facts
+
+    def extract_triples(self, text: str, vocab: list,
+                        max_triples: int) -> list | None:
+        """Deterministic triples from `SUBJECT :predicate: OBJECT` lines.
+
+        An explicit line format rather than a guess at the prose, because this
+        backend exists to make the *pipeline* testable, not to stand in for a
+        model's reading comprehension. A test writes the triples it wants and
+        gets exactly those.
+
+        Crucially it will emit a predicate that is **not** in `vocab` if a
+        transcript asks for one. The rejection path is the half of 5.4 that
+        decides whether the registry is a contract or a formality, and a fake
+        that could only produce valid triples would leave it untested.
+        """
+        out = []
+        for line in text.splitlines():
+            # Anchored on " : " with spaces, and split at most twice. A bare
+            # ":" split broke both ways: `hnsw.c:214` — the identifier shape
+            # this corpus is full of, and the design's own worked example —
+            # produced four parts and was dropped, while any prose line with
+            # two colons ("INFO: hnsw: rebuilt index") became a triple and ate
+            # a slot from the cap.
+            if " : " not in line:
+                continue
+            parts = [p.strip() for p in line.strip().split(" : ", 2)]
+            if len(parts) != 3 or not all(parts):
+                continue
+            out.append(CandidateTriple(subject=parts[0], predicate=parts[1],
+                                       obj=parts[2]))
+            if len(out) >= max_triples:
+                break
+        return out
 
     def judge_supersedes(self, new_fact: str, candidates: list[str]) -> list[int]:
         """Deterministic: supersede a candidate that shares the new fact's opening

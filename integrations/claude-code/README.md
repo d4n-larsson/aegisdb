@@ -360,6 +360,9 @@ explicit overrides.
 | `AEGIS_EXTRACT_API_BASE` | — | `openai` backend: base URL for an OpenAI-compatible endpoint |
 | `AEGIS_EXTRACT_MAX_FACTS` | `12` | cap facts stored per session |
 | `AEGIS_EXTRACT_MAX_INPUT_CHARS` | `24000` | cap transcript chars sent to the model (keeps the most recent) |
+| `AEGIS_EXTRACT_TRIPLES` | `false` | propose typed `{s, p, o}` triples alongside prose facts (ROADMAP 5.4). Needs `AEGIS_EXTRACT_REGISTRY`: the vocabulary is a contract, so proposing triples with nothing to check them against is not a smaller version of the feature. A predicate the registry does not declare is **dropped and counted, never coerced** onto the nearest one — the prose is still captured, so a rejection degrades to today's behaviour rather than losing anything |
+| `AEGIS_EXTRACT_REGISTRY` | — | path to the **same** `--predicate-registry` file the server was started with. A second copy would drift, and extraction would then propose triples the server refuses — which looks like a bad model rather than a misconfiguration. A path that is set but unreadable, or a malformed entry, is an **error**, not a fallback to accepting everything: the server refuses to *start* on a bad registry for the same reason, and silently degrading would be the opposite of what configuring a vocabulary asks for |
+| `AEGIS_EXTRACT_MAX_TRIPLES` | `16` | cap candidates proposed per transcript |
 | `AEGIS_EXTRACT_SUPERSEDE` | `true` | when an extracted fact updates/contradicts an existing memory, replace it (tombstone + a `supersedes` provenance link) instead of accumulating both. Needs embeddings + an extractor backend; active only when `AEGIS_EXTRACT_MODE` is on |
 | `AEGIS_EXTRACT_SUPERSEDE_TOP_K` | `5` | similar existing memories considered per new fact |
 | `AEGIS_EXTRACT_SUPERSEDE_MIN_SCORE` | `0.6` | cosine floor for a supersession candidate |
