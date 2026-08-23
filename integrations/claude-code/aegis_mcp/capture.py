@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 
 from .client import AegisClient
@@ -246,15 +247,34 @@ def _store_triples(texts, config, tools, extractor) -> int:
         return 0
     try:
         vocab = load_vocabulary(getattr(config, "extract_registry", ""))
-    except VocabularyError:
+    except VocabularyError as e:
+        # Said out loud. A configured-but-unreadable registry disables the
+        # contract, and silence here is indistinguishable from a session with
+        # nothing to extract — an operator who typos the path would capture
+        # prose only, forever, with no output pointing at why.
+        print(f"[aegis-mcp] triples disabled: {e}", file=sys.stderr)
         return 0
     if vocab is None:
+        print("[aegis-mcp] triples enabled but no registry configured "
+              "(AEGIS_EXTRACT_REGISTRY); the vocabulary is the contract, so "
+              "nothing is proposed", file=sys.stderr)
         return 0
     blob = _transcript_blob(texts, config)
     try:
-        return store_triples(tools, blob, vocab, config, extractor).stored
+        res = store_triples(tools, blob, vocab, config, extractor)
     except Exception:
         return 0
+    if res.proposed:
+        # The in-vocabulary rate is the number 5.4 is judged on, and without
+        # this line a store that rejects everything, one that mints for every
+        # mention, and one working perfectly all print the same thing.
+        print(f"[aegis-mcp] triples: {res.stored} stored, {res.proposed} "
+              f"proposed, {res.rejected} out of vocabulary "
+              f"({res.in_vocabulary_rate:.0%} in-vocabulary), "
+              f"{res.ungrounded} ungrounded, {res.failed} refused; entities "
+              f"{res.entities_resolved} reused / {res.entities_minted} minted",
+              file=sys.stderr)
+    return res.stored
 
 
 def run_capture(event: dict, config, provider: EmbeddingProvider,
@@ -273,8 +293,10 @@ def run_capture(event: dict, config, provider: EmbeddingProvider,
     extractor = make_extraction_provider(config)
     facts = extract_facts(texts, config, extractor)
     if facts is not None:  # extractor ran (even if it found nothing)
-        if not facts:
-            return 0
+        # Not `if not facts: return 0`. A session can hold a groundable
+        # relation while holding nothing worth keeping as prose, and returning
+        # early there made the triple path depend on the *prose* extractor
+        # finding something — which is not what "strictly additive" means.
         if client is None:
             client = AegisClient.from_config(config)
         tools = MemoryTools(config, client, provider)

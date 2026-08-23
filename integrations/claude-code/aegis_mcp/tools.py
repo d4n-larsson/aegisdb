@@ -177,7 +177,8 @@ class MemoryTools:
                start_time: int | None = None, end_time: int | None = None,
                top_k: int | None = None, kind: str | None = None,
                max_importance: float | None = None,
-               order: str | None = None, lexical: bool = False) -> dict:
+               order: str | None = None, lexical: bool = False,
+               pattern: dict | None = None) -> dict:
         """Recall memories. `lexical` opts into the server's BM25 keyword index
         (fused with the embedding when one is available), which is what makes an
         exact identifier findable and is the *only* content-based path when
@@ -189,10 +190,18 @@ class MemoryTools:
         would silently discard everything if handed fused scores."""
         top_k = top_k or self.config.recall_top_k
         tags = list(tags or [])
-        if not query and not tags and start_time is None and end_time is None:
-            return results.err("invalid", "search requires query, tags, or a time range")
+        if (not query and not tags and start_time is None
+                and end_time is None and pattern is None):
+            return results.err("invalid",
+                               "search requires query, tags, a pattern, or a "
+                               "time range")
 
         payload = {"operation": "search", "top_k": top_k}
+        if pattern is not None:
+            # Filter on the typed fact a record asserts (ROADMAP 5.2). With all
+            # three positions bound this is an index probe, which is what makes
+            # "does the corpus already say this?" cheap enough to ask per write.
+            payload["pattern"] = pattern
         if tags:
             payload["tags"] = tags
             payload["match"] = match

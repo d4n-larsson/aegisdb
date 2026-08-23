@@ -20,7 +20,7 @@ Three properties the arrangement is built to keep:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .extract import validate_triples
 from .grounding import ground_mentions
@@ -32,6 +32,7 @@ class TripleStoreResult:
     proposed: int = 0
     rejected: int = 0  # out of vocabulary, client-side
     ungrounded: int = 0  # no entity id, and the mint cap was spent
+    duplicate: int = 0  # the corpus already asserts exactly this
     failed: int = 0  # the server refused the write
     entities_resolved: int = 0
     entities_minted: int = 0
@@ -70,6 +71,22 @@ def _mentions_of(triples, spec_of):
     return out
 
 
+def _already_asserted(tools, fact) -> bool:
+    """Does the corpus already hold exactly this triple?
+
+    An exact `pattern` lookup, which is what 5.2's fact index is for: all three
+    positions bound, so it is an index probe rather than a scan, and cheap
+    enough to ask once per write. A failure to answer is read as "not present"
+    — writing a duplicate is a smaller error than dropping a fact the corpus
+    does not have.
+    """
+    try:
+        res = tools.search(pattern=fact, top_k=1)
+    except Exception:
+        return False
+    return bool(res.get("ok") and res.get("memories"))
+
+
 def store_triples(tools, text, vocab, config, extractor) -> TripleStoreResult:
     """Propose, validate, ground and write. Returns what happened at each step.
 
@@ -104,7 +121,12 @@ def store_triples(tools, text, vocab, config, extractor) -> TripleStoreResult:
     res.entities_resolved = grounded.resolved
     res.entities_minted = grounded.minted
 
-    confidence = float(getattr(config, "extract_triple_confidence", 0.6))
+    # Clamped: the server validates confidence into [0, 1] and refuses the
+    # whole insert outside it, which would surface as every triple `failed`
+    # with nothing naming the setting responsible.
+    confidence = min(1.0, max(0.0,
+                              float(getattr(config,
+                                            "extract_triple_confidence", 0.6))))
     for t in checked.accepted:
         subject_id = grounded.ids.get(t.subject)
         if subject_id is None:
@@ -120,6 +142,13 @@ def store_triples(tools, text, vocab, config, extractor) -> TripleStoreResult:
             fact["o"] = {"id": object_id}
         else:
             fact["o"] = t.obj
+        if _already_asserted(tools, fact):
+            # A stable convention gets restated every session, and the prose
+            # path already guards against that with supersession. Without the
+            # same guard here one identical assertion accumulates per capture,
+            # and 5.3's derivation walk then traverses every copy.
+            res.duplicate += 1
+            continue
         try:
             out = tools.save(render(t.subject, t.predicate, t.obj),
                              tags=["fact"], semantic=True,

@@ -93,6 +93,28 @@ def format_context(memories, max_chars_per_memory: int = 0,
     return "\n".join(lines), included
 
 
+ENTITY_TAG = "entity"
+
+
+def _drop_entity_stubs(memories):
+    """Remove entity records from an injected recall block.
+
+    An entity record (ROADMAP 5.4 §4) exists to give a fact's subject an id;
+    its text is the bare mention — "hnsw.c" — so it carries no information a
+    model could use, while matching the mention in a prompt better than any
+    real memory does. Left in, a stub outranks the memory that actually says
+    something about the thing, and with recall_top_k at 3 it can take two of
+    the three injected slots.
+
+    Filtered here rather than at the query, because the server has no
+    exclude-by-tag filter and adding one for this would be a wire change to
+    solve a presentation problem. The cost is that a page of stubs can still
+    displace real results *inside* top_k — which is an argument for the tag
+    filter later, not for injecting them now.
+    """
+    return [m for m in memories if ENTITY_TAG not in (m.get("tags") or [])]
+
+
 def run_recall(prompt: str, config, provider: EmbeddingProvider,
                client: AegisClient | None = None, clock=time.monotonic) -> RecallResult:
     start = clock()
@@ -141,7 +163,7 @@ def run_recall(prompt: str, config, provider: EmbeddingProvider,
     if res is None or not res.get("ok"):
         return RecallResult(degraded=True, elapsed_ms=elapsed_ms)
 
-    memories = res.get("memories", [])
+    memories = _drop_entity_stubs(res.get("memories", []))
     context, included = format_context(
         memories,
         max_chars_per_memory=config.recall_max_chars_per_memory,

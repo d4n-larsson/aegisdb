@@ -166,3 +166,22 @@ class TestFormatContext(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestEntityStubsAreNotInjected(unittest.TestCase):
+    """Minted entity records (ROADMAP 5.4 §4) carry the bare mention as their
+    text, so they match a prompt naming that thing better than any real memory
+    does — while saying nothing. Verified live before this filter: with
+    recall_top_k at 3, two of the three injected slots were stubs."""
+
+    def test_entity_tagged_memories_are_dropped(self):
+        from aegis_mcp.recall import _drop_entity_stubs
+        mems = [{"id": 1, "text": "hnsw.c", "tags": ["entity"]},
+                {"id": 2, "text": "hnsw.c rebuilds on restart", "tags": ["session"]},
+                {"id": 3, "text": "hnsw.c part of the storage layer",
+                 "tags": ["fact"]}]
+        self.assertEqual([m["id"] for m in _drop_entity_stubs(mems)], [2, 3])
+
+    def test_records_without_tags_survive(self):
+        from aegis_mcp.recall import _drop_entity_stubs
+        self.assertEqual(_drop_entity_stubs([{"id": 1, "text": "x"}]),
+                         [{"id": 1, "text": "x"}])

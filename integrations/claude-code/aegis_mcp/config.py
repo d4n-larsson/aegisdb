@@ -98,7 +98,10 @@ class Config:
     # the middle, where this cannot.
     grounding_min_score: float = 0.85  # cosine floor for reusing an entity
     grounding_top_k: int = 5  # entity candidates considered per mention
-    grounding_max_mint: int = 8  # new entity records per extraction
+    # Two mentions per triple at worst (subject and an id-valued object), so
+    # this has to cover 2 * extract_max_triples or a first capture on a rich
+    # transcript silently drops the overflow as ungrounded.
+    grounding_max_mint: int = 32  # new entity records per extraction
     # Confidence for a fact a model proposed, deliberately below what a human
     # or a rule writes (ROADMAP 5.4 §7). It is not decoration: 5.3 propagates
     # confidence as a product along a derivation chain, so this number silently

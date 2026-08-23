@@ -94,8 +94,8 @@ class TestTriplesE2E(unittest.TestCase):
         """The client-side check is an optimization; the server's is the
         contract. Started with a registry that omits `part_of`, the write must
         fail — and be counted as a failure rather than silently dropped."""
-        narrow = tempfile.mkstemp(suffix=".json")[1]
-        with open(narrow, "w") as fh:
+        fd, narrow = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as fh:
             json.dump({"defaults_to": {"object": "string"}}, fh)
         try:
             with AegisServer(extra_args=["--predicate-registry", narrow]) as srv:
@@ -164,6 +164,57 @@ class TestTriplesE2E(unittest.TestCase):
             entities = tools.search(tags=["entity"], top_k=20)
             self.assertEqual(len(entities.get("memories", [])), 1,
                              "one thing, one symbol")
+
+    def test_the_same_triple_is_not_asserted_twice(self):
+        """A stable convention gets restated every session. Without a guard,
+        one identical assertion accumulates per capture and 5.3's derivation
+        walk then traverses every copy."""
+        with AegisServer(extra_args=["--predicate-registry", self.registry]) as srv:
+            cfg, tools = self._wired(srv)
+            vocab = load_vocabulary(self.registry)
+            text = "hnsw.c : part_of : the storage layer\n"
+            first = store_triples(tools, text, vocab, cfg,
+                                  FakeExtractionProvider())
+            self.assertEqual((first.stored, first.duplicate), (1, 0))
+
+            second = store_triples(tools, text, vocab, cfg,
+                                   FakeExtractionProvider())
+            self.assertEqual((second.stored, second.duplicate), (0, 1))
+            facts = tools.search(tags=["fact"], top_k=10)
+            self.assertEqual(len(facts.get("memories", [])), 1,
+                             "one assertion, however many times it is said")
+
+    def test_a_transcript_with_no_prose_facts_still_yields_triples(self):
+        """The triple path must not depend on the *prose* extractor finding
+        something: a session can hold a groundable relation and nothing worth
+        keeping as prose. `run_capture` used to return before reaching it."""
+        from aegis_mcp.capture import run_capture
+
+        class NoProseExtractor(FakeExtractionProvider):
+            def extract(self, text, max_facts):
+                return []
+
+        with AegisServer(extra_args=["--predicate-registry", self.registry]) as srv:
+            cfg, tools = self._wired(srv, extract_mode="fake")
+            fd, path = tempfile.mkstemp(suffix=".jsonl")
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps({"type": "assistant",
+                                     "content": "hnsw.c : part_of : the storage layer"})
+                         + "\n")
+            try:
+                import aegis_mcp.capture as cap
+                real = cap.make_extraction_provider
+                cap.make_extraction_provider = lambda c: NoProseExtractor()
+                try:
+                    stored = run_capture({"transcript_path": path}, cfg,
+                                         FakeProvider(srv.dim))
+                finally:
+                    cap.make_extraction_provider = real
+            finally:
+                os.unlink(path)
+            self.assertEqual(stored, 1, "the triple is stored on its own")
+            self.assertEqual(len(tools.search(tags=["fact"], top_k=5)
+                                  .get("memories", [])), 1)
 
     def test_off_by_default_changes_nothing(self):
         with AegisServer(extra_args=["--predicate-registry", self.registry]) as srv:
