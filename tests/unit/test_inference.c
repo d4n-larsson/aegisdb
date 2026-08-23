@@ -74,11 +74,11 @@ static void test_transitive(void) {
 
     const InferConclusion *c = find(&res, 10, "part_of", 30);
     TEST_ASSERT_NOT_NULL(c);
-    TEST_ASSERT_EQUAL_INT(DERIV_TRANSITIVE, c->rule);
-    TEST_ASSERT_EQUAL_size_t(2, c->premise_count);
-    TEST_ASSERT_EQUAL_UINT64(1, c->premises[0]);
-    TEST_ASSERT_EQUAL_UINT64(2, c->premises[1]);
-    TEST_ASSERT_EQUAL_UINT16(1, c->depth);
+    TEST_ASSERT_EQUAL_INT(DERIV_TRANSITIVE, c->routes[0].rule);
+    TEST_ASSERT_EQUAL_size_t(2, c->routes[0].premise_count);
+    TEST_ASSERT_EQUAL_UINT64(1, c->routes[0].premises[0]);
+    TEST_ASSERT_EQUAL_UINT64(2, c->routes[0].premises[1]);
+    TEST_ASSERT_EQUAL_UINT16(1, c->routes[0].depth);
     TEST_ASSERT_EQUAL_INT(0, res.truncated);
 
     infer_result_free(&res);
@@ -95,9 +95,9 @@ static void test_symmetric(void) {
 
     const InferConclusion *c = find(&res, 20, "conflicts_with", 10);
     TEST_ASSERT_NOT_NULL(c);
-    TEST_ASSERT_EQUAL_INT(DERIV_SYMMETRIC, c->rule);
-    TEST_ASSERT_EQUAL_size_t(1, c->premise_count);
-    TEST_ASSERT_EQUAL_UINT64(1, c->premises[0]);
+    TEST_ASSERT_EQUAL_INT(DERIV_SYMMETRIC, c->routes[0].rule);
+    TEST_ASSERT_EQUAL_size_t(1, c->routes[0].premise_count);
+    TEST_ASSERT_EQUAL_UINT64(1, c->routes[0].premises[0]);
 
     infer_result_free(&res);
     predicate_registry_free(reg);
@@ -114,7 +114,7 @@ static void test_inverse(void) {
 
     const InferConclusion *c = find(&res, 20, "contains", 10);
     TEST_ASSERT_NOT_NULL(c);
-    TEST_ASSERT_EQUAL_INT(DERIV_INVERSE, c->rule);
+    TEST_ASSERT_EQUAL_INT(DERIV_INVERSE, c->routes[0].rule);
 
     infer_result_free(&res);
     predicate_registry_free(reg);
@@ -207,7 +207,10 @@ static void test_duplicate_conclusions_collapse(void) {
             hits++;
         }
     }
-    TEST_ASSERT_EQUAL_size_t(1, hits);
+    TEST_ASSERT_EQUAL_size_t(1, hits); /* one conclusion... */
+    const InferConclusion *both = find(&res, 10, "part_of", 40);
+    TEST_ASSERT_NOT_NULL(both);
+    TEST_ASSERT_EQUAL_size_t(2, both->route_count); /* ...justified two ways */
     infer_result_free(&res);
     predicate_registry_free(reg);
 }
@@ -280,7 +283,7 @@ static void test_depth_and_confidence_propagate(void) {
     TEST_ASSERT_EQUAL_INT(0, infer_run(facts, 2, reg, NULL, &res));
     const InferConclusion *c = find(&res, 10, "part_of", 30);
     TEST_ASSERT_NOT_NULL(c);
-    TEST_ASSERT_EQUAL_UINT16(3, c->depth); /* max(2,1) + 1 */
+    TEST_ASSERT_EQUAL_UINT16(3, c->routes[0].depth); /* max(2,1) + 1 */
     TEST_ASSERT_FLOAT_WITHIN(1e-6F, 0.2F, c->confidence);
     TEST_ASSERT_TRUE(c->confidence <= facts[0].confidence);
     infer_result_free(&res);
@@ -333,7 +336,7 @@ static void test_max_depth_stops_the_chain(void) {
     InferResult res2;
     TEST_ASSERT_EQUAL_INT(0, infer_run(facts, 2, reg, &opts, &res2));
     TEST_ASSERT_EQUAL_size_t(1, res2.n);
-    TEST_ASSERT_EQUAL_UINT16(5, res2.items[0].depth);
+    TEST_ASSERT_EQUAL_UINT16(5, res2.items[0].routes[0].depth);
 
     infer_result_free(&res2);
     infer_result_free(&res);
@@ -522,10 +525,11 @@ static void test_duplicates_past_the_cap_are_not_truncation(void) {
 
 /* ----- provenance -------------------------------------------------------- */
 
-/* When two routes reach the same triple, the recorded premises must not depend
- * on which the scan met first: the provenance ends up in a durable record, so
- * scan order would otherwise decide what the log says. */
-static void test_provenance_is_order_independent(void) {
+/* Two routes to the same triple must BOTH be recorded — support is
+ * disjunctive, so keeping only one would let retraction drop a conclusion the
+ * other route still justifies. And the set must not depend on which the scan
+ * met first, because it ends up in a durable record. */
+static void test_both_routes_are_recorded_and_ordered(void) {
     PredicateRegistry *reg =
         load("{\"part_of\": {\"object\": \"id\", \"transitive\": true}}");
     InferFact fwd[] = {
@@ -544,10 +548,19 @@ static void test_provenance_is_order_independent(void) {
     const InferConclusion *cb = find(&b, 10, "part_of", 40);
     TEST_ASSERT_NOT_NULL(ca);
     TEST_ASSERT_NOT_NULL(cb);
-    TEST_ASSERT_EQUAL_UINT64(ca->premises[0], cb->premises[0]);
-    TEST_ASSERT_EQUAL_UINT64(ca->premises[1], cb->premises[1]);
-    TEST_ASSERT_EQUAL_UINT64(1, ca->premises[0]); /* the lower-id route wins */
-    TEST_ASSERT_EQUAL_UINT64(2, ca->premises[1]);
+    /* both justifications survive, in the same order, whichever way we scanned */
+    TEST_ASSERT_EQUAL_size_t(2, ca->route_count);
+    TEST_ASSERT_EQUAL_size_t(2, cb->route_count);
+    for (size_t i = 0; i < 2; i++) {
+        TEST_ASSERT_EQUAL_UINT64(ca->routes[i].premises[0],
+                                 cb->routes[i].premises[0]);
+        TEST_ASSERT_EQUAL_UINT64(ca->routes[i].premises[1],
+                                 cb->routes[i].premises[1]);
+    }
+    TEST_ASSERT_EQUAL_UINT64(1, ca->routes[0].premises[0]); /* 10->20->40 */
+    TEST_ASSERT_EQUAL_UINT64(2, ca->routes[0].premises[1]);
+    TEST_ASSERT_EQUAL_UINT64(3, ca->routes[1].premises[0]); /* 10->30->40 */
+    TEST_ASSERT_EQUAL_UINT64(4, ca->routes[1].premises[1]);
     infer_result_free(&b);
     infer_result_free(&a);
     predicate_registry_free(reg);
@@ -569,6 +582,73 @@ static void test_depth_does_not_wrap(void) {
     InferResult res;
     TEST_ASSERT_EQUAL_INT(0, infer_run(facts, 2, reg, &opts, &res));
     TEST_ASSERT_EQUAL_size_t(0, res.n); /* refused, not wrapped to depth 0 */
+    infer_result_free(&res);
+    predicate_registry_free(reg);
+}
+
+/* Past DERIV_MAX_ROUTES the lowest-ordered routes are kept. Dropping a route
+ * can only cost a retraction-and-re-derivation, never a wrong answer, so the
+ * cap is a memory bound rather than a correctness one. */
+static void test_routes_are_capped_keeping_the_lowest(void) {
+    PredicateRegistry *reg =
+        load("{\"part_of\": {\"object\": \"id\", \"transitive\": true}}");
+    /* six intermediates, so (10 part_of 99) has six justifications */
+    InferFact facts[13];
+    size_t n = 0;
+    for (uint64_t m = 0; m < 6; m++) {
+        facts[n] = f_id(n + 1, 10, "part_of", 20 + m);
+        n++;
+        facts[n] = f_id(n + 1, 20 + m, "part_of", 99);
+        n++;
+    }
+    InferResult res;
+    TEST_ASSERT_EQUAL_INT(0, infer_run(facts, n, reg, NULL, &res));
+    const InferConclusion *c = find(&res, 10, "part_of", 99);
+    TEST_ASSERT_NOT_NULL(c);
+    TEST_ASSERT_EQUAL_size_t(DERIV_MAX_ROUTES, c->route_count);
+    /* kept in premise-id order, lowest first */
+    for (size_t i = 1; i < c->route_count; i++) {
+        TEST_ASSERT_TRUE(c->routes[i - 1].premises[0] <
+                         c->routes[i].premises[0]);
+    }
+    TEST_ASSERT_EQUAL_UINT64(1, c->routes[0].premises[0]);
+    infer_result_free(&res);
+    predicate_registry_free(reg);
+}
+
+/* A route the cap dropped must not leave its confidence behind. The dropped
+ * routes here are the *most* confident, so a conclusion that kept the raised
+ * value would carry a number its own recorded provenance cannot justify. */
+static void test_confidence_comes_from_a_kept_route(void) {
+    PredicateRegistry *reg =
+        load("{\"part_of\": {\"object\": \"id\", \"transitive\": true}}");
+    /* six routes to (10 part_of 99); routes are kept by lowest premise id, so
+     * the last two are dropped — and those are the ones given confidence 1.0 */
+    InferFact facts[12];
+    size_t n = 0;
+    for (uint64_t m = 0; m < 6; m++) {
+        facts[n] = f_id(n + 1, 10, "part_of", 20 + m);
+        facts[n].confidence = (m >= 4) ? 1.0F : 0.5F;
+        n++;
+        facts[n] = f_id(n + 1, 20 + m, "part_of", 99);
+        facts[n].confidence = (m >= 4) ? 1.0F : 0.5F;
+        n++;
+    }
+    InferResult res;
+    TEST_ASSERT_EQUAL_INT(0, infer_run(facts, n, reg, NULL, &res));
+    const InferConclusion *c = find(&res, 10, "part_of", 99);
+    TEST_ASSERT_NOT_NULL(c);
+    TEST_ASSERT_EQUAL_size_t(DERIV_MAX_ROUTES, c->route_count);
+    /* 0.5 * 0.5, from a route that survived — not 1.0 from one that did not */
+    TEST_ASSERT_FLOAT_WITHIN(1e-6F, 0.25F, c->confidence);
+    /* and it is exactly the best of the routes actually recorded */
+    float best = 0.0F;
+    for (size_t i = 0; i < c->route_count; i++) {
+        if (c->routes[i].confidence > best) {
+            best = c->routes[i].confidence;
+        }
+    }
+    TEST_ASSERT_FLOAT_WITHIN(1e-6F, best, c->confidence);
     infer_result_free(&res);
     predicate_registry_free(reg);
 }
@@ -595,7 +675,9 @@ int main(void) {
     RUN_TEST(test_work_budget_bounds_a_closed_corpus);
     RUN_TEST(test_start_index_rotates_the_scan);
     RUN_TEST(test_duplicates_past_the_cap_are_not_truncation);
-    RUN_TEST(test_provenance_is_order_independent);
+    RUN_TEST(test_both_routes_are_recorded_and_ordered);
     RUN_TEST(test_depth_does_not_wrap);
+    RUN_TEST(test_routes_are_capped_keeping_the_lowest);
+    RUN_TEST(test_confidence_comes_from_a_kept_route);
     return UNITY_END();
 }

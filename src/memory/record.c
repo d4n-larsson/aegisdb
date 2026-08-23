@@ -9,11 +9,12 @@
 
 /* v1: single embedding (dim + dim floats). v2 (#85): vec_count + dim +
  * vec_count*dim floats. v3 (ROADMAP 5.2): an optional typed fact between the
- * relationships and the payload. v4 (ROADMAP 5.3): an optional derivation
- * between the fact and the payload.
+ * relationships and the payload. v5 (ROADMAP 5.3): an optional derivation —
+ * a set of independent justifications — between the fact and the payload. v4 is
+ * skipped; see record.h.
  *
  * decode reads all three. encode writes the *lowest* version that can represent
- * the record: v4 only when a derivation is present, v3 when a fact is but a
+ * the record: v5 only when a derivation is present, v3 when a fact is but a
  * derivation is not, v2 otherwise. That is the whole
  * compatibility story — an existing log stays readable, and a deployment that
  * never writes a fact keeps producing byte-identical frames, so nothing about
@@ -54,7 +55,7 @@ void record_free(MemoryRecord *r) {
     free(r->relationships);
     free(r->fact.predicate);
     free(r->fact.object_str);
-    free(r->derivation.premises);
+    free(r->derivation.routes);
     free(r->data);
     memset(r, 0, sizeof(*r));
 }
@@ -150,11 +151,12 @@ MemoryRecord *record_clone(const MemoryRecord *src) {
                         src->fact.object_str) != 0) {
         goto fail;
     }
-    if (src->derivation.rule != DERIV_NONE &&
-        record_set_derivation(r, src->derivation.rule, src->derivation.depth,
-                              src->derivation.premises,
-                              src->derivation.premise_count) != 0) {
-        goto fail;
+    for (size_t i = 0; i < src->derivation.route_count; i++) {
+        const DerivRoute *rt = &src->derivation.routes[i];
+        if (record_add_route(r, rt->rule, rt->depth, rt->premises,
+                             rt->premise_count) < 0) {
+            goto fail;
+        }
     }
     if (src->embedding_dim && src->vec_count) {
         /* Overflow-safe: bound vec_count*dim and the *sizeof(float) allocation
@@ -232,34 +234,96 @@ int record_set_fact(MemoryRecord *r, FactKind kind, uint64_t subject,
     return 0;
 }
 
-int record_set_derivation(MemoryRecord *r, DerivRule rule, uint16_t depth,
-                          const uint64_t *premises, size_t n) {
-    if (rule == DERIV_NONE) {
-        free(r->derivation.premises);
-        memset(&r->derivation, 0, sizeof(r->derivation));
-        return 0;
+uint16_t derivation_depth(const Derivation *d) {
+    uint16_t best = 0;
+    for (size_t i = 0; i < d->route_count; i++) {
+        if (i == 0 || d->routes[i].depth < best) {
+            best = d->routes[i].depth;
+        }
     }
+    return best;
+}
+
+void record_clear_derivation(MemoryRecord *r) {
+    free(r->derivation.routes);
+    memset(&r->derivation, 0, sizeof(r->derivation));
+}
+
+/* Total order over routes, so a record's provenance is a function of which
+ * routes exist and not of the order they were found in. */
+static int route_cmp(const DerivRoute *a, const DerivRoute *b) {
+    size_t n = a->premise_count < b->premise_count ? a->premise_count
+                                                   : b->premise_count;
+    for (size_t i = 0; i < n; i++) {
+        if (a->premises[i] != b->premises[i]) {
+            return a->premises[i] < b->premises[i] ? -1 : 1;
+        }
+    }
+    if (a->premise_count != b->premise_count) {
+        return a->premise_count < b->premise_count ? -1 : 1;
+    }
+    if (a->rule != b->rule) {
+        return (int)a->rule < (int)b->rule ? -1 : 1;
+    }
+    return 0;
+}
+
+int record_add_route(MemoryRecord *r, DerivRule rule, uint16_t depth,
+                     const uint64_t *premises, size_t n) {
     if (rule != DERIV_TRANSITIVE && rule != DERIV_SYMMETRIC &&
         rule != DERIV_INVERSE) {
         return -1;
     }
-    /* A derivation with no premises is not a derivation — it would claim
+    /* A route with no premises is not a justification — it would claim
      * provenance while naming none, which is worse than claiming none. */
     if (!premises || n == 0 || n > DERIV_MAX_PREMISES) {
         return -1;
     }
-    /* Copy before touching the record, so a failure halfway leaves the previous
-     * derivation intact rather than half-replaced (as record_set_fact does). */
-    uint64_t *copy = malloc(n * sizeof(*copy));
-    if (!copy) {
-        return -1;
+    DerivRoute rt = {0};
+    rt.rule = rule;
+    rt.depth = depth;
+    rt.premise_count = (uint8_t)n;
+    memcpy(rt.premises, premises, n * sizeof(*premises));
+
+    /* Find the sorted position, and stop early if it is already here: support
+     * is disjunctive, so a repeat carries no information. */
+    size_t at = r->derivation.route_count;
+    for (size_t i = 0; i < r->derivation.route_count; i++) {
+        int c = route_cmp(&rt, &r->derivation.routes[i]);
+        if (c == 0) {
+            return 1;
+        }
+        if (c < 0) {
+            at = i;
+            break;
+        }
     }
-    memcpy(copy, premises, n * sizeof(*copy));
-    free(r->derivation.premises);
-    r->derivation.rule = rule;
-    r->derivation.depth = depth;
-    r->derivation.premises = copy;
-    r->derivation.premise_count = n;
+    if (r->derivation.route_count >= DERIV_MAX_ROUTES) {
+        /* Full: keep the lowest-ordered routes. A route that does not beat the
+         * last one is dropped, and one that does displaces it. Dropping is safe
+         * in the only direction that matters — a conclusion can be retracted
+         * and re-derived, never wrongly kept. */
+        if (at >= DERIV_MAX_ROUTES) {
+            return 1;
+        }
+        memmove(&r->derivation.routes[at + 1], &r->derivation.routes[at],
+                (DERIV_MAX_ROUTES - at - 1) * sizeof(rt));
+        r->derivation.routes[at] = rt;
+        return 0;
+    }
+    /* Allocate the full cap once: it is four routes, and growing would mean a
+     * failure path in the middle of an append that must leave the record
+     * intact. */
+    if (!r->derivation.routes) {
+        r->derivation.routes = calloc(DERIV_MAX_ROUTES, sizeof(rt));
+        if (!r->derivation.routes) {
+            return -1;
+        }
+    }
+    memmove(&r->derivation.routes[at + 1], &r->derivation.routes[at],
+            (r->derivation.route_count - at) * sizeof(rt));
+    r->derivation.routes[at] = rt;
+    r->derivation.route_count++;
     return 0;
 }
 
@@ -353,15 +417,17 @@ int record_encode(const MemoryRecord *r, uint8_t **out, size_t *out_len) {
      * everything else stays at the version whose bytes are unchanged from
      * before the field existed. */
     int has_fact = r->fact.kind != FACT_NONE;
-    int has_deriv = r->derivation.rule != DERIV_NONE;
+    int has_deriv = r->derivation.route_count > 0;
     if (has_fact &&
         (r->fact.kind != FACT_OBJ_ID && r->fact.kind != FACT_OBJ_STRING)) {
         return -1; /* an unknown kind has no defined encoding */
     }
-    if (has_deriv && (r->derivation.rule != DERIV_TRANSITIVE &&
-                      r->derivation.rule != DERIV_SYMMETRIC &&
-                      r->derivation.rule != DERIV_INVERSE)) {
-        return -1; /* an unknown rule has no defined encoding */
+    for (size_t i = 0; i < r->derivation.route_count; i++) {
+        DerivRule rule = r->derivation.routes[i].rule;
+        if (rule != DERIV_TRANSITIVE && rule != DERIV_SYMMETRIC &&
+            rule != DERIV_INVERSE) {
+            return -1; /* an unknown rule has no defined encoding */
+        }
     }
     /* A derivation without a fact would be provenance for nothing: every rule
      * in 5.3 concludes a triple, so the conclusion has to be present. Refusing
@@ -370,7 +436,7 @@ int record_encode(const MemoryRecord *r, uint8_t **out, size_t *out_len) {
     if (has_deriv && !has_fact) {
         return -1;
     }
-    put_u8(&b, has_deriv  ? RECORD_CODEC_V4
+    put_u8(&b, has_deriv  ? RECORD_CODEC_V5
                : has_fact ? RECORD_CODEC_V3
                           : RECORD_CODEC_V2);
     put_u64(&b, r->id);
@@ -437,22 +503,33 @@ int record_encode(const MemoryRecord *r, uint8_t **out, size_t *out_len) {
         }
     }
 
-    /* v4 only: the derivation follows the fact it explains and still precedes
+    /* v5 only: the derivation follows the fact it explains and still precedes
      * the payload, so the variable-length payload stays last as it always has.
-     * The count is bounded well below its u16 width by DERIV_MAX_PREMISES;
-     * refuse rather than truncate, as every other count here does, since a
-     * truncated count desyncs decode into a durable undecodable frame. */
+     * A conclusion carries every justification it has, because support is
+     * disjunctive — retraction must be able to ask whether *any* route still
+     * stands, which a single flattened premise list cannot answer. Both counts
+     * are bounded well below their wire widths; refuse rather than truncate, as
+     * every other count here does, since a truncated count desyncs decode into
+     * a durable undecodable frame. */
     if (has_deriv) {
-        if (r->derivation.premise_count == 0 ||
-            r->derivation.premise_count > DERIV_MAX_PREMISES) {
+        if (r->derivation.route_count > DERIV_MAX_ROUTES) {
             free(b.p);
             return -1;
         }
-        put_u8(&b, (uint8_t)r->derivation.rule);
-        put_u16(&b, r->derivation.depth);
-        put_u16(&b, (uint16_t)r->derivation.premise_count);
-        for (size_t i = 0; i < r->derivation.premise_count; i++) {
-            put_u64(&b, r->derivation.premises[i]);
+        put_u16(&b, (uint16_t)r->derivation.route_count);
+        for (size_t i = 0; i < r->derivation.route_count; i++) {
+            const DerivRoute *rt = &r->derivation.routes[i];
+            if (rt->premise_count == 0 ||
+                rt->premise_count > DERIV_MAX_PREMISES) {
+                free(b.p);
+                return -1;
+            }
+            put_u8(&b, (uint8_t)rt->rule);
+            put_u16(&b, rt->depth);
+            put_u8(&b, rt->premise_count);
+            for (size_t j = 0; j < rt->premise_count; j++) {
+                put_u64(&b, rt->premises[j]);
+            }
         }
     }
 
@@ -549,8 +626,11 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
 
     uint8_t ver = get_u8(&c);
     if (ver != 1 && ver != RECORD_CODEC_V2 && ver != RECORD_CODEC_V3 &&
-        ver != RECORD_CODEC_V4) {
-        goto fail; /* v1 (single vec), v2, v3 (fact), v4 (derivation) */
+        ver != RECORD_CODEC_V5) {
+        /* v1 (single vec), v2, v3 (fact), v5 (derivation). 4 is refused: it
+         * named a layout no release ever wrote, and accepting it would mean
+         * decoding bytes that cannot exist. */
+        goto fail;
     }
     out->id = get_u64(&c);
     out->type = (MemoryType)get_u8(&c);
@@ -692,32 +772,43 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
         }
     }
 
-    if (ver >= RECORD_CODEC_V4) {
-        uint8_t rule = get_u8(&c);
-        uint16_t depth = get_u16(&c);
-        uint16_t pc = get_u16(&c);
-        if (c.err) {
-            goto fail;
+    if (ver >= RECORD_CODEC_V5) {
+        uint16_t rc_routes = get_u16(&c);
+        if (c.err || rc_routes == 0 || rc_routes > DERIV_MAX_ROUTES) {
+            goto fail; /* v4 means derived, and derived means at least one */
         }
-        /* Refuse a rule this build cannot name. Unlike an unknown FactKind the
-         * framing is fixed, so this could be skipped over — but a derived
-         * record whose provenance is uninterpretable would be handed to a
-         * caller as if it were understood, and provenance nobody can read is
-         * the one thing this field exists to prevent. */
-        if (rule != DERIV_TRANSITIVE && rule != DERIV_SYMMETRIC &&
-            rule != DERIV_INVERSE) {
-            goto fail;
-        }
-        if (pc == 0 || pc > DERIV_MAX_PREMISES) {
-            goto fail;
-        }
-        uint64_t prem[DERIV_MAX_PREMISES];
-        for (uint16_t i = 0; i < pc; i++) {
-            prem[i] = get_u64(&c);
-        }
-        if (c.err ||
-            record_set_derivation(out, (DerivRule)rule, depth, prem, pc) != 0) {
-            goto fail;
+        for (uint16_t i = 0; i < rc_routes; i++) {
+            uint8_t rule = get_u8(&c);
+            uint16_t depth = get_u16(&c);
+            uint8_t pc = get_u8(&c);
+            if (c.err) {
+                goto fail;
+            }
+            /* Refuse a rule this build cannot name. Unlike an unknown FactKind
+             * the framing is fixed, so this could be skipped over — but a
+             * derived record whose provenance is uninterpretable would be
+             * handed to a caller as if it were understood, and provenance
+             * nobody can read is the one thing this field exists to prevent. */
+            if (rule != DERIV_TRANSITIVE && rule != DERIV_SYMMETRIC &&
+                rule != DERIV_INVERSE) {
+                goto fail;
+            }
+            if (pc == 0 || pc > DERIV_MAX_PREMISES) {
+                goto fail;
+            }
+            uint64_t prem[DERIV_MAX_PREMISES];
+            for (uint8_t j = 0; j < pc; j++) {
+                prem[j] = get_u64(&c);
+            }
+            /* Refused, not collapsed: a duplicate route (add_route returning
+             * 1) means the frame declares provenance the decoded record would
+             * not carry, so re-encoding it would produce different bytes.
+             * record_encode never writes one, and every other malformed case
+             * here refuses rather than reinterprets. */
+            if (c.err ||
+                record_add_route(out, (DerivRule)rule, depth, prem, pc) != 0) {
+                goto fail;
+            }
         }
     }
 

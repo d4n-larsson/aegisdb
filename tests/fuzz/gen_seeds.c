@@ -103,6 +103,27 @@ static void gen_records(const char *dir) {
         emit_record(dir, "relationships.bin", &r);
         record_free(&r);
     }
+    /* With a typed fact and a derivation (codec v5). Without this seed the
+     * fuzzer never reaches the nested route loop at all — every other seed is
+     * a v2 frame, so the version byte would have to be mutated *and* a
+     * well-formed route set guessed before the branch is entered even once. */
+    {
+        MemoryRecord r;
+        record_init(&r);
+        r.id = 5;
+        r.type = MEM_SEMANTIC;
+        r.created = r.updated = 1700000000004ULL;
+        record_set_fact(&r, FACT_OBJ_ID, 10, "part_of", 30, NULL);
+        const uint64_t a[] = {1, 2};
+        const uint64_t b[] = {3, 4};
+        record_add_route(&r, DERIV_TRANSITIVE, 1, a, 2);
+        record_add_route(&r, DERIV_TRANSITIVE, 2, b, 2);
+        const char *d = "derived";
+        r.data = strdup(d);
+        r.data_len = strlen(d);
+        emit_record(dir, "derivation.bin", &r);
+        record_free(&r);
+    }
 }
 
 static void gen_wire(const char *dir) {
@@ -122,9 +143,8 @@ static void gen_wire(const char *dir) {
          "{\"operation\":\"search\",\"tags\":[\"user\"],\"top_k\":5}"},
         {"count.json", "{\"operation\":\"count\"}"},
         {"stats.json", "{\"operation\":\"stats\"}"},
-        {"relate.json",
-         "{\"operation\":\"relate\",\"from_id\":1,\"to_id\":2,"
-         "\"kind\":\"relates_to\"}"},
+        {"relate.json", "{\"operation\":\"relate\",\"from_id\":1,\"to_id\":2,"
+                        "\"kind\":\"relates_to\"}"},
         {"traverse.json", "{\"operation\":\"traverse\",\"id\":1,\"depth\":2}"},
     };
     for (size_t i = 0; i < sizeof(lines) / sizeof(lines[0]); i++)

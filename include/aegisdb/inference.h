@@ -48,12 +48,35 @@ typedef struct {
 
 /* One conclusion: the triple to write, and the provenance to write with it.
  * `predicate` and `object_str` are borrowed from the inputs or the registry. */
+/* One justification for a conclusion. `confidence` is this route's own product
+ * (floored); it is not persisted — the record carries the conclusion's, which
+ * is the best surviving route's — but keeping it per route is what stops a
+ * route dropped by the cap from leaving its confidence behind. */
 typedef struct {
     DerivRule rule;
     uint16_t depth;
-    float confidence;
     uint64_t premises[DERIV_MAX_PREMISES];
-    size_t premise_count;
+    uint8_t premise_count;
+    float confidence;
+} InferRoute;
+
+/* One conclusion: the triple to write, and every way this pass found to reach
+ * it. Support is disjunctive — a conclusion stands while any one route's
+ * premises are live — so a pass that found two routes must report both, or
+ * retraction will drop a conclusion that is still supported.
+ *
+ * `predicate` and `object_str` are **borrowed** from the input facts or from
+ * the registry's `inverse_of`, never owned. Both must outlive the
+ * InferResult, and infer_result_free frees only the array — which is why it
+ * can. */
+typedef struct {
+    /* Ordered by premise ids, and capped at DERIV_MAX_ROUTES: past that the
+     * lowest-ordered routes are kept, which can only cost a re-derivation. */
+    InferRoute routes[DERIV_MAX_ROUTES];
+    size_t route_count;
+    /* The best route's product, floored — the strongest justification found,
+     * not the first. */
+    float confidence;
 
     uint64_t subject;
     const char *predicate;
@@ -128,10 +151,11 @@ typedef struct {
  * `max_conclusions` and `max_candidates`, so pass a stable order (record id)
  * if reproducibility across passes matters.
  *
- * A conclusion records **one** supporting route even when several exist. That
- * matters to retraction: losing a premise retracts the conclusion even if
- * another route still supports it, and the next pass then re-derives it under
- * a new id. Bounded churn, not a wrong answer — see design doc §15.
+ * A conclusion records **every** route this pass found to it, up to
+ * DERIV_MAX_ROUTES, because support is disjunctive: retraction has to be able
+ * to ask whether *any* justification still stands. Past the cap the
+ * lowest-ordered routes are kept, which can cost a conclusion a retraction and
+ * a re-derivation but never makes one wrong.
  *
  * Confidence is the product of the premises' with a floor, so it is *not*
  * monotonic along a chain: the floor can raise a conclusion above the premises

@@ -105,9 +105,9 @@ static aegis_status_t append_and_hash(AegisDB *db, const MemoryRecord *rec) {
          * INTERNAL, so without this line the write is dropped with nothing to
          * diagnose it by. */
         LOG_ERROR("record_encode refused record %llu (type %d, fact kind %d, "
-                  "derivation rule %d); write dropped",
+                  "derivation routes %d); write dropped",
                   (unsigned long long)rec->id, (int)rec->type,
-                  (int)rec->fact.kind, (int)rec->derivation.rule);
+                  (int)rec->fact.kind, (int)rec->derivation.route_count);
         return AEGIS_ERR_INTERNAL;
     }
 
