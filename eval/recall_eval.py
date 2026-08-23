@@ -410,23 +410,36 @@ def seed_multihop(srv, memories, embed):
     return label_to_ids
 
 
-def await_fixpoint(srv, timeout=30.0, quiet_polls=4):
-    """Wait until the inference job stops writing, and return what it derived.
+def await_fixpoint(srv, interval=1.0, timeout=60.0, min_derived=0,
+                   poll=0.25):
+    """Wait until the inference job stops writing. Returns (count, settled).
 
-    One pass draws only from the facts it can see, so a conclusion becomes the
-    next pass's premise and a chain closes over several ticks. Waiting for the
-    count to settle is the only honest way to say "inference has finished".
+    Two traps here, both of which produce a plausible-looking number rather
+    than an error, which is the worst way for an eval harness to fail.
+
+    A quiet window no longer than the tick cannot tell "settled" from "between
+    ticks" — and a chain closes over several ticks by design, so the gap
+    between two of them is exactly the thing being mistaken for the end. The
+    window is therefore sized to span more than one interval.
+
+    And a count that has never left zero looks identical to one that settled
+    there. With a 1s tick the first derivation lands ~1.0s after seeding, and
+    seeding takes ~0.03s, so a window that accepted four quiet polls at 0.25s
+    would beat inference to the finish by ~27ms — measured, not hypothetical.
+    `min_derived` is what closes that: a dataset that expects conclusions says
+    so, and this refuses to call zero a fixpoint.
     """
+    quiet_needed = max(4, int(2.5 * interval / poll) + 1)
     deadline = time.time() + timeout
     last, quiet = -1, 0
     while time.time() < deadline:
         n = srv.req({"operation": "stats"})["indexes"].get("derived", 0)
         quiet = quiet + 1 if n == last else 0
         last = n
-        if quiet >= quiet_polls:
-            return n
-        time.sleep(0.25)
-    return last
+        if quiet >= quiet_needed and n >= min_derived:
+            return n, True
+        time.sleep(poll)
+    return last, False
 
 
 def run_symbolic_query(srv, q, label_to_ids, max_k):
@@ -461,38 +474,59 @@ def run_multihop_eval(args, ds, embed, ks, max_k):
         fh.close()
         registry = fh.name
 
-    extra = ["--inference", "--inference-interval-sec", "1"]
+    interval = 1.0
+    extra = ["--inference", "--inference-interval-sec", str(int(interval))]
     if registry:
         extra += ["--predicate-registry", registry]
 
     results = {}
-    with Server(args.binary, args.port, ds.get("embedding_dim", 256),
-                extra_args=extra) as srv:
-        label_to_ids = seed_multihop(srv, ds["memories"], embed)
-        derived = await_fixpoint(srv)
-        for mode in ("semantic", "lexical", "hybrid"):
-            mean, mrr, per = measure(srv, ds["queries"], embed, label_to_ids, ks,
-                                     max_k, retrieval=mode)
-            results[mode] = {"mean_recall": mean, "mrr": mrr, "per_query": per}
+    try:
+        with Server(args.binary, args.port, ds.get("embedding_dim", 256),
+                    extra_args=extra) as srv:
+            label_to_ids = seed_multihop(srv, ds["memories"], embed)
+            derived, settled = await_fixpoint(
+                srv, interval=interval, min_derived=ds.get("expect_derived_min", 0))
+            if not settled:
+                print(f"GATE FAILED: inference did not reach a fixpoint "
+                      f"({derived} conclusion(s) derived, expected at least "
+                      f"{ds.get('expect_derived_min', 0)}). Scoring a half-closed "
+                      f"corpus would report a number about the timeout, not about "
+                      f"the horizon.", file=sys.stderr)
+                return 2
+            for mode in ("semantic", "lexical", "hybrid"):
+                mean, mrr, per = measure(srv, ds["queries"], embed, label_to_ids, ks,
+                                         max_k, retrieval=mode)
+                results[mode] = {"mean_recall": mean, "mrr": mrr, "per_query": per}
 
-        per, hits = [], {}
-        for q in ds["queries"]:
-            ranked = run_symbolic_query(srv, q, label_to_ids, max_k)
-            recall, rr = score(ranked, q["relevant"], label_to_ids, ks)
-            hits[q["text"]] = recall.get(max_k, 0.0) > 0
-            per.append({"query": q["text"], "recall": recall, "rr": rr,
-                        "hit": recall.get(max_k, 0.0) > 0})
-        n = len(per) or 1
-        results["symbolic"] = {
-            "mean_recall": {k: sum(p["recall"][k] for p in per) / n for k in ks},
-            "mrr": sum(p["rr"] for p in per) / n,
-            "per_query": per,
-        }
+            per = []
+            for q in ds["queries"]:
+                ranked = run_symbolic_query(srv, q, label_to_ids, max_k)
+                recall, rr = score(ranked, q["relevant"], label_to_ids, ks)
+                per.append({"query": q["text"], "recall": recall, "rr": rr,
+                            "hit": recall.get(max_k, 0.0) > 0})
+            n = len(per) or 1
+            results["symbolic"] = {
+                "mean_recall": {k: sum(p["recall"][k] for p in per) / n for k in ks},
+                "mrr": sum(p["rr"] for p in per) / n,
+                "per_query": per,
+            }
+    finally:
+        # try/finally, not a trailing unlink: seed_multihop and
+        # run_symbolic_query both raise on a failed request, and a
+        # harness that litters temp files on the error path is a
+        # harness people stop running.
+        if registry:
+            os.unlink(registry)
 
-    if registry:
-        os.unlink(registry)
+
 
     gate_k = args.gate_recall_at or max_k
+    if gate_k not in ks:
+        # Not merely a wrong number: `.get(k, 0.0)` would read 0.0 for both
+        # sides, so the retrieval half of the gate — the one that catches a
+        # dataset retrieval can actually answer — would pass silently.
+        print(f"gate: k={gate_k} not in --k set {ks}", file=sys.stderr)
+        return 2
     sym = results["symbolic"]["mean_recall"].get(gate_k, 0.0)
     best_retrieval = max(results[m]["mean_recall"].get(gate_k, 0.0)
                          for m in ("semantic", "lexical", "hybrid"))

@@ -519,5 +519,6 @@
         "a_follower_default"
       ]
     }
-  ]
+  ],
+  "expect_derived_min": 4
 }
