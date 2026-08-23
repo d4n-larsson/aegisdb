@@ -58,6 +58,43 @@ semantic-only), because reciprocal-rank scores differ by under 2% between
 adjacent ranks and any wider multiplier becomes the primary sort key. Hybrid now
 ranks on the fusion alone — see the note in `gather_candidates`.
 
+### Multi-hop eval (ROADMAP 5.3)
+
+The horizon's "done when": questions whose answers live in **no single record**.
+Every query asks about a layer; every answer record describes a leaf component,
+never names that layer, and avoids the question's vocabulary. The two are
+connected only by a chain of `is_a` facts, so there is nothing for similarity or
+BM25 to find. The harness seeds the corpus, starts the server with
+`--inference`, waits for the derivation to reach a fixpoint, then scores
+retrieval and the symbolic path over the same queries.
+
+```sh
+make eval-multihop
+python3 eval/recall_eval.py ./build/aegisdb --multihop \
+    --dataset eval/datasets/multihop.json --gate-recall-at 5
+```
+
+Current numbers: **symbolic 100% at every k, retrieval 0% at recall@5** (hybrid
+reaches 12% only at recall@10, on a 52-record corpus).
+
+The gate checks **both** directions, and that is the point. A low symbolic score
+says the horizon does not deliver. A *high retrieval* score says these questions
+were answerable all along, so the comparison proves nothing and the dataset is
+not testing what it claims to. `--max-retrieval` (default 0.25) is the second
+half.
+
+That second gate is not theoretical: the first version of this dataset failed
+it. The answer prose used the same verb as the question — "what does the storage
+layer **cap** at?" against "the neighbour-selection loop **caps** its candidate
+list at 64" — and lexical search found the answer by that one word, scoring 50%.
+The fix was to make the prose say "stops after 64 candidates", which is a fact
+and its prose being independent, exactly as ROADMAP 5.2 designed them.
+
+Unlike the retrieval-mode comparison, the hashing embedder's token bias does not
+flatter this mode — it makes the retrieval baseline *generous*, since a real
+dense model would do no better on a question whose answer shares no words with
+it.
+
 ### Forgetting eval (ROADMAP 2.3)
 
 Measures decay/forgetting: seed the curated facts, flood the corpus with

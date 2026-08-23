@@ -579,12 +579,24 @@ Contract, end to end:
 10. A v5 frame is withheld from an older replica with `MSG_INCOMPATIBLE`,
     and a frame claiming the skipped codec 4 is refused outright.
 
-**`make eval` gains a multi-hop dataset**, which is the roadmap's "done when"
-and the only claim here that retrieval quality is affected. Its queries must be
-*structurally unanswerable* by retrieval: the answer lives in no single record,
-so semantic, lexical and hybrid all score near zero on it while the symbolic
-path answers. That asymmetry is the whole argument for this horizon, and if the
-dataset does not show it, the dataset is wrong or the horizon is.
+**`make eval-multihop`** is the roadmap's "done when" and the only claim here
+that retrieval quality is affected. Its queries are *structurally unanswerable*
+by retrieval: the answer lives in no single record, so semantic, lexical and
+hybrid all score near zero on it while the symbolic path answers. That asymmetry
+is the whole argument for this horizon, and if the dataset does not show it, the
+dataset is wrong or the horizon is.
+
+**Shipped, and it reports symbolic 100% against retrieval 0% at recall@5** on a
+52-record corpus (hybrid reaches 12% only at recall@10).
+
+The gate checks *both* directions, which turned out to matter on the first run:
+the initial dataset failed its own retrieval bound at 50%, because the answer
+prose reused the question's verb ("what does the storage layer **cap** at?" /
+"the neighbour-selection loop **caps** its candidate list at 64") and lexical
+search found it on that single word. The prose now says "stops after 64
+candidates" — a fact and its prose being independent, exactly as 5.2 designed
+them. Without the second gate that dataset would have shipped, and the headline
+number would have been measuring word overlap rather than inference.
 
 ## 13. Rollout (PR sequence)
 

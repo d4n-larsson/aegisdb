@@ -38,16 +38,18 @@ from embedders import resolve_embedder  # noqa: E402
 class Server:
     """Minimal server lifecycle + wire client (mirrors the contract test)."""
 
-    def __init__(self, binary, port, embedding_dim, phase=4):
+    def __init__(self, binary, port, embedding_dim, phase=4, extra_args=None):
         self.binary = binary
         self.port = port
         self.embedding_dim = embedding_dim
         self.phase = phase
+        self.extra_args = extra_args or []
         self.datadir = tempfile.mkdtemp(prefix="aegis_eval_")
 
     def __enter__(self):
         args = [self.binary, "--data-dir", self.datadir, "--port", str(self.port),
-                "--phase", str(self.phase), "--embedding-dim", str(self.embedding_dim)]
+                "--phase", str(self.phase), "--embedding-dim",
+                str(self.embedding_dim)] + self.extra_args
         self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL)
         for _ in range(50):
@@ -370,6 +372,210 @@ def run_lexical_eval(args, ds, embed, ks, max_k):
     return 1 if failed else 0
 
 
+def seed_multihop(srv, memories, embed):
+    """Seed a dataset whose memories carry typed facts.
+
+    Two passes, because a fact names its subject and object by *record id* and
+    those ids do not exist until the entity records are written. The dataset
+    refers to them by label; this is where labels become ids.
+    """
+    label_to_ids = {}
+    order = []
+    for m in memories:
+        vec = embed(m["text"])
+        payload = {
+            "operation": "insert", "type": m.get("type", "semantic"),
+            "data": m["text"], "tags": m.get("tags", []),
+            "importance": m.get("importance", 0.5), "embedding": vec,
+            "include_embeddings": False,
+        }
+        if m.get("fact"):
+            order.append((m, payload))
+            continue
+        r = srv.req(payload)
+        if not r.get("ok"):
+            raise RuntimeError(f"insert failed for {m['label']}: {r}")
+        label_to_ids.setdefault(m["label"], []).append(r["record"]["id"])
+
+    for m, payload in order:
+        f = dict(m["fact"])
+        f["s"] = label_to_ids[f["s"]][0]
+        if isinstance(f.get("o"), dict) and "label" in f["o"]:
+            f["o"] = {"id": label_to_ids[f["o"]["label"]][0]}
+        payload["fact"] = f
+        r = srv.req(payload)
+        if not r.get("ok"):
+            raise RuntimeError(f"insert failed for {m['label']}: {r}")
+        label_to_ids.setdefault(m["label"], []).append(r["record"]["id"])
+    return label_to_ids
+
+
+def await_fixpoint(srv, interval=1.0, timeout=60.0, min_derived=0,
+                   poll=0.25):
+    """Wait until the inference job stops writing. Returns (count, settled).
+
+    Two traps here, both of which produce a plausible-looking number rather
+    than an error, which is the worst way for an eval harness to fail.
+
+    A quiet window no longer than the tick cannot tell "settled" from "between
+    ticks" — and a chain closes over several ticks by design, so the gap
+    between two of them is exactly the thing being mistaken for the end. The
+    window is therefore sized to span more than one interval.
+
+    And a count that has never left zero looks identical to one that settled
+    there. With a 1s tick the first derivation lands ~1.0s after seeding, and
+    seeding takes ~0.03s, so a window that accepted four quiet polls at 0.25s
+    would beat inference to the finish by ~27ms — measured, not hypothetical.
+    `min_derived` is what closes that: a dataset that expects conclusions says
+    so, and this refuses to call zero a fixpoint.
+    """
+    quiet_needed = max(4, int(2.5 * interval / poll) + 1)
+    deadline = time.time() + timeout
+    last, quiet = -1, 0
+    while time.time() < deadline:
+        n = srv.req({"operation": "stats"})["indexes"].get("derived", 0)
+        quiet = quiet + 1 if n == last else 0
+        last = n
+        if quiet >= quiet_needed and n >= min_derived:
+            return n, True
+        time.sleep(poll)
+    return last, False
+
+
+def run_symbolic_query(srv, q, label_to_ids, max_k):
+    """Answer one query through the symbolic path: a pattern over typed facts,
+    broadened through `is_a` so a question about a layer reaches a fact about one
+    of its components."""
+    pat = dict(q["pattern"])
+    pat["s"] = label_to_ids[pat["s"]][0]
+    r = srv.req({"operation": "search", "pattern": pat, "subsume": True,
+                 "top_k": max_k, "include_embeddings": False})
+    if not r.get("ok"):
+        raise RuntimeError(f"symbolic search failed: {r}")
+    return [rec["id"] for rec in r.get("records", [])]
+
+
+def run_multihop_eval(args, ds, embed, ks, max_k):
+    """The horizon's "done when" (ROADMAP 5.3): questions retrieval cannot answer.
+
+    Every query here asks about a layer, and every answer record describes a leaf
+    component without ever naming that layer — the two are connected only by a
+    chain of `is_a` facts. So there is no record for similarity or BM25 to find:
+    the answer does not live in any one of them. Retrieval scoring near zero is
+    not a bug in the embedder, it is the property that makes the comparison
+    meaningful, and the symbolic column is the claim under test.
+
+    If retrieval scores well here the dataset is not multi-hop and the number
+    proves nothing. The gate checks both directions for exactly that reason."""
+    registry = None
+    if ds.get("predicates"):
+        fh = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump(ds["predicates"], fh)
+        fh.close()
+        registry = fh.name
+
+    interval = 1.0
+    extra = ["--inference", "--inference-interval-sec", str(int(interval))]
+    if registry:
+        extra += ["--predicate-registry", registry]
+
+    results = {}
+    try:
+        with Server(args.binary, args.port, ds.get("embedding_dim", 256),
+                    extra_args=extra) as srv:
+            label_to_ids = seed_multihop(srv, ds["memories"], embed)
+            derived, settled = await_fixpoint(
+                srv, interval=interval, min_derived=ds.get("expect_derived_min", 0))
+            if not settled:
+                print(f"GATE FAILED: inference did not reach a fixpoint "
+                      f"({derived} conclusion(s) derived, expected at least "
+                      f"{ds.get('expect_derived_min', 0)}). Scoring a half-closed "
+                      f"corpus would report a number about the timeout, not about "
+                      f"the horizon.", file=sys.stderr)
+                return 2
+            for mode in ("semantic", "lexical", "hybrid"):
+                mean, mrr, per = measure(srv, ds["queries"], embed, label_to_ids, ks,
+                                         max_k, retrieval=mode)
+                results[mode] = {"mean_recall": mean, "mrr": mrr, "per_query": per}
+
+            per = []
+            for q in ds["queries"]:
+                ranked = run_symbolic_query(srv, q, label_to_ids, max_k)
+                recall, rr = score(ranked, q["relevant"], label_to_ids, ks)
+                per.append({"query": q["text"], "recall": recall, "rr": rr,
+                            "hit": recall.get(max_k, 0.0) > 0})
+            n = len(per) or 1
+            results["symbolic"] = {
+                "mean_recall": {k: sum(p["recall"][k] for p in per) / n for k in ks},
+                "mrr": sum(p["rr"] for p in per) / n,
+                "per_query": per,
+            }
+    finally:
+        # try/finally, not a trailing unlink: seed_multihop and
+        # run_symbolic_query both raise on a failed request, and a
+        # harness that litters temp files on the error path is a
+        # harness people stop running.
+        if registry:
+            os.unlink(registry)
+
+
+
+    gate_k = args.gate_recall_at or max_k
+    if gate_k not in ks:
+        # Not merely a wrong number: `.get(k, 0.0)` would read 0.0 for both
+        # sides, so the retrieval half of the gate — the one that catches a
+        # dataset retrieval can actually answer — would pass silently.
+        print(f"gate: k={gate_k} not in --k set {ks}", file=sys.stderr)
+        return 2
+    sym = results["symbolic"]["mean_recall"].get(gate_k, 0.0)
+    best_retrieval = max(results[m]["mean_recall"].get(gate_k, 0.0)
+                         for m in ("semantic", "lexical", "hybrid"))
+
+    if args.json:
+        print(json.dumps({
+            "dataset": ds["name"], "embedder": args.embedder,
+            "n_queries": len(ds["queries"]), "mode": "multihop",
+            "derived": derived, "gate_k": gate_k,
+            "symbolic_recall": sym, "best_retrieval_recall": best_retrieval,
+            "results": results,
+        }, indent=2))
+    else:
+        print(f"\nAegisDB multi-hop eval — dataset '{ds['name']}', embedder "
+              f"'{args.embedder}', {len(ds['memories'])} memories, "
+              f"{len(ds['queries'])} queries, {derived} conclusion(s) derived\n")
+        kcols = "  ".join(f"R@{k}" for k in ks)
+        print(f"  {'path':<10}  {kcols}  MRR")
+        print(f"  {'-'*10}  {'-'*len(kcols)}  -----")
+        for mode in ("semantic", "lexical", "hybrid", "symbolic"):
+            r = results[mode]
+            rc = "  ".join(f"{r['mean_recall'][k]:>3.0%}" for k in ks)
+            print(f"  {mode:<10}  {rc}  {r['mrr']:.3f}")
+        missed = [p["query"] for p in results["symbolic"]["per_query"]
+                  if not p["hit"]]
+        if missed:
+            print(f"\n  {len(missed)} query(ies) the symbolic path also misses:")
+            for q in missed[:12]:
+                print(f"    - {q[:66]}")
+        print(f"\n  symbolic R@{gate_k}={sym:.2%}   best retrieval "
+              f"R@{gate_k}={best_retrieval:.2%}   delta={sym - best_retrieval:+.2%}\n")
+
+    # Both directions, because either failing means the number is meaningless.
+    # A low symbolic score says the horizon does not deliver; a high retrieval
+    # score says these questions were answerable all along and the dataset is
+    # not testing what it claims to.
+    failed = False
+    if sym < args.gate_threshold:
+        print(f"GATE FAILED: symbolic recall@{gate_k} {sym:.2%} < "
+              f"{args.gate_threshold:.0%}", file=sys.stderr)
+        failed = True
+    if best_retrieval > args.max_retrieval:
+        print(f"GATE FAILED: retrieval answers {best_retrieval:.2%} of these "
+              f"queries (> {args.max_retrieval:.0%}); they are not multi-hop, "
+              f"so the comparison proves nothing", file=sys.stderr)
+        failed = True
+    return 1 if failed else 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="AegisDB recall-quality eval")
     ap.add_argument("binary", nargs="?", default="./build/aegisdb")
@@ -400,6 +606,15 @@ def main():
                     help="retrieval-mode comparison (ROADMAP 4.1): measure "
                          "semantic-only vs lexical-only vs hybrid over one corpus; "
                          "pair with --dataset eval/datasets/identifiers.json")
+    ap.add_argument("--multihop", action="store_true",
+                    help="multi-hop mode (ROADMAP 5.3): seed a corpus whose "
+                         "answers live in no single record, let inference close "
+                         "the chains, then compare retrieval against the "
+                         "symbolic path; pair with --dataset "
+                         "eval/datasets/multihop.json")
+    ap.add_argument("--max-retrieval", type=float, default=0.25,
+                    help="in --multihop mode, the most any retrieval path may "
+                         "score before the dataset is judged not multi-hop")
     ap.add_argument("--retrieval", default="semantic",
                     choices=["semantic", "lexical", "hybrid"],
                     help="retrieval path for a normal (non---lexical) run")
@@ -418,6 +633,8 @@ def main():
         return run_decay_eval(args, ds, embed, ks, max_k)
     if args.lexical:
         return run_lexical_eval(args, ds, embed, ks, max_k)
+    if args.multihop:
+        return run_multihop_eval(args, ds, embed, ks, max_k)
 
     with Server(args.binary, args.port, dim) as srv:
         label_to_ids = seed(srv, ds["memories"], embed)
