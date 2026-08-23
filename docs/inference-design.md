@@ -392,6 +392,14 @@ means the invariant is *checkable*: after recovery, no live derived record has a
 dead premise. That is a much better property to be able to assert than "the
 queue was flushed."
 
+One correction from implementing it: recovery **queues** the orphans, it does
+not tombstone them. Writing during recovery would append frames on a primary
+and is outright forbidden on a replica, which must only ever apply what its
+primary sent. So the invariant holds after the first maintenance pass rather
+than the instant recovery finishes — a window of one tick in which a stale
+conclusion is still visible. Stating it precisely is worth more than stating it
+strongly.
+
 This is also the second time the premise array earns its 16 bytes, and the
 reason it is stored rather than read back from the edges.
 
@@ -533,10 +541,16 @@ Contract, end to end:
 2. Re-tick. Nothing new is written (`derived` is unchanged).
 3. Tombstone premise `a→b`. The derived record is tombstoned, and `history`
    still shows both it and its derivation.
-4. **Restart with the retraction queue deliberately lost** (kill -9 between the
-   premise delete and the next tick): recovery reconciles and the dependent is
-   retracted anyway. This is the test that justifies §6's design, so it drives
-   the crash rather than simulating it.
+4. **Restart with the retraction queue deliberately lost**: recovery reconciles
+   and the dependent is retracted anyway. This is the test that justifies §6's
+   design. It does *not* drive a kill -9, as this section originally asked:
+   retraction runs on every tick, so a crash would be racing the very pass it
+   is supposed to pre-empt, and the test would pass for the wrong reason
+   whenever the tick won. Instead the premise is deleted on a server with
+   `--inference` off, where the enqueue returns early — so the queue is
+   *provably* empty, and the on-disk state is exactly what a crash between the
+   tombstone and the next pass leaves behind. Determinism beats verisimilitude
+   when the whole point is to prove which mechanism did the work.
 5. `subsume` finds a fact about a child when asked about the parent, and does
    **not** when `subsume` is absent.
 6. Two facts violating `cardinality: one` produce `conflicts_with` edges both

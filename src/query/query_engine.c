@@ -544,6 +544,12 @@ aegis_status_t qe_delete(AegisDB *db, uint64_t id, const char *ns) {
      * hash entry is absent or deleted. So the invariant is: the edge index never
      * reports an edge whose endpoint is not live, though a record's own
      * relationships array may still name one. */
+    /* Before the reverse edges go: a conclusion drawn from this record cites
+     * it as a premise, and after edge_index_remove_target there is nothing
+     * left to walk. Capturing here — under the write lock this function
+     * already holds — is what makes retraction possible without either a
+     * corpus scan or an unbounded cascade inside a client's delete. */
+    db_retract_enqueue(db, cur.id);
     edge_index_remove_target(db->edges, cur.id);
     db_fact_index_apply(db, &cur, 0);
     usage_index_untrack(db->usage, cur.id);
