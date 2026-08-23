@@ -112,6 +112,14 @@ typedef struct {
     /* Cached total in-RAM index bytes, sampled by the maintenance thread and
      * read lock-free on the write path to enforce --max-index-bytes. */
     atomic_uint_fast64_t index_bytes;
+    /* Inference job state (ROADMAP 5.3). `infer_cursor` is where the next
+     * budgeted pass starts its scan; it only advances when a cap truncated the
+     * previous one, so a pass that reached the end does not skip anything on
+     * the next tick. The rest is what `stats` reports. */
+    atomic_uint_fast64_t infer_cursor;
+    atomic_uint_fast64_t derived_total; /* conclusions written since start */
+    atomic_uint_fast64_t infer_last_ms;
+    atomic_uint_fast64_t infer_deferred; /* a cap stopped the last pass */
     uint64_t next_id;        /* monotonic id allocator for persisted records */
     pthread_mutex_t id_lock; /* guards next_id */
     /* Bumped whenever compaction rewrites the log (offsets change). Replicas
@@ -178,6 +186,16 @@ uint64_t db_index_bytes(AegisDB *db);
  * expensive build never blocks readers/writers. Returns 1 if a graph was built,
  * 0 if nothing to do, -1 on failure (retried on a later tick). */
 int db_semantic_build_step(AegisDB *db);
+
+/* Run one inference pass (ROADMAP 5.3): read the live fact set, draw what the
+ * registry's declarations imply, and write the conclusions as records with
+ * their provenance. Driven by the maintenance thread. Returns the number of
+ * conclusions written.
+ *
+ * A no-op unless --inference is set and a registry is loaded, and always a
+ * no-op on a read-only replica — a follower that derived locally would append
+ * frames its primary never sent. See docs/inference-design.md §5. */
+size_t db_inference_step(AegisDB *db);
 
 /* Apply one replicated log frame on a read-only replica: append the payload to
  * the local log (producing a byte-identical frame at `offset`) is done by the

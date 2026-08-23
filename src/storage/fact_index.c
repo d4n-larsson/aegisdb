@@ -659,6 +659,42 @@ int fact_index_by_predicate(const FactIndex *f, const char *predicate,
     return 0;
 }
 
+static int cmp_u64(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a;
+    uint64_t y = *(const uint64_t *)b;
+    return (x > y) - (x < y);
+}
+
+int fact_index_all_records(const FactIndex *f, uint64_t **out, size_t *out_n) {
+    *out = NULL;
+    *out_n = 0;
+    if (!f || f->facts == 0) {
+        return 0;
+    }
+    /* A record carries at most one fact, so the per-predicate postings are
+     * disjoint and their total is exactly f->facts — no dedup pass needed,
+     * only a sort, which the callers of every other lookup here already
+     * expect and which the inference job needs for a reproducible scan. */
+    uint64_t *res = malloc(f->facts * sizeof(*res));
+    if (!res) {
+        return -1;
+    }
+    size_t n = 0;
+    for (size_t i = 0; i < FACT_MAX_PREDICATES; i++) {
+        for (size_t j = 0; j < f->pred_n[i]; j++) {
+            if (n == f->facts) {
+                free(res); /* accounting drift: refuse rather than overrun */
+                return -1;
+            }
+            res[n++] = f->pred_recs[i][j];
+        }
+    }
+    qsort(res, n, sizeof(*res), cmp_u64);
+    *out = res;
+    *out_n = n;
+    return 0;
+}
+
 /* ----- introspection ----------------------------------------------------- */
 
 size_t fact_index_facts(const FactIndex *f) { return f ? f->facts : 0; }

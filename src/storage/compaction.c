@@ -373,6 +373,13 @@ static void *maint_loop(void *arg) {
          * threshold (checked every tick; the build itself is snapshot/build/
          * install so it never holds the index lock for the whole build). */
         db_semantic_build_step(c->db);
+        /* Inference (ROADMAP 5.3). Off unless configured, and skipped on a
+         * replica by db_inference_step itself for the same reason sweep and
+         * compaction are skipped below. */
+        if (c->db->config.inference && c->db->config.inference_interval_sec &&
+            (elapsed % c->db->config.inference_interval_sec) == 0) {
+            db_inference_step(c->db);
+        }
         /* On a read-only replica the follower is the sole writer — it applies
          * the primary's stream verbatim (including the primary's own expiry
          * tombstones). Locally sweeping or compacting here would append/rewrite

@@ -3,6 +3,7 @@
 #define AEGISDB_CONFIG_H
 
 #include <stddef.h>
+
 #include <stdint.h>
 
 #include "aegisdb/aead.h"
@@ -109,6 +110,17 @@ typedef struct {
      * a `fact` on `insert` is still stored durably — the record keeps what it
      * asserts, it just is not indexed by it. */
     int fact_index;
+    /* Materialize the closures the predicate registry declares (ROADMAP 5.3).
+     * Off by default, unlike the 5.1/5.2 indexes: those are derived state a
+     * client only sees through a query, while this writes records and grows
+     * the log — which, unlike an index, cannot be dropped and rebuilt. A
+     * feature with that blast radius should be one an operator turned on. */
+    int inference;
+    unsigned inference_interval_sec; /* tick divisor for the pass */
+    unsigned inference_max_depth;    /* derivation chain length cap */
+    size_t inference_max_derived;    /* records written per pass */
+    size_t inference_max_candidates; /* conclusions considered per pass */
+    float inference_confidence_floor;
     /* Path to the predicate registry (ROADMAP 5.2), or "" for none. With no
      * registry any predicate is accepted; with one, a `fact` naming an
      * undeclared predicate — or the wrong object kind for it — is refused. */
