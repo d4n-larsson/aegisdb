@@ -114,12 +114,25 @@ convention is an entity record: a `semantic` record tagged `entity` whose prose
 names the thing. Grounding is therefore: given a mention, find that record, or
 create it.
 
-**Resolve with the machinery that already exists.** A mention is embedded and
-searched against entity records with 4.1's hybrid retrieval — semantic for
-paraphrase, lexical for the identifier-shaped mentions (`hnsw.c:214`) a dense
-model handles badly, fused by reciprocal rank. This is 2.2's
-candidate-and-collapse shape, scored by the same harness, rather than a new
-mechanism.
+**Resolve with the machinery that already exists.** A mention is searched
+against entity records — semantic for paraphrase, lexical for the
+identifier-shaped mentions (`hnsw.c:214`) a dense model handles badly. This is
+2.2's candidate-and-collapse shape rather than a new mechanism.
+
+**Two passes, not one fused ranking** — a correction from building it. This
+section originally said "fused by reciprocal rank", but `tools.search` already
+documents why that does not work for a caller with a threshold: fused scores are
+on the RRF scale, so a cosine floor applied to them either discards everything
+or admits anything depending on which way the caller guessed. So the lexical
+pass is used for **exact** matching only, ignoring its score entirely, and the
+cosine floor governs a separate semantic pass.
+
+That split turns out to be better than the fusion would have been, for the
+reason §4 is about: **an identifier matches exactly or not at all.** `hnsw.c:214`
+and `hnsw.c:215` are one character apart and are different things, so a
+similarity score between them is not evidence of anything — falling through to
+one is exactly how the expensive error happens. Prose gets the high floor;
+identifiers get equality.
 
 **Prefer fragmentation to conflation.** The threshold is the whole design here,
 and the two errors are not symmetric:
