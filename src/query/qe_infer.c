@@ -218,10 +218,24 @@ static void note_conflict(AegisDB *db, const LoadedFact *a, const LoadedFact *b,
         return;
     }
     const char *scope = (ns && *ns) ? ns : NULL;
-    (void)qe_relate(db, a->rec.id, b->rec.id, "conflicts_with", scope);
-    (void)qe_relate(db, b->rec.id, a->rec.id, "conflicts_with", scope);
-    LOG_WARN("inference: records %llu and %llu contradict each other (%s)",
-             (unsigned long long)a->rec.id, (unsigned long long)b->rec.id, why);
+    aegis_status_t sa =
+        qe_relate(db, a->rec.id, b->rec.id, "conflicts_with", scope);
+    aegis_status_t sb =
+        qe_relate(db, b->rec.id, a->rec.id, "conflicts_with", scope);
+    if (sa == AEGIS_OK || sb == AEGIS_OK) {
+        LOG_WARN("inference: records %llu and %llu contradict each other (%s)",
+                 (unsigned long long)a->rec.id, (unsigned long long)b->rec.id,
+                 why);
+        return;
+    }
+    /* Neither edge stuck — the record is at MAX_RELATIONSHIPS, or a peer was
+     * tombstoned since the snapshot. already_conflicting reads the record's own
+     * array, so nothing was recorded and the next pass will try again; at WARN
+     * that would be per-tick spam forever on a hot subject. The contradiction
+     * is still counted, so `conflicts` does not go quiet about it. */
+    LOG_DEBUG("inference: could not link %llu and %llu (%s): %d/%d",
+              (unsigned long long)a->rec.id, (unsigned long long)b->rec.id, why,
+              (int)sa, (int)sb);
 }
 
 /* Order a namespace's facts so equal (subject, predicate) sit together, which
@@ -307,8 +321,26 @@ static size_t find_conflicts(AegisDB *db, const LoadedFact *facts, size_t n,
             s_end++;
         }
         size_t k = s_end - i;
+        /* One cap for the whole subject, not just the pairwise half: the
+         * cardinality scan below is linear, but every pair it reports costs
+         * two log appends and two write-lock acquisitions, and a subject with
+         * more assertions than this is a data-modelling problem rather than
+         * something to spend a tick on. */
+        if (k > CONFLICT_MAX_PER_SUBJECT) {
+            LOG_WARN("inference: subject %llu has %zu facts; skipping its "
+                     "contradiction scan",
+                     (unsigned long long)by_sp[i]->rec.fact.subject, k);
+            i = s_end;
+            continue;
+        }
 
-        /* cardinality: one — two live values for a single-valued predicate. */
+        /* cardinality: one — two live values for a single-valued predicate.
+         *
+         * Linked to the run's first record rather than pairwise. p distinct
+         * values would otherwise be p(p-1)/2 pairs, each two fsyncing writes,
+         * inside a tick that budgets everything else — and a star still leaves
+         * every conflicting record carrying an edge, so a reader arriving at
+         * any of them sees the contradiction. */
         for (size_t j = i; j < s_end;) {
             size_t p_end = j;
             while (p_end < s_end && strcmp(by_sp[p_end]->rec.fact.predicate,
@@ -318,41 +350,39 @@ static size_t find_conflicts(AegisDB *db, const LoadedFact *facts, size_t n,
             const PredicateSpec *spec = predicate_registry_get(
                 db->predicates, by_sp[j]->rec.fact.predicate);
             if (spec && spec->single_valued) {
-                for (size_t x = j; x + 1 < p_end; x++) {
-                    for (size_t y = x + 1; y < p_end; y++) {
-                        if (objects_differ(&by_sp[x]->rec.fact,
-                                           &by_sp[y]->rec.fact)) {
-                            found++;
-                            note_conflict(db, by_sp[x], by_sp[y], ns,
-                                          "cardinality: one");
-                        }
+                for (size_t y = j + 1; y < p_end; y++) {
+                    if (objects_differ(&by_sp[j]->rec.fact,
+                                       &by_sp[y]->rec.fact)) {
+                        found++;
+                        note_conflict(db, by_sp[j], by_sp[y], ns,
+                                      "cardinality: one");
                     }
                 }
             }
             j = p_end;
         }
 
-        /* mutex_with — two predicates the registry says cannot both hold. */
-        if (k <= CONFLICT_MAX_PER_SUBJECT) {
-            for (size_t x = i; x + 1 < s_end; x++) {
-                const PredicateSpec *sx = predicate_registry_get(
-                    db->predicates, by_sp[x]->rec.fact.predicate);
-                if (!sx || !sx->mutex_with) {
-                    continue;
-                }
-                for (size_t y = x + 1; y < s_end; y++) {
-                    const PredicateSpec *sy = predicate_registry_get(
-                        db->predicates, by_sp[y]->rec.fact.predicate);
-                    if (sy && mutually_exclusive(sx, sy)) {
-                        found++;
-                        note_conflict(db, by_sp[x], by_sp[y], ns, "mutex_with");
-                    }
+        /* mutex_with — two predicates the registry says cannot both hold.
+         *
+         * No short-circuit on the left-hand spec's own mutex list: the registry
+         * validates that a mutex_with entry names a declared predicate, but —
+         * unlike inverse_of — it does not require the declaration to be mutual.
+         * Skipping on `!sx->mutex_with` therefore made a one-sided declaration
+         * detectable or invisible depending on which predicate sorted first. */
+        for (size_t x = i; x + 1 < s_end; x++) {
+            const PredicateSpec *sx = predicate_registry_get(
+                db->predicates, by_sp[x]->rec.fact.predicate);
+            if (!sx) {
+                continue;
+            }
+            for (size_t y = x + 1; y < s_end; y++) {
+                const PredicateSpec *sy = predicate_registry_get(
+                    db->predicates, by_sp[y]->rec.fact.predicate);
+                if (sy && mutually_exclusive(sx, sy)) {
+                    found++;
+                    note_conflict(db, by_sp[x], by_sp[y], ns, "mutex_with");
                 }
             }
-        } else {
-            LOG_WARN("inference: subject %llu has %zu facts; skipping the "
-                     "mutex scan for it",
-                     (unsigned long long)by_sp[i]->rec.fact.subject, k);
         }
         i = s_end;
     }
@@ -440,6 +470,7 @@ size_t db_inference_step(AegisDB *db) {
     size_t total = 0;
     size_t conflicts = 0;
     int deferred = 0;
+    int scanned = 0; /* did this pass actually look? */
     LoadedFact *facts = NULL;
     size_t n = 0;
     if (load_facts(db, &facts, &n) != 0) {
@@ -451,16 +482,48 @@ size_t db_inference_step(AegisDB *db) {
     }
 
     /* Namespace boundaries, so no rule ever joins two tenants' facts. */
-    size_t starts[64];
     size_t ngroups = 0;
-    for (size_t i = 0; i < n && ngroups < 64;) {
-        starts[ngroups++] = i;
+    for (size_t i = 0; i < n;) {
+        ngroups++;
         size_t j = i;
         while (j < n && strcmp(facts[j].ns, facts[i].ns) == 0) {
             j++;
         }
         i = j;
     }
+    /* Counted first and allocated to fit. A fixed array silently stopped
+     * scanning past its bound, so tenants beyond it were never examined at
+     * all — invisible, and worst on exactly the servers with most tenants. */
+    size_t *starts = malloc(ngroups * sizeof(*starts));
+    if (!starts) {
+        LOG_WARN("inference: out of memory grouping namespaces; skipping");
+        goto done;
+    }
+    {
+        size_t g = 0;
+        for (size_t i = 0; i < n;) {
+            starts[g++] = i;
+            size_t j = i;
+            while (j < n && strcmp(facts[j].ns, facts[i].ns) == 0) {
+                j++;
+            }
+            i = j;
+        }
+    }
+
+    /* Contradictions first, and for *every* namespace regardless of the derive
+     * budget. The gauge answers "does the corpus hold a contradiction right
+     * now?", so a partial answer is worse than none: under budget pressure it
+     * would report a different subset of tenants each tick and could read 0
+     * while contradictions exist. Detection is linear per subject and only
+     * writes when it finds something new, so completeness is affordable here in
+     * a way deriving is not. */
+    for (size_t g = 0; g < ngroups; g++) {
+        size_t lo = starts[g];
+        size_t hi = (g + 1 < ngroups) ? starts[g + 1] : n;
+        conflicts += find_conflicts(db, &facts[lo], hi - lo, facts[lo].ns);
+    }
+    scanned = 1;
 
     size_t derived_budget = db->config.inference_max_derived;
     size_t cand_budget = db->config.inference_max_candidates;
@@ -481,7 +544,6 @@ size_t db_inference_step(AegisDB *db) {
             deferred = 1; /* the groups not reached wait for the next tick */
             break;
         }
-        conflicts += find_conflicts(db, &facts[lo], hi - lo, facts[lo].ns);
         size_t got = run_namespace(db, &facts[lo], hi - lo, facts[lo].ns,
                                    derived_budget, &cand_budget, &deferred);
         derived_budget -= got < derived_budget ? got : derived_budget;
@@ -495,6 +557,7 @@ size_t db_inference_step(AegisDB *db) {
                               (uint_fast64_t)((g0 + advanced) % ngroups),
                               memory_order_relaxed);
     }
+    free(starts);
 
 done:
     free_loaded(facts, n);
@@ -509,9 +572,15 @@ done:
      * reports how many contradictions the corpus holds *now*. A cumulative
      * counter would climb on every tick that re-found the same pair, which is
      * a worse number to alert on than the one that answers "is anything
-     * contradictory right now?". */
-    atomic_store_explicit(&db->conflicts_now, (uint_fast64_t)conflicts,
-                          memory_order_relaxed);
+     * contradictory right now?".
+     *
+     * Only published by a pass that actually scanned. Storing 0 after a failed
+     * read would be a false all-clear, and an operator alerting on this would
+     * watch the alarm silently clear itself on a transient error. */
+    if (scanned) {
+        atomic_store_explicit(&db->conflicts_now, (uint_fast64_t)conflicts,
+                              memory_order_relaxed);
+    }
     if (total) {
         atomic_fetch_add_explicit(&db->derived_total, (uint_fast64_t)total,
                                   memory_order_relaxed);

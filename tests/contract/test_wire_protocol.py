@@ -1304,6 +1304,9 @@ def test_contradiction_detection(binary, port):
             "deprecated_by": {"object": "id", "mutex_with": ["recommended_by"]},
             "recommended_by": {"object": "id",
                                "mutex_with": ["deprecated_by"]},
+            # declared on one side only, and on the name that sorts *second*
+            "alpha_x": {"object": "id"},
+            "zeta_y": {"object": "id", "mutex_with": ["alpha_x"]},
         }, fh)
 
     with Server(binary, port, phase=4,
@@ -1330,8 +1333,16 @@ def test_contradiction_detection(binary, port):
         m2 = ins("recommended",
                  {"s": hook, "p": "recommended_by", "o": {"id": other}})
 
-        found = _await_stat(srv, "conflicts", at_least=1)
-        check(found >= 1, f"the job finds contradictions unprompted ({found})")
+        # A one-sided mutex_with: the registry validates that the named
+        # predicate exists but — unlike inverse_of — does not require the
+        # declaration to be mutual. `alpha_x` sorts before `zeta_y`, and only
+        # `zeta_y` declares the exclusion, so a scan that consulted the
+        # left-hand predicate's list alone would never look.
+        o1 = ins("alpha side", {"s": hook, "p": "alpha_x", "o": {"id": other}})
+        o2 = ins("zeta side", {"s": hook, "p": "zeta_y", "o": {"id": other}})
+
+        found = _await_stat(srv, "conflicts", at_least=3)
+        check(found >= 3, f"the job finds contradictions unprompted ({found})")
 
         def peers(rid):
             r = srv.req({"operation": "get", "id": rid})["record"]
@@ -1346,11 +1357,13 @@ def test_contradiction_detection(binary, port):
               "a mutex violation is linked both ways")
         check(agree not in peers(c1),
               "two records asserting the same value do not conflict")
+        check(o2 in peers(o1) and o1 in peers(o2),
+              "a one-sided mutex_with is found whichever way the names sort")
 
         # THE restraint. Choosing a survivor needs to know which is newer,
         # which source is better, or what the world is like — none of which
         # this layer knows. It guarantees the contradiction is found.
-        for rid in (c1, c2, agree, m1, m2):
+        for rid in (c1, c2, agree, m1, m2, o1, o2):
             check(srv.req({"operation": "get", "id": rid}).get("ok") is True,
                   f"record {rid} is untouched")
         check(srv.req({"operation": "stats"})["indexes"]["retracted"] == 0,
