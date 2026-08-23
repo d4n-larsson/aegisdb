@@ -123,6 +123,9 @@ typedef struct {
     atomic_uint_fast64_t infer_ns_cursor;
     atomic_uint_fast64_t
         retracted_total; /* conclusions retracted since start */
+    /* Contradictions the last pass found — a gauge, recomputed each time, not
+     * a running total. It answers "is anything contradictory right now?". */
+    atomic_uint_fast64_t conflicts_now;
     /* Conclusions whose premises may have gone away (ROADMAP 5.3 §6).
      * qe_delete captures the dependents it is about to orphan while it still
      * holds index_lock — the reverse edges are gone by the time it returns —

@@ -193,6 +193,173 @@ out:
     return rv;
 }
 
+/* ----- contradiction detection (ROADMAP 5.3 §4.3) ------------------------ */
+
+/* Does this record already record a conflict with `peer`? The pass recomputes
+ * from scratch every tick, so without this it would re-log the same
+ * contradiction forever. */
+static int already_conflicting(const MemoryRecord *r, uint64_t peer) {
+    for (size_t i = 0; i < r->rel_count; i++) {
+        if (r->relationships[i].to_id == peer && r->relationships[i].kind &&
+            strcmp(r->relationships[i].kind, "conflicts_with") == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Record that two records contradict each other. Both directions, because a
+ * contradiction is not a claim one of them makes about the other — a reader
+ * arriving at either should see it. */
+static void note_conflict(AegisDB *db, const LoadedFact *a, const LoadedFact *b,
+                          const char *ns, const char *why) {
+    if (already_conflicting(&a->rec, b->rec.id) &&
+        already_conflicting(&b->rec, a->rec.id)) {
+        return;
+    }
+    const char *scope = (ns && *ns) ? ns : NULL;
+    (void)qe_relate(db, a->rec.id, b->rec.id, "conflicts_with", scope);
+    (void)qe_relate(db, b->rec.id, a->rec.id, "conflicts_with", scope);
+    LOG_WARN("inference: records %llu and %llu contradict each other (%s)",
+             (unsigned long long)a->rec.id, (unsigned long long)b->rec.id, why);
+}
+
+/* Order a namespace's facts so equal (subject, predicate) sit together, which
+ * turns cardinality checking into a linear scan of runs. */
+static int cmp_subject_pred(const void *x, const void *y) {
+    const LoadedFact *const *pa = x;
+    const LoadedFact *const *pb = y;
+    const Fact *a = &(*pa)->rec.fact;
+    const Fact *b = &(*pb)->rec.fact;
+    if (a->subject != b->subject) {
+        return a->subject < b->subject ? -1 : 1;
+    }
+    int c = strcmp(a->predicate, b->predicate);
+    if (c) {
+        return c;
+    }
+    return ((*pa)->rec.id > (*pb)->rec.id) - ((*pa)->rec.id < (*pb)->rec.id);
+}
+
+/* Do two facts about the same subject assert different things? */
+static int objects_differ(const Fact *a, const Fact *b) {
+    if (a->kind != b->kind) {
+        return 1;
+    }
+    if (a->kind == FACT_OBJ_ID) {
+        return a->object_id != b->object_id;
+    }
+    return !a->object_str || !b->object_str ||
+           strcmp(a->object_str, b->object_str) != 0;
+}
+
+/* Are these two predicates declared mutually exclusive? The registry validates
+ * the declaration, so checking one direction would be enough — checking both
+ * costs nothing and does not depend on that staying true. */
+static int mutually_exclusive(const PredicateSpec *a, const PredicateSpec *b) {
+    for (size_t i = 0; a->mutex_with && i < a->mutex_count; i++) {
+        if (strcmp(a->mutex_with[i], b->name) == 0) {
+            return 1;
+        }
+    }
+    for (size_t i = 0; b->mutex_with && i < b->mutex_count; i++) {
+        if (strcmp(b->mutex_with[i], a->name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Facts about one subject, beyond which the pairwise mutex scan is skipped. A
+ * subject with this many assertions is a data-modelling problem, and O(k^2) on
+ * it would be a tick-duration problem. */
+#define CONFLICT_MAX_PER_SUBJECT 256
+
+/* Find every contradiction in one namespace and return how many there are.
+ *
+ * Reported, never resolved: nothing is tombstoned, nothing is reranked, no
+ * record is marked untrustworthy. Deciding which of two conflicting facts is
+ * right needs to know which is newer, which source is better, or what the world
+ * is actually like — none of which this layer knows. What it can guarantee is
+ * that the contradiction is *found*, deterministically and with no model call,
+ * which is the thing a human or an extractor cannot do reliably. */
+static size_t find_conflicts(AegisDB *db, const LoadedFact *facts, size_t n,
+                             const char *ns) {
+    const LoadedFact **by_sp = malloc(n * sizeof(*by_sp));
+    if (!by_sp) {
+        return 0;
+    }
+    size_t m = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (facts[i].rec.fact.kind != FACT_NONE &&
+            facts[i].rec.fact.predicate) {
+            by_sp[m++] = &facts[i];
+        }
+    }
+    qsort(by_sp, m, sizeof(*by_sp), cmp_subject_pred);
+
+    size_t found = 0;
+    for (size_t i = 0; i < m;) {
+        /* One subject's run. */
+        size_t s_end = i;
+        while (s_end < m &&
+               by_sp[s_end]->rec.fact.subject == by_sp[i]->rec.fact.subject) {
+            s_end++;
+        }
+        size_t k = s_end - i;
+
+        /* cardinality: one — two live values for a single-valued predicate. */
+        for (size_t j = i; j < s_end;) {
+            size_t p_end = j;
+            while (p_end < s_end && strcmp(by_sp[p_end]->rec.fact.predicate,
+                                           by_sp[j]->rec.fact.predicate) == 0) {
+                p_end++;
+            }
+            const PredicateSpec *spec = predicate_registry_get(
+                db->predicates, by_sp[j]->rec.fact.predicate);
+            if (spec && spec->single_valued) {
+                for (size_t x = j; x + 1 < p_end; x++) {
+                    for (size_t y = x + 1; y < p_end; y++) {
+                        if (objects_differ(&by_sp[x]->rec.fact,
+                                           &by_sp[y]->rec.fact)) {
+                            found++;
+                            note_conflict(db, by_sp[x], by_sp[y], ns,
+                                          "cardinality: one");
+                        }
+                    }
+                }
+            }
+            j = p_end;
+        }
+
+        /* mutex_with — two predicates the registry says cannot both hold. */
+        if (k <= CONFLICT_MAX_PER_SUBJECT) {
+            for (size_t x = i; x + 1 < s_end; x++) {
+                const PredicateSpec *sx = predicate_registry_get(
+                    db->predicates, by_sp[x]->rec.fact.predicate);
+                if (!sx || !sx->mutex_with) {
+                    continue;
+                }
+                for (size_t y = x + 1; y < s_end; y++) {
+                    const PredicateSpec *sy = predicate_registry_get(
+                        db->predicates, by_sp[y]->rec.fact.predicate);
+                    if (sy && mutually_exclusive(sx, sy)) {
+                        found++;
+                        note_conflict(db, by_sp[x], by_sp[y], ns, "mutex_with");
+                    }
+                }
+            }
+        } else {
+            LOG_WARN("inference: subject %llu has %zu facts; skipping the "
+                     "mutex scan for it",
+                     (unsigned long long)by_sp[i]->rec.fact.subject, k);
+        }
+        i = s_end;
+    }
+    free(by_sp);
+    return found;
+}
+
 /* One namespace's pass. Returns the number of conclusions written, and sets
  * *deferred when a cap stopped it short. */
 static size_t run_namespace(AegisDB *db, const LoadedFact *facts, size_t n,
@@ -271,6 +438,7 @@ size_t db_inference_step(AegisDB *db) {
 
     uint64_t t0 = db_now_ms();
     size_t total = 0;
+    size_t conflicts = 0;
     int deferred = 0;
     LoadedFact *facts = NULL;
     size_t n = 0;
@@ -313,6 +481,7 @@ size_t db_inference_step(AegisDB *db) {
             deferred = 1; /* the groups not reached wait for the next tick */
             break;
         }
+        conflicts += find_conflicts(db, &facts[lo], hi - lo, facts[lo].ns);
         size_t got = run_namespace(db, &facts[lo], hi - lo, facts[lo].ns,
                                    derived_budget, &cand_budget, &deferred);
         derived_budget -= got < derived_budget ? got : derived_budget;
@@ -335,6 +504,13 @@ done:
     atomic_store_explicit(&db->infer_last_ms, db_now_ms() - t0,
                           memory_order_relaxed);
     atomic_store_explicit(&db->infer_deferred, deferred ? 1 : 0,
+                          memory_order_relaxed);
+    /* A gauge, not a running total: recomputed from scratch every pass, so it
+     * reports how many contradictions the corpus holds *now*. A cumulative
+     * counter would climb on every tick that re-found the same pair, which is
+     * a worse number to alert on than the one that answers "is anything
+     * contradictory right now?". */
+    atomic_store_explicit(&db->conflicts_now, (uint_fast64_t)conflicts,
                           memory_order_relaxed);
     if (total) {
         atomic_fetch_add_explicit(&db->derived_total, (uint_fast64_t)total,
