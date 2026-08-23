@@ -346,6 +346,9 @@ static void stats_add_storage(cJSON *o, AegisDB *db) {
         cJSON_AddNumberToObject(idx, "derived",
                                 (double)atomic_load_explicit(
                                     &db->derived_total, memory_order_relaxed));
+        cJSON_AddNumberToObject(idx, "conflicts",
+                                (double)atomic_load_explicit(
+                                    &db->conflicts_now, memory_order_relaxed));
         cJSON_AddNumberToObject(
             idx, "retracted",
             (double)atomic_load_explicit(&db->retracted_total,

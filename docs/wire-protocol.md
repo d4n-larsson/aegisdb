@@ -225,6 +225,16 @@ to their premises, so a rule never joins one tenant's fact to another's, and
 a replica never derives: it receives its primary's conclusions through the
 replication stream like any other record.
 
+The same pass also reports **contradictions** the registry makes
+deterministic: two live values for a `cardinality: one` predicate, or two
+predicates declared `mutex_with` each other both holding of one subject. Both
+records gain a `conflicts_with` edge to the other and the pair is counted in
+`stats.conflicts`. Nothing is tombstoned and nothing is reranked — choosing
+which of two conflicting facts survives needs to know which is newer, which
+source is better, or what the world is actually like, none of which the server
+knows. What it guarantees is that the contradiction is *found*, with no model
+call.
+
 Closure takes several passes rather than one — a conclusion becomes the next
 pass's premise — and each pass is bounded by `--inference-max-derived`
 (records written), `--inference-max-candidates` (conclusions considered, which
@@ -981,7 +991,7 @@ authentication when enabled (unlike `ping`). Available at every phase.
 | `tombstones` | Deleted-but-not-yet-compacted records still in the log |
 | `log_bytes` | Current size of `memory.log` on disk |
 | `log_flush_pending` | `true` if writes have not yet been `fsync`'d — the current durability lag |
-| `indexes` | Per-index entry counts (`semantic` is the brute-force vector count; watch it for scale). `lexical_terms`/`lexical_docs` are the distinct terms and indexed payloads in the BM25 index, both `0` under `--no-lexical-index`. `edges`/`edge_kinds` are the indexed incoming edges and the distinct kinds they carry, both `0` under `--no-edge-index`. `facts`/`fact_predicates` are the indexed typed facts and the distinct predicates in use, both `0` under `--no-fact-index`. `derived` counts conclusions the inference job has written **since this process started** (not live derived records), `inference_last_ms` is how long the last pass took, and `inference_deferred` is `1` when a cap stopped that pass short — a value that stays `1` means the caps are too small for the corpus and the job never reaches fixpoint, which is survivable but worth alerting on. `retracted` counts conclusions withdrawn because every one of their justifications lost a premise. All four are `0` without `--inference` |
+| `indexes` | Per-index entry counts (`semantic` is the brute-force vector count; watch it for scale). `lexical_terms`/`lexical_docs` are the distinct terms and indexed payloads in the BM25 index, both `0` under `--no-lexical-index`. `edges`/`edge_kinds` are the indexed incoming edges and the distinct kinds they carry, both `0` under `--no-edge-index`. `facts`/`fact_predicates` are the indexed typed facts and the distinct predicates in use, both `0` under `--no-fact-index`. `derived` counts conclusions the inference job has written **since this process started** (not live derived records), `inference_last_ms` is how long the last pass took, and `inference_deferred` is `1` when a cap stopped that pass short — a value that stays `1` means the caps are too small for the corpus and the job never reaches fixpoint, which is survivable but worth alerting on. `retracted` counts conclusions withdrawn because every one of their justifications lost a premise. `conflicts` is a **gauge**, not a total: how many contradicting *pairs* the corpus holds right now, recomputed each pass, so it falls when one is resolved. Pairs, not groups — three different values for one `cardinality: one` predicate report 2, since each is linked to the first — so treat it as "is anything contradictory, and roughly how much", not as a count of distinct disagreements. A pair whose `conflicts_with` edges could not be written (the record is at `MAX_RELATIONSHIPS`) is still counted, so the gauge never goes quiet about a contradiction it could not record. All five are `0` without `--inference` |
 | `memory` | Approximate resident bytes per in-RAM index — `hash_bytes`, `time_bytes`, `tag_bytes`, `lexical_bytes`, `edge_bytes`, `fact_bytes`, `usage_bytes`, `semantic_bytes`, `index_bytes_total`, and `index_bytes_limit` (the configured `--max-index-bytes` cap; 0 = unlimited). Indexes are held in memory and grow with the dataset (the semantic vectors usually dominate), so this is the figure to monitor/alert on; past the limit inserts return `MEMORY_LIMIT`. Excludes allocator overhead. |
 | `next_id` | The id the next persisted insert will receive |
 | `metrics` | Monotonic operational counters since startup (below) |
