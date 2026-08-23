@@ -9,7 +9,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from aegis_mcp.extract import (CandidateTriple, Fact, FakeExtractionProvider,
                                NoneExtractionProvider, PredicateSpec,
                                _parse_facts, _parse_indices, load_vocabulary,
-                               make_extraction_provider, validate_triples)
+                               VocabularyError, make_extraction_provider,
+                               validate_triples)
 
 
 class TestParseFacts(unittest.TestCase):
@@ -159,8 +160,17 @@ class TestTripleVocabulary(unittest.TestCase):
         """The server accepts any predicate with no registry configured, so
         being stricter here would reject writes that would have succeeded."""
         cands = [CandidateTriple("a", "anything_at_all", "b")]
-        res = validate_triples(cands, [])
+        res = validate_triples(cands, None)
         self.assertEqual(len(res.accepted), 1)
+
+    def test_empty_registry_is_not_the_same_as_no_registry(self):
+        """A registry declaring nothing rejects everything, which is what the
+        server does with an empty one. Conflating the two would turn a
+        misconfiguration into silent permissiveness."""
+        cands = [CandidateTriple("a", "anything_at_all", "b")]
+        res = validate_triples(cands, [])
+        self.assertEqual(res.accepted, [])
+        self.assertEqual(res.rejected, [("anything_at_all", "undeclared")])
 
     def test_rate_is_zero_for_nothing_proposed(self):
         self.assertEqual(validate_triples([], self._vocab()).in_vocabulary_rate,
@@ -182,29 +192,69 @@ class TestLoadVocabulary(unittest.TestCase):
                          ["defaults_to", "part_of"])
         self.assertEqual({p.name: p.object for p in vocab}["part_of"], "id")
 
-    def test_missing_or_unset_path_is_empty_not_an_error(self):
-        self.assertEqual(load_vocabulary(""), [])
-        self.assertEqual(load_vocabulary("/nonexistent/registry.json"), [])
+    def test_unset_path_means_unconfigured_not_empty(self):
+        """None, not []. An unconfigured server accepts any predicate; a
+        registry that declares nothing rejects every one."""
+        self.assertIsNone(load_vocabulary(""))
 
-    def test_malformed_entries_are_skipped(self):
-        import json as _json
+    def test_a_configured_registry_that_cannot_be_read_is_an_error(self):
+        """The failure this replaces: returning [] for an unreadable path
+        turned a typo in the config into silently accepting every predicate —
+        the opposite of what configuring a vocabulary asks for, and the reason
+        the server refuses to *start* on a bad registry file."""
+        with self.assertRaises(VocabularyError):
+            load_vocabulary("/nonexistent/registry.json")
+
+    def test_malformed_json_is_an_error(self):
         import tempfile
         with tempfile.NamedTemporaryFile("w", suffix=".json",
                                          delete=False) as fh:
-            _json.dump({"good": {"object": "id"},
-                        "no_object": {"transitive": True},
-                        "bad_object": {"object": "float"}}, fh)
+            fh.write("{not json")
             path = fh.name
-        vocab = load_vocabulary(path)
-        os.unlink(path)
-        self.assertEqual([p.name for p in vocab], ["good"])
+        try:
+            with self.assertRaises(VocabularyError):
+                load_vocabulary(path)
+        finally:
+            os.unlink(path)
+
+    def test_a_malformed_entry_is_an_error_not_a_skip(self):
+        """Skipping it would drop the predicate from the vocabulary silently,
+        and the only symptom would be a low in-vocabulary rate with nothing
+        pointing at the typo."""
+        import json as _json
+        import tempfile
+        for bad in ({"no_object": {"transitive": True}},
+                    {"bad_object": {"object": "float"}},
+                    {"not_an_object": "id"}):
+            with tempfile.NamedTemporaryFile("w", suffix=".json",
+                                             delete=False) as fh:
+                _json.dump(bad, fh)
+                path = fh.name
+            try:
+                with self.assertRaises(VocabularyError):
+                    load_vocabulary(path)
+            finally:
+                os.unlink(path)
+
+    def test_an_empty_registry_loads_as_empty(self):
+        """`{}` is a valid registry that declares nothing — meaningful, not an
+        error, and distinct from being unconfigured."""
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".json",
+                                         delete=False) as fh:
+            fh.write("{}")
+            path = fh.name
+        try:
+            self.assertEqual(load_vocabulary(path), [])
+        finally:
+            os.unlink(path)
 
 
 class TestFakeTriples(unittest.TestCase):
     def test_parses_explicit_triple_lines(self):
         p = FakeExtractionProvider()
         out = p.extract_triples("hnsw.c : part_of : the storage layer\n"
-                                "noise line with no colons\n", [], 16)
+                                "noise line with no colons\n", None, 16)
         self.assertEqual(len(out), 1)
         self.assertEqual((out[0].subject, out[0].predicate, out[0].obj),
                          ("hnsw.c", "part_of", "the storage layer"))
@@ -213,7 +263,7 @@ class TestFakeTriples(unittest.TestCase):
         """The rejection path is half of what 5.4 is judged on; a fake that
         could only produce valid triples would leave it untested."""
         p = FakeExtractionProvider()
-        out = p.extract_triples("a : invented_by_the_model : b", [], 16)
+        out = p.extract_triples("a : invented_by_the_model : b", None, 16)
         res = validate_triples(out, [PredicateSpec("part_of", "id")])
         self.assertEqual(res.accepted, [])
         self.assertEqual(res.rejected, [("invented_by_the_model", "undeclared")])
@@ -221,8 +271,8 @@ class TestFakeTriples(unittest.TestCase):
     def test_respects_the_cap(self):
         p = FakeExtractionProvider()
         text = "\n".join(f"s{i} : part_of : o{i}" for i in range(30))
-        self.assertEqual(len(p.extract_triples(text, [], 5)), 5)
+        self.assertEqual(len(p.extract_triples(text, None, 5)), 5)
 
     def test_other_providers_propose_nothing_by_default(self):
-        self.assertEqual(NoneExtractionProvider().extract_triples("x", [], 5),
+        self.assertEqual(NoneExtractionProvider().extract_triples("x", None, 5),
                          [])

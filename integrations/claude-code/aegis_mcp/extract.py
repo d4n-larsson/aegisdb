@@ -82,33 +82,67 @@ class TripleResult:
         return len(self.accepted) / self.proposed if self.proposed else 0.0
 
 
-def load_vocabulary(path: str) -> list:
+class VocabularyError(Exception):
+    """A registry was configured and could not be read.
+
+    Distinct from "no registry configured" on purpose. 5.2 refuses to *start*
+    the server on a bad registry file, on the grounds that an operator who
+    configured a vocabulary is relying on it and degrading to "accept
+    everything" is the opposite of what they asked for. The same reasoning
+    applies here: a typo in the path would otherwise turn the contract off
+    silently, and the only symptom would be predicates the server later
+    refuses.
+    """
+
+
+def load_vocabulary(path: str):
     """Read the predicate registry the server was started with.
 
-    The same file, deliberately: a second copy of the vocabulary would drift
-    from the one the server enforces, and then extraction would propose triples
-    that insert refuses — the failure would look like a bad model rather than a
-    misconfiguration. Returns [] when the path is unset or unreadable, which is
-    the "no registry configured" case the server also treats as permissive.
+    Returns None when no registry is configured, a list when one is — including
+    the empty list for a registry that declares nothing, which is a meaningful
+    state and not the same as being unconfigured. Raises VocabularyError when a
+    configured registry cannot be read or is malformed.
+
+    The same file as the server's, deliberately: a second copy would drift from
+    the vocabulary the server enforces, and extraction would then propose
+    triples that insert refuses — a failure that looks like a bad model rather
+    than a misconfiguration.
     """
     if not path:
-        return []
+        return None
     try:
         with open(path) as fh:
             raw = json.load(fh)
-    except (OSError, ValueError):
-        return []
+    except OSError as e:
+        raise VocabularyError(f"cannot read predicate registry {path}: {e}")
+    except ValueError as e:
+        raise VocabularyError(f"predicate registry {path} is not valid JSON: {e}")
     if not isinstance(raw, dict):
-        return []
+        raise VocabularyError(f"predicate registry {path} is not an object")
     out = []
     for name, spec in raw.items():
-        if isinstance(spec, dict) and spec.get("object") in ("id", "string"):
-            out.append(PredicateSpec(name=name, object=spec["object"]))
+        if not isinstance(spec, dict) or spec.get("object") not in ("id",
+                                                                    "string"):
+            # Refused rather than skipped, for the reason the server refuses to
+            # start on one: a predicate silently missing from the vocabulary
+            # becomes triples silently rejected, and the operator sees a low
+            # in-vocabulary rate with nothing pointing at the typo.
+            raise VocabularyError(
+                f"predicate registry {path}: '{name}' needs an \"object\" of "
+                f'"id" or "string"')
+        out.append(PredicateSpec(name=name, object=spec["object"]))
     return out
 
 
-def validate_triples(candidates: list, vocab: list) -> TripleResult:
+def validate_triples(candidates: list, vocab) -> TripleResult:
     """Keep the candidates the registry declares; count and name the rest.
+
+    `vocab` is None when no registry is configured and a list when one is. The
+    two are not the same: an unconfigured server accepts any predicate, so this
+    does too — being stricter than the thing that enforces it would reject
+    writes that would have succeeded. A registry that declares *nothing*
+    rejects everything, which is what the server does with an empty one, and
+    conflating the two would turn a misconfiguration into silent permissiveness.
 
     Rejection is deliberate, and deliberately not repair. Nothing here maps
     `is_part_of` onto `part_of` or picks the closest declared predicate:
@@ -116,13 +150,9 @@ def validate_triples(candidates: list, vocab: list) -> TripleResult:
     silent change to what the corpus asserts. A dropped triple costs the
     machine-readable half of one record; the prose is still captured and still
     searchable, so the failure degrades rather than loses.
-
-    An empty vocabulary means no registry is configured. The server accepts any
-    predicate in that case, so this does too — being stricter than the thing
-    that enforces it would reject writes that would have succeeded.
     """
     res = TripleResult(proposed=len(candidates))
-    if not vocab:
+    if vocab is None:
         res.accepted = list(candidates)
         return res
     by_name = {p.name: p for p in vocab}
