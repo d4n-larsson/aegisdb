@@ -352,6 +352,43 @@ size_t qe_sweep_expired(AegisDB *db, uint64_t now) {
  * survivor, union the losers' tags into it, take the max importance/confidence,
  * migrate the losers' relationships onto it, and tombstone the losers. Returns
  * the number of records merged away (losers deleted). */
+/* Do these two records assert the same triple? A merge only preserves what a
+ * conclusion rests on when the survivor says the same thing the loser did. */
+static int facts_equal(const Fact *a, const Fact *b) {
+    if (a->kind != b->kind || a->subject != b->subject) {
+        return 0;
+    }
+    if (!a->predicate || !b->predicate ||
+        strcmp(a->predicate, b->predicate) != 0) {
+        return 0;
+    }
+    if (a->kind == FACT_OBJ_ID) {
+        return a->object_id == b->object_id;
+    }
+    return a->object_str && b->object_str &&
+           strcmp(a->object_str, b->object_str) == 0;
+}
+
+/* Give every conclusion that cites `old_id` an edge to its heir, so a later
+ * delete of the heir still finds them. Best-effort: what this misses, recovery
+ * reconciles. */
+static void repoint_dependents(AegisDB *db, uint64_t old_id, uint64_t heir,
+                               const char *ns) {
+    static const char *const KIND[] = {"derived_from"};
+    EdgeSource *src = NULL;
+    size_t n = 0;
+    pthread_rwlock_rdlock(&db->index_lock);
+    int rv = edge_index_sources(db->edges, old_id, KIND, 1, &src, &n);
+    pthread_rwlock_unlock(&db->index_lock);
+    if (rv != 0) {
+        return;
+    }
+    for (size_t i = 0; i < n; i++) {
+        (void)qe_relate(db, src[i].from_id, heir, "derived_from", ns);
+    }
+    free(src);
+}
+
 static size_t merge_cluster(AegisDB *db, MemoryRecord *recs, size_t n,
                             const char *ns) {
     /* survivor = latest updated (tie -> greatest id) */
@@ -444,8 +481,26 @@ static size_t merge_cluster(AegisDB *db, MemoryRecord *recs, size_t n,
          * (ROADMAP 5.3 §6). Without this a conclusion drawn from an absorbed
          * record is retracted and then re-derived from the survivor on the
          * next pass — correct in the end, but churn in the log and a
-         * retraction in `history` that the corpus never justified. */
-        db_supersede_note(db, recs[i].id, survivor);
+         * retraction in `history` that the corpus never justified.
+         *
+         * Only when nothing a conclusion could rest on is actually lost.
+         * A merge does *not* carry the loser's typed fact across — UpdatePatch
+         * has no fact field, because a fact is immutable — so absorbing a
+         * fact-bearing record destroys that assertion outright. Calling that
+         * "merged" would keep alive a conclusion whose supporting fact exists
+         * nowhere, and which no later pass could re-derive. Retracting is the
+         * correct answer there, so the mapping is deliberately not recorded. */
+        int fact_survives = recs[i].fact.kind == FACT_NONE ||
+                            facts_equal(&recs[i].fact, &recs[sv].fact);
+        if (fact_survives) {
+            db_supersede_note(db, recs[i].id, survivor);
+            /* Re-point the provenance edges too. The routes on a derived record
+             * still name the absorbed id — deliberately, since that is what it
+             * was drawn from — but the *edges* are what a later delete walks,
+             * and without this a subsequent delete of the survivor would find
+             * no dependents to re-judge. */
+            repoint_dependents(db, recs[i].id, survivor, ns);
+        }
         if (qe_delete(db, recs[i].id, ns) == AEGIS_OK) {
             merged++;
         }

@@ -142,6 +142,10 @@ typedef struct {
         uint64_t *sup_to;
         size_t sup_n;
         size_t sup_cap;
+        /* Set once the map is non-empty, so the common case (no merges yet)
+         * skips the lock entirely — it is taken under index_lock's write side,
+         * where a scan would park every reader. */
+        atomic_int sup_live;
         pthread_mutex_t lock; /* ordered BELOW index_lock: qe_delete takes this
                                * while holding index_lock, never the reverse */
     } retract;

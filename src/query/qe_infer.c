@@ -520,7 +520,14 @@ size_t db_retract_step(AegisDB *db) {
 
 /* ----- supersession, so a merge is not mistaken for a loss ---------------- */
 
-/* Beyond this a merge history is pathological, not interesting. */
+/* Beyond this a merge history is pathological, not interesting.
+ *
+ * Chains only reach this length *within* one process run. Recovery rebuilds the
+ * mapping from live records' own `supersedes` edges, and a middle link is
+ * itself tombstoned — its edges are on a record the live-set walk never visits
+ * — so after a restart a twice-merged premise resolves to nothing and reads as
+ * lost. That costs a retraction and a re-derivation, which is the same price
+ * the cap charges, so it is a documented limit rather than a bug to chase. */
 #define SUPERSEDE_MAX_HOPS 8
 /* Entries are tiny and only consolidation creates them, but a long-lived
  * server merging continuously should not grow this without bound. Past the cap
@@ -540,26 +547,43 @@ void db_supersede_note(AegisDB *db, uint64_t old_id, uint64_t new_id) {
     if (db->retract.sup_n == db->retract.sup_cap) {
         size_t nc = db->retract.sup_cap ? db->retract.sup_cap * 2 : 32;
         uint64_t *nf = realloc(db->retract.sup_from, nc * sizeof(*nf));
-        uint64_t *nt =
-            nf ? realloc(db->retract.sup_to, nc * sizeof(*nt)) : NULL;
-        if (!nt) {
-            free(nf == db->retract.sup_from ? NULL : nf);
+        if (!nf) {
             pthread_mutex_unlock(&db->retract.lock);
             return;
         }
+        /* Adopted before the second realloc is attempted. A successful realloc
+         * may move the block and free the old one, so leaving the stale pointer
+         * in the struct while the second call fails would strand a freed
+         * pointer there — realloc'd again on the next grow, and freed a second
+         * time by db_close. */
         db->retract.sup_from = nf;
+        uint64_t *nt = realloc(db->retract.sup_to, nc * sizeof(*nt));
+        if (!nt) {
+            pthread_mutex_unlock(&db->retract.lock);
+            return; /* sup_cap unchanged, so the two arrays stay consistent */
+        }
         db->retract.sup_to = nt;
         db->retract.sup_cap = nc;
     }
     db->retract.sup_from[db->retract.sup_n] = old_id;
     db->retract.sup_to[db->retract.sup_n] = new_id;
     db->retract.sup_n++;
+    atomic_store_explicit(&db->retract.sup_live, 1, memory_order_relaxed);
     pthread_mutex_unlock(&db->retract.lock);
 }
 
 /* One hop, under the lock. */
 static uint64_t supersede_lookup(AegisDB *db, uint64_t id) {
     uint64_t to = 0;
+    /* The common case is an empty map, and this lock is taken by qe_delete
+     * while it holds index_lock for write — so scanning here parks every
+     * reader behind it. Entries are only ever appended, so a relaxed read of
+     * this flag is enough to skip the lock entirely when there is nothing to
+     * find. */
+    if (atomic_load_explicit(&db->retract.sup_live, memory_order_relaxed) ==
+        0) {
+        return 0;
+    }
     pthread_mutex_lock(&db->retract.lock);
     for (size_t i = db->retract.sup_n; i-- > 0;) {
         if (db->retract.sup_from[i] == id) {
