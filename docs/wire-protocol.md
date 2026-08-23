@@ -708,12 +708,19 @@ through the `is_a` taxonomy:
 
 Off by default, because it changes what a pattern *means* — a caller asking
 what record 7 defaults to should not silently receive an answer about a
-different record. It needs `--inference`, since the expansion reads the `is_a`
-closure the job materializes; that is also why it reaches a descendant any
-number of levels down for the cost of one index lookup rather than a graph
-walk. Bounded by `--inference-max-subsume` (default 256); when the cap
-truncates the expansion the response carries `"subsume_truncated": true`, so a
-narrow answer is distinguishable from a partial one.
+different record.
+
+It requires `--inference` and reports `NOT_READY` without it: the expansion
+reads the `is_a` closure the job materializes, and without that closure it would
+reach direct members only — a partial answer indistinguishable from a narrow
+one. That same closure is why it reaches a descendant any number of levels down
+for the cost of one index lookup rather than a graph walk.
+
+The expansion is scoped to the caller's namespace, and deduplicated per entity,
+so a membership asserted twice does not return anything twice. It is bounded by
+`--inference-max-subsume` (default 256); past the cap the response carries
+`"subsume_truncated": true`, and `count` folds the same signal into its existing
+`capped` flag.
 
 `count` accepts `pattern` and `subsume` too. Bulk `delete` deliberately **rejects** it rather
 than ignoring it: deleting by pattern would be a new destructive capability, so

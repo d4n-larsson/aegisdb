@@ -65,12 +65,12 @@ static void add_derivation_explain(AegisDB *db, cJSON *ex,
                 break;
             }
             cJSON_AddNumberToObject(pj, "id", (double)rt->premises[j]);
-            MemoryRecord pr;
-            int live = qe_get(db, rt->premises[j], NULL, &pr) == AEGIS_OK;
-            cJSON_AddBoolToObject(pj, "live", live);
-            if (live) {
-                record_free(&pr);
-            }
+            /* An index probe, not a fetch. Loading each premise to compute one
+             * boolean would be up to DERIV_MAX_ROUTES * DERIV_MAX_PREMISES *
+             * top_k log reads for a single explained search — 32k at the
+             * limits, on a path where everything else is bounded. */
+            cJSON_AddBoolToObject(pj, "live",
+                                  db_id_is_live(db, rt->premises[j]));
             cJSON_AddItemToArray(prem, pj);
         }
         cJSON_AddItemToArray(routes, jr);

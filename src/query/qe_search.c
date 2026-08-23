@@ -463,6 +463,10 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
                 : time_index_range_recent(db->time, p->start_time, p->end_time,
                                           load_cap, &ids, &nids, &trunc);
         if (rc != 0) {
+            /* Every other branch here leaves *ids NULL on failure, so this
+             * used to need no free. The subsume union accumulates across
+             * lookups, so it does. */
+            free(ids);
             pthread_rwlock_unlock(&db->index_lock);
             return AEGIS_ERR_INTERNAL;
         }
@@ -498,7 +502,7 @@ static aegis_status_t gather_candidates(AegisDB *db, const SearchParams *p,
                 if (!grown) {
                     free(part);
                     rc = -1;
-                    break;
+                    break; /* `ids` is freed by the rc != 0 path below */
                 }
                 ids = grown;
                 memcpy(ids + nids, part, pn * sizeof(*part));
@@ -676,12 +680,26 @@ aegis_status_t qe_search(AegisDB *db, const SearchParams *p,
  * does not carry, so each one is loaded. Bounded by the cap for exactly that
  * reason. Returns 0, or -1 on allocation failure; a missing index or an empty
  * taxonomy is simply an empty expansion. */
+static int cmp_u64_asc(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a;
+    uint64_t y = *(const uint64_t *)b;
+    return (x > y) - (x < y);
+}
+
 static int resolve_subsume(AegisDB *db, SearchParams *p) {
     p->subsume_ids = NULL;
     p->subsume_n = 0;
     p->subsume_truncated = 0;
     if (!p->subsume || !p->pat_has_subject || !db->facts) {
         return 0;
+    }
+    /* Without the job, `is_a`'s transitive closure was never materialized, so
+     * the expansion would reach direct members only — a *partial* answer that
+     * looks exactly like a narrow one, which is the ambiguity this feature is
+     * meant to remove. Refused, the way `pattern` reports NOT_READY when
+     * --no-fact-index takes its index away. */
+    if (!db->config.inference) {
+        return 1;
     }
     uint64_t *ids = NULL;
     size_t n = 0;
@@ -709,7 +727,11 @@ static int resolve_subsume(AegisDB *db, SearchParams *p) {
     size_t m = 0;
     for (size_t i = 0; i < n; i++) {
         MemoryRecord r;
-        if (qe_get(db, ids[i], NULL, &r) != AEGIS_OK) {
+        /* Scoped to the caller, not NULL. The fact indexes are server-wide, so
+         * an unscoped expansion would let another tenant's taxonomy decide
+         * which of *this* tenant's records answer — nothing of theirs leaks,
+         * but the answer set would be chosen by data the caller cannot see. */
+        if (qe_get(db, ids[i], p->agent_id, &r) != AEGIS_OK) {
             continue;
         }
         if (r.fact.kind == FACT_OBJ_ID && r.fact.subject != p->pat_subject) {
@@ -718,8 +740,22 @@ static int resolve_subsume(AegisDB *db, SearchParams *p) {
         record_free(&r);
     }
     free(ids);
+    /* Deduplicated, which is not cosmetic: nothing stops two records asserting
+     * the same `X is_a S` — the ordinary case is an agent writing it twice over
+     * two sessions — and the union below issues one lookup per entry with no
+     * dedup downstream, so a repeat would return every fact of X twice and
+     * double the count. An earlier comment here claimed a duplicate cost only a
+     * reload; the post-filter decides *whether* a candidate matches, never how
+     * many times it appears. */
+    qsort(subs, m, sizeof(*subs), cmp_u64_asc);
+    size_t uniq = 0;
+    for (size_t i = 0; i < m; i++) {
+        if (i == 0 || subs[i] != subs[i - 1]) {
+            subs[uniq++] = subs[i];
+        }
+    }
     p->subsume_ids = subs;
-    p->subsume_n = m;
+    p->subsume_n = uniq;
     return 0;
 }
 
@@ -891,7 +927,11 @@ aegis_status_t qe_search_ex(AegisDB *db, SearchParams *p,
                             MemoryRecord **out_records,
                             SearchExplain **out_explain, size_t *out_n) {
     SearchParams q = *p;
-    if (resolve_subsume(db, &q) != 0) {
+    int rs = resolve_subsume(db, &q);
+    if (rs > 0) {
+        return AEGIS_ERR_NOT_READY;
+    }
+    if (rs < 0) {
         return AEGIS_ERR_INTERNAL;
     }
     aegis_status_t st = search_ex_body(db, &q, out_records, out_explain, out_n);
@@ -914,7 +954,11 @@ aegis_status_t qe_count(AegisDB *db, const SearchParams *p, size_t *out_count,
     /* `count` takes `pattern`, so it takes `subsume` with it — "how many
      * records assert this?" should mean the same thing under both ops. */
     SearchParams q = *p;
-    if (resolve_subsume(db, &q) != 0) {
+    int rs = resolve_subsume(db, &q);
+    if (rs > 0) {
+        return AEGIS_ERR_NOT_READY;
+    }
+    if (rs < 0) {
         return AEGIS_ERR_INTERNAL;
     }
     p = &q;
@@ -925,6 +969,11 @@ aegis_status_t qe_count(AegisDB *db, const SearchParams *p, size_t *out_count,
                            &exhausted);
     free((void *)q.subsume_ids);
     q.subsume_ids = NULL;
+    /* Folded into `capped`, which already means "this number is over a
+     * bounded view". A count computed across a truncated expansion is exactly
+     * that, and leaving it unsaid would be the narrow-versus-partial ambiguity
+     * `search` reports with subsume_truncated. */
+    int sub_trunc = q.subsume_truncated;
     if (st != AEGIS_OK) {
         return st;
     }
@@ -936,7 +985,7 @@ aegis_status_t qe_count(AegisDB *db, const SearchParams *p, size_t *out_count,
     /* When the broad-scan cap truncated the candidate set the count is a floor,
      * not exact — tell the caller so it isn't reported as authoritative. */
     if (out_capped) {
-        *out_capped = !exhausted;
+        *out_capped = !exhausted || sub_trunc;
     }
     return AEGIS_OK;
 }

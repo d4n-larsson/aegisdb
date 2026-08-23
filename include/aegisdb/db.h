@@ -262,6 +262,13 @@ size_t db_retract_step(AegisDB *db);
  * rather than merely block. */
 int db_derivation_stands(AegisDB *db, const MemoryRecord *r);
 
+/* Does this id name a record a reader could see — present, not tombstoned, not
+ * past its TTL? An index probe under index_lock, with no log read: the answer
+ * is a boolean, and decoding a whole record to compute one is the difference
+ * between an `explain` that costs a few lookups and one that costs thousands.
+ * Must be called with no index lock held. */
+int db_id_is_live(AegisDB *db, uint64_t id);
+
 /* Record that `old_id` was superseded by `new_id` — consolidation merging a
  * record into a survivor, or recovery finding a `supersedes` edge from a live
  * record to a tombstoned one. Retraction consults this so a premise that was

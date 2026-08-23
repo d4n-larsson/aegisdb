@@ -1294,6 +1294,31 @@ def _await_stat(srv, key, at_least, timeout=20.0):
     return n
 
 
+def test_subsume_requires_inference(binary, port):
+    print("[inference: subsume without the job is refused, not answered badly]")
+    d = tempfile.mkdtemp(prefix="aegis_subsume_off_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"is_a": {"object": "id", "transitive": True},
+                   "defaults_to": {"object": "string"}}, fh)
+
+    # No --inference: is_a's closure was never materialized, so an expansion
+    # would reach direct members only. That partial answer is indistinguishable
+    # from a narrow one, which is the ambiguity subsume exists to remove.
+    with Server(binary, port, phase=4,
+                extra_args=["--predicate-registry", reg]) as srv:
+        top = srv.req({"operation": "insert", "type": "semantic",
+                       "data": "top"})["record"]["id"]
+        r = srv.req({"operation": "search", "pattern": {"s": top, "p": "is_a"},
+                     "subsume": True, "top_k": 5})
+        check(r.get("ok") is False and r["error"]["code"] == "NOT_READY",
+              "subsume without --inference reports NOT_READY")
+        # and the same pattern without subsume still works
+        r = srv.req({"operation": "search", "pattern": {"s": top, "p": "is_a"},
+                     "top_k": 5})
+        check(r.get("ok") is True, "while the plain pattern is unaffected")
+
+
 def test_subsume_and_explain_derivation(binary, port):
     print("[inference: asking about a category, and why a record is believed]")
     d = tempfile.mkdtemp(prefix="aegis_subsume_")
@@ -1368,6 +1393,20 @@ def test_subsume_and_explain_derivation(binary, port):
                      "top_k": 5, "explain": True})["records"][0]
         check("derivation" not in a.get("explain", {}),
               "an asserted record explains no derivation")
+
+        # Two records asserting the *same* membership must not double the
+        # answer. The expansion is per entity, not per assertion, and nothing
+        # downstream de-duplicates candidate ids — so a repeat would return
+        # every fact of that entity once per assertion. Asserted directly on
+        # the storage layer, since that is the expansion this query resolves.
+        ins("line is storage, restated",
+            {"s": line, "p": "is_a", "o": {"id": storage}})
+        ins("line is storage, again",
+            {"s": line, "p": "is_a", "o": {"id": storage}})
+        time.sleep(2)
+        again = srv.req(dict(ask, subsume=True)).get("records", [])
+        check(len(again) == 1,
+              f"a repeated is_a does not duplicate the answer ({len(again)})")
 
         # A retracted premise is what makes `live` worth reporting.
         prem_id = prem[0]["id"]
@@ -4244,6 +4283,7 @@ def main():
     test_retraction(binary, 19576)
     test_contradiction_detection(binary, 19582)
     test_subsume_and_explain_derivation(binary, 19584)
+    test_subsume_requires_inference(binary, 19585)
     test_retraction_survives_a_lost_queue(binary, 19577)
     test_retraction_follows_supersedes(binary, 19579)
     test_retraction_when_a_merge_destroys_the_fact(binary, 19581)

@@ -644,7 +644,7 @@ void db_retract_enqueue(AegisDB *db, uint64_t id) {
 }
 
 /* Is this id a live record? */
-static int id_is_live(AegisDB *db, uint64_t id) {
+int db_id_is_live(AegisDB *db, uint64_t id) {
     uint64_t now = db_now_ms();
     pthread_rwlock_rdlock(&db->index_lock);
     const HashEntry *e = hash_index_get(db->hash, id);
@@ -690,7 +690,7 @@ int db_derivation_stands(AegisDB *db, const MemoryRecord *r) {
         const DerivRoute *rt = &r->derivation.routes[i];
         int all_live = 1;
         for (size_t j = 0; j < rt->premise_count && all_live; j++) {
-            all_live = id_is_live(db, rt->premises[j]);
+            all_live = db_id_is_live(db, rt->premises[j]);
         }
         if (all_live) {
             return 1;
