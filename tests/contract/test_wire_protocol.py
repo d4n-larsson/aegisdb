@@ -1740,8 +1740,14 @@ def test_consolidate_preserves_facts(binary, port):
         # in the sense that matters. A merge cannot carry two claims, so the
         # smaller merge is the right answer — better than a lost assertion.
         v2 = [0.0, 1.0] + [0.0] * 382
+        # x1 carries the tag and is inserted first, so x2 (later id, later
+        # updated) is the survivor and x1 is the record the fact check
+        # excludes. Tagging at insert rather than by update matters: an update
+        # would refresh x1's `updated` and make *it* the survivor, which is how
+        # the first version of this check ended up tagging the survivor and
+        # passing whether or not the fix was present.
         x1 = ins("c is part of a", {"s": c, "p": "part_of", "o": {"id": a}},
-                 embedding=v2)
+                 embedding=v2, tags=["donor-tag"])
         x2 = ins("c is part of b", {"s": c, "p": "part_of", "o": {"id": b}},
                  embedding=v2)
         # These close a cycle under a transitive predicate, so the job has more
@@ -1758,17 +1764,27 @@ def test_consolidate_preserves_facts(binary, port):
               srv.req({"operation": "get", "id": x2}).get("ok") is True,
               "and both records are still live")
 
-        # "Not merged" has to mean it donated nothing either. The tag union and
-        # the relationship migration used to run over every cluster member
-        # before the fact check, so a record left alone had already given the
-        # survivor its tags and edges.
-        srv.req({"operation": "update", "id": x2, "tags": ["donor-tag"]})
-        srv.req({"operation": "consolidate", "min_similarity": 0.9})
-        time.sleep(1)
+        # "Not merged" has to mean it donated nothing either — and that needs a
+        # cluster that *partly* merges, or the no-write early return above
+        # hides the question. A fact-less survivor (y3, inserted last) adopts
+        # y1's triple, folds y1, and must leave y2 alone: y2 asserts something
+        # else and carries a tag nothing should acquire.
+        v3 = [0.0, 0.0, 1.0] + [0.0] * 381
+        y1 = ins("d relates to a", {"s": a, "p": "part_of", "o": {"id": c}},
+                 embedding=v3)
+        ins("d relates to b", {"s": b, "p": "part_of", "o": {"id": a}},
+            embedding=v3, tags=["donor-tag"])
+        y3 = ins("d, no assertion", embedding=v3)
+        _await_fixpoint(srv)
+        r = srv.req({"operation": "consolidate", "min_similarity": 0.9})
+        check(r.get("merged", 0) == 1,
+              f"the agreeing member folds, the other does not ({r.get('merged')})")
+        check(srv.req({"operation": "get", "id": y1}).get("ok") is False,
+              "the agreeing member was absorbed")
         tagged = srv.req({"operation": "search", "tags": ["donor-tag"],
                           "top_k": 10}).get("records", [])
-        check([r["id"] for r in tagged] == [x2],
-              "an unmerged record donates nothing to the survivor")
+        check(y3 not in [t["id"] for t in tagged],
+              "and the excluded member donated no tag to the survivor")
 
         # And an unmergeable cluster must converge: it stays live, so it
         # re-enters merge_cluster on every pass. Rewriting the survivor anyway

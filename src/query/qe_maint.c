@@ -413,10 +413,29 @@ static size_t merge_cluster(AegisDB *db, MemoryRecord *recs, size_t n,
      * rewrite: writing a fact where none existed overwrites no claim, which is
      * what makes it compatible with facts being immutable. */
     const Fact *adopt = NULL;
-    for (size_t i = 0; i < n && recs[sv].fact.kind == FACT_NONE; i++) {
-        if (i != sv && recs[i].fact.kind != FACT_NONE) {
-            adopt = &recs[i].fact;
-            break;
+    if (recs[sv].fact.kind == FACT_NONE) {
+        /* The triple the most members agree on, not whichever the search
+         * ranked first. Every member asserting something *else* is excluded
+         * below, so this choice decides how much of the cluster folds — and
+         * deciding that by scoring order would make the merge's completeness
+         * depend on something unrelated to the cluster. Ties break toward the
+         * earlier member, which is stable for a given result set. */
+        size_t best = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (i == sv || recs[i].fact.kind == FACT_NONE) {
+                continue;
+            }
+            size_t votes = 0;
+            for (size_t j = 0; j < n; j++) {
+                if (j != sv && recs[j].fact.kind != FACT_NONE &&
+                    facts_equal(&recs[j].fact, &recs[i].fact)) {
+                    votes++;
+                }
+            }
+            if (votes > best) {
+                best = votes;
+                adopt = &recs[i].fact;
+            }
         }
     }
     const Fact *sv_fact = adopt ? adopt : &recs[sv].fact;
@@ -497,17 +516,6 @@ static size_t merge_cluster(AegisDB *db, MemoryRecord *recs, size_t n,
         }
     }
 
-    /* migrate the merging losers' relationships onto the survivor */
-    for (size_t i = 0; i < n; i++) {
-        if (!keep[i] || recs[i].id == survivor) {
-            continue;
-        }
-        for (size_t r = 0; r < recs[i].rel_count; r++) {
-            qe_relate(db, survivor, recs[i].relationships[r].to_id,
-                      recs[i].relationships[r].kind, ns);
-        }
-    }
-
     /* fold the merged tags + fields into the survivor */
     UpdatePatch patch;
     memset(&patch, 0, sizeof(patch));
@@ -537,6 +545,22 @@ static size_t merge_cluster(AegisDB *db, MemoryRecord *recs, size_t n,
         return 0;
     }
     record_free(&upd);
+
+    /* Migrate the losers' relationships — after the update, not before. The
+     * abort above claims to leave the cluster alone, and it only does if
+     * nothing has been written to the survivor yet; migrating first left it
+     * holding every loser's edges while the losers stayed live, and a
+     * persistently failing survivor would accumulate duplicates against the
+     * relationship cap until that cap was itself the reason it kept failing. */
+    for (size_t i = 0; i < n; i++) {
+        if (!keep[i] || recs[i].id == survivor) {
+            continue;
+        }
+        for (size_t r = 0; r < recs[i].rel_count; r++) {
+            qe_relate(db, survivor, recs[i].relationships[r].to_id,
+                      recs[i].relationships[r].kind, ns);
+        }
+    }
 
     /* Tombstone the losers, recording provenance first: the survivor
      * `supersedes` each one, so a merge is auditable lineage rather than silent

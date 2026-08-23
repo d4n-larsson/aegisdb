@@ -424,6 +424,23 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
         pthread_rwlock_unlock(&db->index_lock);
         return AEGIS_ERR_INVALID_REQUEST;
     }
+    /* Applied here, before the payload and tags are staged, so its failure
+     * path has nothing detached to put back. An earlier version reattached
+     * `old_tags` the way the record_set_tags failure below does — but that
+     * idiom depends on cur.tags having been deliberately NULLed first, which
+     * is only true there. Copied without its precondition it leaked the newly
+     * set tags, or nulled out the record's own. */
+    int adopted_fact = 0;
+    if (patch->has_fact && patch->fact) {
+        if (record_set_fact(&cur, patch->fact->kind, patch->fact->subject,
+                            patch->fact->predicate, patch->fact->object_id,
+                            patch->fact->object_str) != 0) {
+            record_free(&cur);
+            pthread_rwlock_unlock(&db->index_lock);
+            return AEGIS_ERR_INTERNAL;
+        }
+        adopted_fact = 1;
+    }
 
     /* old tags for index diff */
     /* Detach (rather than free) the superseded payload: the lexical index is
@@ -475,20 +492,6 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
             pthread_rwlock_unlock(&db->index_lock);
             return AEGIS_ERR_INTERNAL;
         }
-    }
-
-    int adopted_fact = 0;
-    if (patch->has_fact && patch->fact) {
-        if (record_set_fact(&cur, patch->fact->kind, patch->fact->subject,
-                            patch->fact->predicate, patch->fact->object_id,
-                            patch->fact->object_str) != 0) {
-            cur.tags = old_tags; /* reattach so record_free owns them again */
-            cur.tag_count = old_tag_count;
-            record_free(&cur);
-            pthread_rwlock_unlock(&db->index_lock);
-            return AEGIS_ERR_INTERNAL;
-        }
-        adopted_fact = 1;
     }
 
     cur.updated = db_now_ms();

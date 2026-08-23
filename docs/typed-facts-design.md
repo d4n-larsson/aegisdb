@@ -316,9 +316,9 @@ the registry a *contract* the 5.4 extractor can be prompted against.
   in-RAM index; the write path already holds it exclusively at each site. No new
   lock, no change to the `index_lock` → `log_lock` order.
 - **Maintenance sites.** The same set 5.1 enumerated: `qe_insert` (a fact
-  arrives with the record here, unlike edges), `qe_update` (a no-op: a fact is
-  immutable, see §13), `qe_delete`, `db_replica_apply`, and the `recovery.c`
-  rebuild. `qe_relate` is not among them. All four live sites go through one
+  arrives with the record here, unlike edges), `qe_update` (adoption only —
+  see §13), `qe_delete`, `db_replica_apply`, and the `recovery.c`
+  rebuild. `qe_relate` is not among them. All five live sites go through one
   helper, `db_fact_index_apply`, so the argument order and the has-no-fact case
   cannot drift apart between them — which is how 5.1's recovery-vs-replica
   divergence happened.
@@ -398,13 +398,22 @@ un-negotiated one, regardless of facts.
 
 ## 13. Open questions
 
-- ~~**Is a fact immutable?**~~ **Decided (PR 4): yes.** A fact is set at insert
-  and never patched. Changing what a record asserts is a supersession, not an
-  edit — that is the mechanism 2.1/2.2 already provide, and it leaves an
+- ~~**Is a fact immutable?**~~ **Decided (PR 4): yes**, and **narrowed by 5.3.**
+  A fact is never *changed*. Changing what a record asserts is a supersession,
+  not an edit — that is the mechanism 2.1/2.2 already provide, and it leaves an
   auditable chain instead of silently rewriting what the record used to claim.
-  It also keeps the fact indexes out of the `update` path entirely, so there is
-  no swing-the-index-on-patch case to get wrong (the shape that needed care for
-  tags and the payload).
+
+  5.3 added the one case the rule does not cover: a record that asserts
+  *nothing* can **adopt** a fact, because there is no claim to overwrite. It
+  exists for consolidation, which absorbed fact-bearing records and destroyed
+  their assertions outright until then. `update` still refuses the field at the
+  wire layer, so this is not a client capability, and `qe_update` refuses it
+  outright when the record already asserts something.
+
+  So the fact index *is* touched on the update path now — but only ever as an
+  add, never a swing: the record had no fact a moment earlier, so there is
+  nothing to unindex. The swing-on-patch case that needed care for tags and the
+  payload still does not arise.
 - ~~**Must the subject exist?**~~ **Decided (PR 4): no.** Mirroring `relate`'s
   endpoint check was the obvious move and is wrong here: a batch inserting an
   entity record *and* a fact about it — exactly the shape 5.4's extractor wants

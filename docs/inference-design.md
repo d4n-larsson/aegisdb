@@ -700,11 +700,11 @@ revertible. If the horizon stops after 4, nothing is left in a half state.
   applies. Both cost a retraction and a re-derivation rather than a wrong
   answer.
 
-  The rule is also narrower than "merged": a merge does **not** carry the
-  loser's typed fact onto the survivor — `UpdatePatch` has no fact field,
-  because a fact is immutable — so absorbing a fact-bearing record destroys
-  that assertion outright. Recording a supersession there would keep alive a
-  conclusion whose supporting fact exists nowhere and which no later pass could
-  re-derive, so the mapping is only recorded when the survivor asserts the same
-  triple (or the loser asserted none). That consolidation silently drops a fact
-  at all is a separate defect, noted below.
+  The mapping is recorded for every absorbed record, which is only safe
+  because consolidation no longer drops a fact. It used to: `UpdatePatch` had
+  no fact field, so absorbing a fact-bearing record destroyed the assertion,
+  and recording a supersession there would have kept alive a conclusion whose
+  supporting fact existed nowhere. A survivor now adopts the fact where it has
+  none, and a member asserting something the survivor will not is excluded from
+  the merge rather than being silently emptied — so anything reaching the
+  tombstone is genuinely represented by the survivor. See §15.
