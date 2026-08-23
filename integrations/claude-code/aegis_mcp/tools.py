@@ -139,7 +139,13 @@ class MemoryTools:
     # ---- operations ------------------------------------------------------
 
     def save(self, text: str, tags=None, importance: float = 0.5,
-             semantic: bool = False, confidence: float = 1.0) -> dict:
+             semantic: bool = False, confidence: float = 1.0,
+             fact: dict | None = None) -> dict:
+        """`fact` attaches a typed {s, p, o} assertion (ROADMAP 5.2) alongside
+        the prose. The server validates it against its predicate registry and
+        refuses the whole insert if it does not match — which is the intended
+        arrangement: a client-side check is an optimization, and the server's
+        answer is the one that counts."""
         if not text or not text.strip():
             return results.err("invalid", "text must be non-empty")
         payload = {
@@ -151,6 +157,8 @@ class MemoryTools:
         }
         if semantic:
             payload["confidence"] = confidence
+        if fact is not None:
+            payload["fact"] = fact
         if self._embeddings_usable():
             payload["embedding"] = self.provider.embed_document(text)
         resp, err = self._send(payload)

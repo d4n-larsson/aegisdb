@@ -14,7 +14,9 @@ from dataclasses import dataclass, field
 
 from .client import AegisClient
 from .embeddings import EmbeddingProvider
-from .extract import make_extraction_provider
+from .extract import (VocabularyError, load_vocabulary,
+                      make_extraction_provider)
+from .triples import store_triples
 from .tools import MemoryTools
 
 # Phrases that signal a salient outcome worth remembering, with a weight.
@@ -177,6 +179,21 @@ def _drop_ephemeral(texts: list) -> list:
             if not any(m in t.lower() for m in _EPHEMERAL_MARKERS)]
 
 
+def _transcript_blob(texts: list, config) -> str:
+    """The transcript as one capped string. Shared so prose extraction and
+    triple extraction read exactly the same text — proposing triples about
+    turns the fact extractor never saw would make the two disagree for a reason
+    nobody could see from the output."""
+    kept = _drop_ephemeral(texts)
+    if not kept:
+        return ""
+    blob = "\n".join(kept)
+    cap = getattr(config, "extract_max_input_chars", 24000)
+    if cap and len(blob) > cap:
+        blob = blob[-cap:]  # keep the most recent turns
+    return blob
+
+
 def extract_facts(texts: list, config, provider=None) -> list | None:
     """LLM extraction path (ROADMAP 2.1): distil the transcript into durable
     Facts. Returns a list[Fact] (possibly empty) when an extractor ran, or None
@@ -186,13 +203,9 @@ def extract_facts(texts: list, config, provider=None) -> list | None:
         provider = make_extraction_provider(config)
     if not provider.available():
         return None
-    kept = _drop_ephemeral(texts)
-    if not kept:
+    blob = _transcript_blob(texts, config)
+    if not blob:
         return []
-    blob = "\n".join(kept)
-    cap = getattr(config, "extract_max_input_chars", 24000)
-    if cap and len(blob) > cap:
-        blob = blob[-cap:]  # keep the most recent turns
     try:
         return provider.extract(blob, getattr(config, "extract_max_facts", 12))
     except Exception:
@@ -219,6 +232,29 @@ def _find_superseded_ids(fact, tools, config, extractor) -> list:
     except Exception:
         return []
     return [mems[i]["id"] for i in idxs if 0 <= i < len(mems)]
+
+
+def _store_triples(texts, config, tools, extractor) -> int:
+    """Propose and store typed triples for this transcript. Never raises.
+
+    A misconfigured registry is a hard error inside load_vocabulary — it must
+    not silently disable the contract — but capture is documented as never
+    raising, so it is caught here and reported as zero triples rather than a
+    failed capture. The prose facts are already stored by then.
+    """
+    if not getattr(config, "extract_triples", False):
+        return 0
+    try:
+        vocab = load_vocabulary(getattr(config, "extract_registry", ""))
+    except VocabularyError:
+        return 0
+    if vocab is None:
+        return 0
+    blob = _transcript_blob(texts, config)
+    try:
+        return store_triples(tools, blob, vocab, config, extractor).stored
+    except Exception:
+        return 0
 
 
 def run_capture(event: dict, config, provider: EmbeddingProvider,
@@ -259,6 +295,10 @@ def run_capture(event: dict, config, provider: EmbeddingProvider,
                     continue
                 tools.relate(new_id, old_id, "supersedes")
                 tools.delete(old_id)
+        # Typed triples (ROADMAP 5.4), strictly additive: the prose facts above
+        # are stored either way, so a transcript yielding no usable triple
+        # behaves exactly as it does with the feature off.
+        stored += _store_triples(texts, config, tools, extractor)
         return stored
 
     # heuristic fallback (extraction disabled/unavailable)
