@@ -449,6 +449,27 @@ static size_t merge_cluster(AegisDB *db, MemoryRecord *recs, size_t n,
         }
     }
 
+    /* A merge must not destroy an assertion. UpdatePatch carried tags,
+     * importance and confidence but never the fact, so absorbing a
+     * fact-bearing record into one without a fact silently dropped what it
+     * asserted — stats.facts fell, and no pattern could find it again. That
+     * predates 5.3 and was invisible until truth maintenance started asking
+     * whether a merged record still supports anything.
+     *
+     * So the survivor adopts the first fact in the cluster if it has none of
+     * its own. Adoption only, never a rewrite: a survivor that already asserts
+     * something keeps it, and a loser that disagrees is not merged at all
+     * (below) rather than having its claim quietly discarded. */
+    const Fact *adopt = NULL;
+    if (recs[sv].fact.kind == FACT_NONE) {
+        for (size_t i = 0; i < n; i++) {
+            if (i != sv && recs[i].fact.kind != FACT_NONE) {
+                adopt = &recs[i].fact;
+                break;
+            }
+        }
+    }
+
     /* fold the merged tags + fields into the survivor */
     UpdatePatch patch;
     memset(&patch, 0, sizeof(patch));
@@ -459,48 +480,68 @@ static size_t merge_cluster(AegisDB *db, MemoryRecord *recs, size_t n,
     patch.importance = imp;
     patch.has_confidence = 1;
     patch.confidence = conf;
+    if (adopt) {
+        patch.has_fact = 1;
+        patch.fact = adopt;
+    }
     MemoryRecord upd;
+    Fact adopted = {0};
     if (qe_update(db, survivor, &patch, ns, &upd) == AEGIS_OK) {
+        adopted = upd.fact; /* borrowed for the comparison below */
         record_free(&upd);
+        if (adopt) {
+            /* record_free released the strings `adopted` pointed at; re-read
+             * what the survivor now asserts from the cluster copy instead. */
+            adopted = *adopt;
+        }
     }
     free(utags);
 
-    /* tombstone the losers, recording provenance first: the survivor `supersedes`
-     * each loser (a merge should be auditable lineage, not silent data loss — the
-     * inspector can then show what a memory absorbed). The link is added while the
-     * loser still exists (qe_relate requires both endpoints), then it's deleted.
-     * Best-effort: a failed relate (e.g. rel cap hit) doesn't block the merge. */
+    /* Tombstone the losers, recording provenance first: the survivor
+     * `supersedes` each loser, so a merge is auditable lineage rather than
+     * silent loss. The link is added while the loser still exists (qe_relate
+     * needs both endpoints), then it is deleted. Best-effort: a failed relate
+     * (the rel cap, say) does not block the merge. */
     size_t merged = 0;
     for (size_t i = 0; i < n; i++) {
         if (recs[i].id == survivor) {
             continue;
         }
+        /* What the survivor asserts now — its own fact, or the one it adopted
+         * above. A loser is only absorbed when the survivor still says
+         * everything it said; otherwise the merge would destroy an assertion,
+         * which is what this whole path exists to stop doing. Checked before
+         * the supersedes edge, so a record left alone is not also marked as
+         * having been superseded by something. */
+        const Fact *sv_fact = adopt ? &adopted : &recs[sv].fact;
+        if (recs[i].fact.kind != FACT_NONE &&
+            !facts_equal(&recs[i].fact, sv_fact)) {
+            /* Two records that disagree are not duplicates in the sense that
+             * matters, and a merge cannot carry two claims. A smaller merge is
+             * better than a lost assertion. */
+            LOG_DEBUG("consolidate: keeping %llu; it asserts a fact the "
+                      "survivor does not",
+                      (unsigned long long)recs[i].id);
+            continue;
+        }
+
         qe_relate(db, survivor, recs[i].id, "supersedes", ns);
         /* Noted before the tombstone, while both ids still mean something, so
-         * truth maintenance can tell a merged premise from a lost one
-         * (ROADMAP 5.3 §6). Without this a conclusion drawn from an absorbed
-         * record is retracted and then re-derived from the survivor on the
-         * next pass — correct in the end, but churn in the log and a
-         * retraction in `history` that the corpus never justified.
-         *
-         * Only when nothing a conclusion could rest on is actually lost.
-         * A merge does *not* carry the loser's typed fact across — UpdatePatch
-         * has no fact field, because a fact is immutable — so absorbing a
-         * fact-bearing record destroys that assertion outright. Calling that
-         * "merged" would keep alive a conclusion whose supporting fact exists
-         * nowhere, and which no later pass could re-derive. Retracting is the
-         * correct answer there, so the mapping is deliberately not recorded. */
-        int fact_survives = recs[i].fact.kind == FACT_NONE ||
-                            facts_equal(&recs[i].fact, &recs[sv].fact);
-        if (fact_survives) {
-            db_supersede_note(db, recs[i].id, survivor);
-            /* Re-point the provenance edges too. The routes on a derived record
-             * still name the absorbed id — deliberately, since that is what it
-             * was drawn from — but the *edges* are what a later delete walks,
-             * and without this a subsequent delete of the survivor would find
-             * no dependents to re-judge. */
-            repoint_dependents(db, recs[i].id, survivor, ns);
-        }
+         * truth maintenance can tell a merged premise from a lost one (ROADMAP
+         * 5.3 §6). Without it a conclusion drawn from an absorbed record is
+         * retracted and then re-derived from the survivor on the next pass —
+         * correct in the end, but churn in the log and a retraction in
+         * `history` the corpus never justified. Reaching here means nothing a
+         * conclusion could rest on was lost: the survivor asserts the same
+         * triple, or the loser asserted none. */
+        db_supersede_note(db, recs[i].id, survivor);
+        /* Re-point the provenance edges too. The routes on a derived record
+         * still name the absorbed id — deliberately, since that is what it was
+         * drawn from — but the *edges* are what a later delete walks, and
+         * without this a subsequent delete of the survivor would find no
+         * dependents to re-judge. */
+        repoint_dependents(db, recs[i].id, survivor, ns);
+
         if (qe_delete(db, recs[i].id, ns) == AEGIS_OK) {
             merged++;
         }

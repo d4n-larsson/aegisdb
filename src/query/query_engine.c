@@ -464,6 +464,31 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
         }
     }
 
+    /* Adopting a fact, and only onto a record that asserts none. The
+     * immutability rule is about *changing* a claim; filling an absent one
+     * destroys nothing, and the alternative — consolidation silently dropping
+     * the assertion of the record it absorbs — is data loss. Refused rather
+     * than ignored if the record already has a fact, so a caller cannot
+     * quietly get the opposite of what it asked for. */
+    int adopted_fact = 0;
+    if (patch->has_fact && patch->fact) {
+        if (cur.fact.kind != FACT_NONE) {
+            record_free(&cur);
+            free(old_tags);
+            pthread_rwlock_unlock(&db->index_lock);
+            return AEGIS_ERR_INVALID_REQUEST;
+        }
+        if (record_set_fact(&cur, patch->fact->kind, patch->fact->subject,
+                            patch->fact->predicate, patch->fact->object_id,
+                            patch->fact->object_str) != 0) {
+            record_free(&cur);
+            free(old_tags);
+            pthread_rwlock_unlock(&db->index_lock);
+            return AEGIS_ERR_INTERNAL;
+        }
+        adopted_fact = 1;
+    }
+
     cur.updated = db_now_ms();
     st = validate_common(db, &cur);
     if (st == AEGIS_OK) {
@@ -478,11 +503,17 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
             tag_index_add(db->tags, cur.tags[i], cur.id);
         }
     }
-    /* No edge- or fact-index work here on purpose. An update patch reaches only
-     * tags and the payload — never `relationships` (relate/delete own those),
-     * and never `fact`, which is immutable by design: changing what a record
-     * asserts is a supersession, not an edit, so it leaves the auditable chain
-     * 2.1/2.2 already provide instead of silently rewriting history. */
+    if (st == AEGIS_OK && adopted_fact) {
+        /* The only fact-index work an update ever does. It is an add, never a
+         * swing: the record had no fact a moment ago, so there is nothing to
+         * unindex. */
+        db_fact_index_apply(db, &cur, 1);
+    }
+    /* No edge-index work here on purpose, and no fact *change*. An update patch
+     * reaches tags, the payload, and a fact only where none existed — never
+     * `relationships` (relate/delete own those), and never a rewrite of an
+     * existing claim, which is a supersession rather than an edit and leaves
+     * the auditable chain 2.1/2.2 already provide. */
     if (st == AEGIS_OK && patch->has_data) {
         /* Same discipline for the payload text: unindex the version that just
          * stopped being current, then index the one that replaced it. */
