@@ -77,6 +77,15 @@ class Config:
     extract_supersede: bool = True  # active only when extract_mode is on
     extract_supersede_top_k: int = 5  # similar candidates considered per new fact
     extract_supersede_min_score: float = 0.6  # cosine floor for a candidate
+    # Typed triples (ROADMAP 5.4). Off by default, and inert without a registry:
+    # the point of the vocabulary is that it is a contract, so proposing triples
+    # with nothing to check them against is not a smaller version of the feature.
+    # `extract_registry` is the *same file* the server was started with —
+    # a second copy would drift, and extraction would then propose triples the
+    # server refuses, which looks like a bad model rather than a misconfiguration.
+    extract_triples: bool = False
+    extract_registry: str = ""  # path to the server's --predicate-registry file
+    extract_max_triples: int = 16  # cap candidates proposed per transcript
 
 
 # Map each config field to its environment variable name.
@@ -118,6 +127,9 @@ _ENV = {
     "extract_supersede": "AEGIS_EXTRACT_SUPERSEDE",
     "extract_supersede_top_k": "AEGIS_EXTRACT_SUPERSEDE_TOP_K",
     "extract_supersede_min_score": "AEGIS_EXTRACT_SUPERSEDE_MIN_SCORE",
+    "extract_triples": "AEGIS_EXTRACT_TRIPLES",
+    "extract_registry": "AEGIS_EXTRACT_REGISTRY",
+    "extract_max_triples": "AEGIS_EXTRACT_MAX_TRIPLES",
 }
 
 _BOOL = {"recall_enabled", "capture_enabled", "extract_supersede"}

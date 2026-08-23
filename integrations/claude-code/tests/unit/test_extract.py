@@ -6,8 +6,10 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from aegis_mcp.extract import (Fact, FakeExtractionProvider, NoneExtractionProvider,
-                               _parse_facts, _parse_indices, make_extraction_provider)
+from aegis_mcp.extract import (CandidateTriple, Fact, FakeExtractionProvider,
+                               NoneExtractionProvider, PredicateSpec,
+                               _parse_facts, _parse_indices, load_vocabulary,
+                               make_extraction_provider, validate_triples)
 
 
 class TestParseFacts(unittest.TestCase):
@@ -119,3 +121,108 @@ class TestFactory(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestTripleVocabulary(unittest.TestCase):
+    """The registry as a contract (ROADMAP 5.4 §3)."""
+
+    def _vocab(self):
+        return [PredicateSpec(name="part_of", object="id"),
+                PredicateSpec(name="defaults_to", object="string")]
+
+    def test_declared_predicates_are_kept(self):
+        cands = [CandidateTriple("hnsw.c", "part_of", "the storage layer"),
+                 CandidateTriple("the hook", "defaults_to", "none")]
+        res = validate_triples(cands, self._vocab())
+        self.assertEqual(len(res.accepted), 2)
+        self.assertEqual(res.proposed, 2)
+        self.assertEqual(res.in_vocabulary_rate, 1.0)
+
+    def test_undeclared_predicate_is_rejected_not_coerced(self):
+        """`is_part_of` must NOT be mapped onto the declared `part_of`.
+
+        Coercion would turn the in-vocabulary rate — the number 5.4 is judged
+        on — into a silent change to what the corpus asserts."""
+        cands = [CandidateTriple("hnsw.c", "is_part_of", "the storage layer"),
+                 CandidateTriple("the hook", "defaults_to", "none")]
+        res = validate_triples(cands, self._vocab())
+        self.assertEqual([c.predicate for c in res.accepted], ["defaults_to"])
+        self.assertEqual(res.rejected, [("is_part_of", "undeclared")])
+        self.assertEqual(res.in_vocabulary_rate, 0.5)
+
+    def test_id_predicate_needs_something_to_ground(self):
+        cands = [CandidateTriple("hnsw.c", "part_of", "   ")]
+        res = validate_triples(cands, self._vocab())
+        self.assertEqual(res.accepted, [])
+        self.assertEqual(res.rejected, [("part_of", "empty id object")])
+
+    def test_no_registry_accepts_everything(self):
+        """The server accepts any predicate with no registry configured, so
+        being stricter here would reject writes that would have succeeded."""
+        cands = [CandidateTriple("a", "anything_at_all", "b")]
+        res = validate_triples(cands, [])
+        self.assertEqual(len(res.accepted), 1)
+
+    def test_rate_is_zero_for_nothing_proposed(self):
+        self.assertEqual(validate_triples([], self._vocab()).in_vocabulary_rate,
+                         0.0)
+
+
+class TestLoadVocabulary(unittest.TestCase):
+    def test_reads_the_servers_registry_file(self):
+        import json as _json
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".json",
+                                         delete=False) as fh:
+            _json.dump({"part_of": {"object": "id", "transitive": True},
+                        "defaults_to": {"object": "string"}}, fh)
+            path = fh.name
+        vocab = load_vocabulary(path)
+        os.unlink(path)
+        self.assertEqual(sorted(p.name for p in vocab),
+                         ["defaults_to", "part_of"])
+        self.assertEqual({p.name: p.object for p in vocab}["part_of"], "id")
+
+    def test_missing_or_unset_path_is_empty_not_an_error(self):
+        self.assertEqual(load_vocabulary(""), [])
+        self.assertEqual(load_vocabulary("/nonexistent/registry.json"), [])
+
+    def test_malformed_entries_are_skipped(self):
+        import json as _json
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".json",
+                                         delete=False) as fh:
+            _json.dump({"good": {"object": "id"},
+                        "no_object": {"transitive": True},
+                        "bad_object": {"object": "float"}}, fh)
+            path = fh.name
+        vocab = load_vocabulary(path)
+        os.unlink(path)
+        self.assertEqual([p.name for p in vocab], ["good"])
+
+
+class TestFakeTriples(unittest.TestCase):
+    def test_parses_explicit_triple_lines(self):
+        p = FakeExtractionProvider()
+        out = p.extract_triples("hnsw.c : part_of : the storage layer\n"
+                                "noise line with no colons\n", [], 16)
+        self.assertEqual(len(out), 1)
+        self.assertEqual((out[0].subject, out[0].predicate, out[0].obj),
+                         ("hnsw.c", "part_of", "the storage layer"))
+
+    def test_can_emit_out_of_vocabulary_predicates(self):
+        """The rejection path is half of what 5.4 is judged on; a fake that
+        could only produce valid triples would leave it untested."""
+        p = FakeExtractionProvider()
+        out = p.extract_triples("a : invented_by_the_model : b", [], 16)
+        res = validate_triples(out, [PredicateSpec("part_of", "id")])
+        self.assertEqual(res.accepted, [])
+        self.assertEqual(res.rejected, [("invented_by_the_model", "undeclared")])
+
+    def test_respects_the_cap(self):
+        p = FakeExtractionProvider()
+        text = "\n".join(f"s{i} : part_of : o{i}" for i in range(30))
+        self.assertEqual(len(p.extract_triples(text, [], 5)), 5)
+
+    def test_other_providers_propose_nothing_by_default(self):
+        self.assertEqual(NoneExtractionProvider().extract_triples("x", [], 5),
+                         [])
