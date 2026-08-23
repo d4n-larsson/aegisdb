@@ -432,7 +432,7 @@ does deterministically, at write time, for free.
   `mutex_with` are declared and validated for coherence but nothing acts on
   them — that is 5.3.
 
-### 5.3 Deterministic inference & truth maintenance
+### 5.3 Deterministic inference & truth maintenance — *shipped (`--inference`; see `inference-design.md`)*
 
 - **Why now:** this is where the trust payoff lands. `explain` (1.2) explains
   *ranking* — similarity, BM25, RRF, recency. It cannot say "you believe this
@@ -482,6 +482,21 @@ does deterministically, at write time, for free.
   runs **per namespace**: the fact indexes are server-wide, so the naive
   implementation would join a premise from one tenant with a premise from
   another and write a record that exists in neither.
+- **Shipped:** codec v5 carries a `derivation` — a *set* of independent
+  justifications, because support is disjunctive and a flat premise list cannot
+  answer the question retraction has to ask. `--inference` (off by default,
+  since it grows the log rather than RAM) materializes the transitive, symmetric
+  and `inverse_of` closures on the maintenance tick, per namespace, never on a
+  replica. Retraction withdraws a conclusion when *every* route has lost a
+  premise, follows `supersedes` so a merged premise is not mistaken for a lost
+  one, and is reconstructed by recovery rather than persisted. `cardinality` and
+  `mutex_with` produce `conflicts_with` edges and a `conflicts` gauge —
+  reported, never resolved. `subsume` on `search`/`count` broadens a subject
+  through `is_a`, and `explain.derivation` says why a record is believed.
+- **Done, measured:** `make eval-multihop` reports **symbolic 100% against
+  retrieval 0% at recall@5** on questions whose answers live in no single
+  record. The gate bounds retrieval as well as the symbolic path, which caught
+  the first dataset answering 50% of its own questions by word overlap.
 - **Found while designing:** retraction does *not* fall out of 5.1's reverse
   adjacency as the entry assumes. `qe_delete` drops every edge pointing at the
   tombstone before it returns, so a background job walking `derived_from`

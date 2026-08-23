@@ -59,7 +59,7 @@ DEPS := $(CORE_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(CJSON_OBJ:.o=.d) \
 
 PYTHON ?= python3
 
-.PHONY: all clean test integration check eval eval-tasks inspector inspector-test first-contact bench wire-bench fuzz fuzz-regress fuzz-corpus
+.PHONY: all clean test integration check eval eval-multihop eval-tasks inspector inspector-test first-contact bench wire-bench fuzz fuzz-regress fuzz-corpus
 all: $(BIN)
 
 $(BIN): $(CORE_OBJ) $(CJSON_OBJ) $(MAIN_OBJ)
@@ -97,6 +97,13 @@ integration: $(BIN)
 # embedder so it needs no model/API.
 eval: $(BIN)
 	$(PYTHON) eval/recall_eval.py $(BIN) $(EVAL_ARGS)
+
+# Multi-hop eval (ROADMAP 5.3): questions whose answers live in no single record.
+# Gates both directions — the symbolic path must answer them, and retrieval must
+# not, or the dataset is not testing what it claims to.
+eval-multihop: $(BIN)
+	$(PYTHON) eval/recall_eval.py $(BIN) --multihop \
+	    --dataset eval/datasets/multihop.json --gate-recall-at 5 $(EVAL_ARGS)
 
 # A/B task benchmark: does memory lift task success? Teaches a fact, then answers
 # a fresh question with memory ON vs OFF and reports the lift (ROADMAP 1.1+).

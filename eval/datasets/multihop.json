@@ -1,0 +1,523 @@
+{
+  "name": "multihop",
+  "description": "Questions whose answers live in no single record. Each answer record describes a leaf component and never names the layer the question asks about, and its prose avoids the question's vocabulary as well \u2014 the connection exists only as a chain of `is_a` facts. Retrieval of any kind must therefore score near zero, and the symbolic path must answer. That asymmetry is the whole argument for ROADMAP 5.3, and if it does not appear then either this dataset is wrong or the horizon is.",
+  "embedding_dim": 256,
+  "predicates": {
+    "is_a": {
+      "object": "id",
+      "transitive": true
+    },
+    "caps_at": {
+      "object": "string",
+      "cardinality": "one"
+    },
+    "timeout_ms": {
+      "object": "string",
+      "cardinality": "one"
+    },
+    "owned_by": {
+      "object": "string",
+      "cardinality": "one"
+    },
+    "defaults_to": {
+      "object": "string",
+      "cardinality": "one"
+    }
+  },
+  "memories": [
+    {
+      "label": "e_storage",
+      "text": "The storage layer.",
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "label": "e_network",
+      "text": "The network layer.",
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "label": "e_query",
+      "text": "The query layer.",
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "label": "e_replication",
+      "text": "The replication subsystem.",
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "label": "e_hnsw",
+      "text": "hnsw.c, the approximate nearest-neighbour index.",
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "label": "e_neighbour_loop",
+      "text": "The neighbour-selection loop.",
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "label": "e_tcp",
+      "text": "tcp_server.c, the connection acceptor.",
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "label": "e_accept_loop",
+      "text": "The accept loop.",
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "label": "e_planner",
+      "text": "qe_search.c, the candidate planner.",
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "label": "e_widening",
+      "text": "The widening loop.",
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "label": "e_follower",
+      "text": "The follower thread.",
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "label": "e_handshake",
+      "text": "The subscribe handshake.",
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "label": "m_hnsw_storage",
+      "text": "hnsw.c belongs to the storage layer.",
+      "fact": {
+        "s": "e_hnsw",
+        "p": "is_a",
+        "o": {
+          "label": "e_storage"
+        }
+      }
+    },
+    {
+      "label": "m_loop_hnsw",
+      "text": "The neighbour-selection loop sits inside hnsw.c.",
+      "fact": {
+        "s": "e_neighbour_loop",
+        "p": "is_a",
+        "o": {
+          "label": "e_hnsw"
+        }
+      }
+    },
+    {
+      "label": "m_tcp_network",
+      "text": "tcp_server.c belongs to the network layer.",
+      "fact": {
+        "s": "e_tcp",
+        "p": "is_a",
+        "o": {
+          "label": "e_network"
+        }
+      }
+    },
+    {
+      "label": "m_accept_tcp",
+      "text": "The accept loop sits inside tcp_server.c.",
+      "fact": {
+        "s": "e_accept_loop",
+        "p": "is_a",
+        "o": {
+          "label": "e_tcp"
+        }
+      }
+    },
+    {
+      "label": "m_planner_query",
+      "text": "qe_search.c belongs to the query layer.",
+      "fact": {
+        "s": "e_planner",
+        "p": "is_a",
+        "o": {
+          "label": "e_query"
+        }
+      }
+    },
+    {
+      "label": "m_widening_planner",
+      "text": "The widening loop sits inside qe_search.c.",
+      "fact": {
+        "s": "e_widening",
+        "p": "is_a",
+        "o": {
+          "label": "e_planner"
+        }
+      }
+    },
+    {
+      "label": "m_follower_repl",
+      "text": "The follower thread belongs to the replication subsystem.",
+      "fact": {
+        "s": "e_follower",
+        "p": "is_a",
+        "o": {
+          "label": "e_replication"
+        }
+      }
+    },
+    {
+      "label": "m_handshake_follower",
+      "text": "The subscribe handshake sits inside the follower thread.",
+      "fact": {
+        "s": "e_handshake",
+        "p": "is_a",
+        "o": {
+          "label": "e_follower"
+        }
+      }
+    },
+    {
+      "label": "a_neighbour_cap",
+      "text": "The neighbour-selection loop stops after 64 candidates.",
+      "fact": {
+        "s": "e_neighbour_loop",
+        "p": "caps_at",
+        "o": "64"
+      }
+    },
+    {
+      "label": "a_accept_timeout",
+      "text": "The accept loop gives up after five seconds.",
+      "fact": {
+        "s": "e_accept_loop",
+        "p": "timeout_ms",
+        "o": "5000"
+      }
+    },
+    {
+      "label": "a_widening_cap",
+      "text": "The widening loop stops after 8192 over-fetched rows.",
+      "fact": {
+        "s": "e_widening",
+        "p": "caps_at",
+        "o": "8192"
+      }
+    },
+    {
+      "label": "a_handshake_timeout",
+      "text": "The subscribe handshake gives up after ten seconds.",
+      "fact": {
+        "s": "e_handshake",
+        "p": "timeout_ms",
+        "o": "10000"
+      }
+    },
+    {
+      "label": "a_hnsw_owner",
+      "text": "The retrieval team maintains hnsw.c.",
+      "fact": {
+        "s": "e_hnsw",
+        "p": "owned_by",
+        "o": "retrieval"
+      }
+    },
+    {
+      "label": "a_tcp_owner",
+      "text": "The platform team maintains tcp_server.c.",
+      "fact": {
+        "s": "e_tcp",
+        "p": "owned_by",
+        "o": "platform"
+      }
+    },
+    {
+      "label": "a_planner_default",
+      "text": "qe_search.c falls back to the exact scan.",
+      "fact": {
+        "s": "e_planner",
+        "p": "defaults_to",
+        "o": "exact-scan"
+      }
+    },
+    {
+      "label": "a_follower_default",
+      "text": "The follower thread reconnects on its own.",
+      "fact": {
+        "s": "e_follower",
+        "p": "defaults_to",
+        "o": "reconnect"
+      }
+    },
+    {
+      "label": "n_deploy",
+      "text": "Deployment to production runs through `make ship`, which builds and tags a release.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_migrations",
+      "text": "Database migrations live in db/migrations and are applied with `make migrate`.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_jwt",
+      "text": "Authentication uses short-lived JWTs signed with RS256 and rotated weekly.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_cache",
+      "text": "The product catalog is cached in Redis with a five minute TTL.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_style",
+      "text": "Code style is snake_case for functions and PascalCase for types.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_layers",
+      "text": "The storage layer, the network layer and the query layer are the three top-level layers of the system.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_timeouts",
+      "text": "Every timeout in the system is configurable; the defaults are conservative.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_caps",
+      "text": "Several loops cap their working set to bound worst-case memory.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_extra_0",
+      "text": "The deploy pipeline caps concurrent uploads at 4 to avoid throttling.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_extra_1",
+      "text": "The billing service has a thirty second timeout on card authorisation.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_extra_2",
+      "text": "The notifications package is owned by the growth team.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_extra_3",
+      "text": "The web package defaults to server-side rendering.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_extra_4",
+      "text": "A stale cache entry is the usual cause of a wrong price on the catalog page.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_extra_5",
+      "text": "The image resize worker caps its LRU at 512 entries after the OOM incident.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_extra_6",
+      "text": "The search indexer times out after two minutes and retries once.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_extra_7",
+      "text": "The mobile build is owned by the client team and runs on its own schedule.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_extra_8",
+      "text": "The admin console defaults to read-only for anyone without an approver role.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_extra_9",
+      "text": "Connection pooling caps Postgres clients at 20 across the whole binary.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_extra_10",
+      "text": "The audit log is append-only and never rewritten in place.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_extra_11",
+      "text": "Feature flags default to off in production and on in staging.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_extra_12",
+      "text": "The metrics exporter times out quickly so it can never wedge a request.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_extra_13",
+      "text": "Ownership of shared infrastructure rotates quarterly between teams.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_extra_14",
+      "text": "Every loop that walks the corpus has a cap; the values differ by subsystem.",
+      "tags": [
+        "noise"
+      ]
+    },
+    {
+      "label": "n_extra_15",
+      "text": "Layer boundaries are enforced by review, not by the build.",
+      "tags": [
+        "noise"
+      ]
+    }
+  ],
+  "queries": [
+    {
+      "text": "what does the storage layer cap at?",
+      "pattern": {
+        "s": "e_storage",
+        "p": "caps_at"
+      },
+      "relevant": [
+        "a_neighbour_cap"
+      ]
+    },
+    {
+      "text": "what timeout does the network layer use?",
+      "pattern": {
+        "s": "e_network",
+        "p": "timeout_ms"
+      },
+      "relevant": [
+        "a_accept_timeout"
+      ]
+    },
+    {
+      "text": "what does the query layer cap at?",
+      "pattern": {
+        "s": "e_query",
+        "p": "caps_at"
+      },
+      "relevant": [
+        "a_widening_cap"
+      ]
+    },
+    {
+      "text": "what timeout does the replication subsystem use?",
+      "pattern": {
+        "s": "e_replication",
+        "p": "timeout_ms"
+      },
+      "relevant": [
+        "a_handshake_timeout"
+      ]
+    },
+    {
+      "text": "who owns the storage layer?",
+      "pattern": {
+        "s": "e_storage",
+        "p": "owned_by"
+      },
+      "relevant": [
+        "a_hnsw_owner"
+      ]
+    },
+    {
+      "text": "who owns the network layer?",
+      "pattern": {
+        "s": "e_network",
+        "p": "owned_by"
+      },
+      "relevant": [
+        "a_tcp_owner"
+      ]
+    },
+    {
+      "text": "what does the query layer default to?",
+      "pattern": {
+        "s": "e_query",
+        "p": "defaults_to"
+      },
+      "relevant": [
+        "a_planner_default"
+      ]
+    },
+    {
+      "text": "what does the replication subsystem default to?",
+      "pattern": {
+        "s": "e_replication",
+        "p": "defaults_to"
+      },
+      "relevant": [
+        "a_follower_default"
+      ]
+    }
+  ]
+}
