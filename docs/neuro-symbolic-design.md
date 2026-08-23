@@ -134,6 +134,21 @@ similarity score between them is not evidence of anything — falling through to
 one is exactly how the expensive error happens. Prose gets the high floor;
 identifiers get equality.
 
+**The floor is a cosine, and the score is not.** `score_record` blends
+similarity as `sim * (0.5 + 0.5 * importance) * confidence`, so an entity
+record minted at the default importance of 0.5 can score at most `sim * 0.75`.
+Comparing a 0.85 floor against that value directly makes reuse *mathematically
+impossible*: every paraphrase mints, the store fragments in exactly the way this
+section is written to prevent, and the mint rate sits near 1.0 with no
+misconfiguration to point at. Grounding therefore divides the modulation back
+out before comparing, which also keeps the floor correct for hand-authored
+entity records at any importance rather than only for the ones it minted.
+
+That bug shipped in the first cut of PR 2 and the unit tests could not see it,
+because the fake returned raw cosines where the real search returns blended
+ones. **A fake kinder than production hides precisely the bug it exists to
+catch** — the fake now blends exactly as `score_record` does.
+
 **Prefer fragmentation to conflation.** The threshold is the whole design here,
 and the two errors are not symmetric:
 

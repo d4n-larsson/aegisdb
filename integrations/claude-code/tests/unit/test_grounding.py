@@ -18,32 +18,60 @@ from aegis_mcp.grounding import (ENTITY_TAG, GroundingResult, ground_mentions,
                                  resolve)
 
 
-class FakeTools:
-    """A store of entity records with scripted scores.
+def _blend(sim, importance=0.5, confidence=1.0):
+    """Exactly what tools.score_record returns, and the reason this fake exists.
 
-    `scores` maps a mention to the (text, id, score) rows a *semantic* search
-    returns for it; `lexical_rows` to what a lexical one returns. Keeping them
-    separate is the point: the two searches score on different scales, and a
-    fake that returned one set for both would hide that.
+    The score a caller sees is NOT a cosine: it is
+    `sim * (0.5 + 0.5 * importance) * confidence`. An earlier version of this
+    fake handed back raw cosines, which made a 0.85 floor look reachable — while
+    against the real search an entity record minted at importance 0.5 tops out
+    at `sim * 0.75`, so the floor could never be met and every paraphrase would
+    have minted. A fake that is kinder than production hides precisely the bug
+    it should be catching.
+    """
+    return round(sim * (0.5 + 0.5 * importance) * confidence, 4)
+
+
+class FakeTools:
+    """A store of entity records with scripted *cosines*.
+
+    `scores` maps a mention to the (text, id, cosine) rows a semantic search
+    matches; `lexical_rows` to what a lexical one returns. Kept separate on
+    purpose: the two searches score on different scales, and a fake returning
+    one set for both would hide that.
     """
 
     def __init__(self, scores=None, lexical_rows=None, next_id=100,
-                 save_fails=False):
+                 save_fails=False, embeddings=True, importance=0.5,
+                 kind="semantic"):
         self.scores = scores or {}
         self.lexical_rows = lexical_rows or {}
         self.next_id = next_id
         self.saved = []
         self.searches = []
         self.save_fails = save_fails
+        self.embeddings = embeddings
+        self.importance = importance
+        self.kind = kind
+
+    def _embeddings_usable(self):
+        return self.embeddings
 
     def search(self, query=None, tags=None, match="any", top_k=None,
                kind=None, lexical=False, **kw):
         self.searches.append({"query": query, "tags": list(tags or []),
                               "lexical": lexical, "top_k": top_k})
         rows = (self.lexical_rows if lexical else self.scores).get(query, [])
-        return {"ok": True,
-                "memories": [{"id": i, "text": t, "score": s}
-                             for (t, i, s) in rows]}
+        out = []
+        for (t, i, sim) in rows:
+            mem = {"id": i, "text": t, "kind": self.kind,
+                   "importance": self.importance, "confidence": 1.0}
+            # A lexical result is server-ranked on a different scale entirely;
+            # the exact pass must not read it, so give it a value that would
+            # fail any cosine comparison.
+            mem["score"] = 0.02 if lexical else _blend(sim, self.importance)
+            out.append(mem)
+        return {"ok": True, "memories": out}
 
     def save(self, text=None, tags=None, semantic=False, importance=0.5):
         if self.save_fails:
@@ -70,6 +98,20 @@ class TestNormalize(unittest.TestCase):
         is the expensive error."""
         self.assertEqual(normalize("hnsw.c:214"), "hnsw.c:214")
 
+    def test_trailing_sentence_punctuation_is_dropped(self):
+        """An extractor quoting a mention out of prose carries the full stop
+        with it, and "recall hook." never matching "recall hook" is a
+        fragmentation with no upside. An identifier's internal dot survives —
+        it is not trailing."""
+        self.assertEqual(normalize("recall hook."), "recall hook")
+        self.assertEqual(normalize("hnsw.c"), "hnsw.c")
+
+    def test_none_is_not_a_crash(self):
+        """record_to_memory always sets "text", sometimes to None, so a `.get`
+        default never fires — and None.split() would escape into a capture path
+        documented as never raising."""
+        self.assertEqual(normalize(None), "")
+
 
 class TestIdentifierDetection(unittest.TestCase):
     def test_file_and_line_is_an_identifier(self):
@@ -80,6 +122,14 @@ class TestIdentifierDetection(unittest.TestCase):
     def test_prose_is_not(self):
         self.assertFalse(looks_like_identifier("the storage layer"))
         self.assertFalse(looks_like_identifier("the neighbour selection loop"))
+
+    def test_slightly_technical_prose_is_still_prose(self):
+        """An earlier version accepted any <=3-word mention with a dot or a
+        digit, which swept these up and then permanently barred each from
+        resolving by similarity."""
+        for prose in ("the 5.2 design", "HNSW v2", "Postgres 16",
+                      "recall hook."):
+            self.assertFalse(looks_like_identifier(prose), prose)
 
 
 class TestResolve(unittest.TestCase):
@@ -114,11 +164,21 @@ class TestResolve(unittest.TestCase):
     def test_the_lexical_pass_is_not_scored(self):
         """Fused scores are on the reciprocal-rank scale, so a cosine floor
         applied to them would admit or discard almost everything. The exact
-        pass must ignore the score entirely — here it is far below the floor
-        and the match must still count."""
+        pass must ignore the score entirely — the fake gives lexical rows a
+        value far below the floor and the match must still count."""
         t = FakeTools(lexical_rows={"the storage layer":
                                     [("The storage layer", 7, 0.001)]})
         self.assertEqual(resolve(t, "the storage layer", cfg()), 7)
+
+    def test_an_entity_minted_at_the_default_importance_can_be_reused(self):
+        """THE regression. score_record blends importance in, so a record
+        minted at 0.5 scores at most `sim * 0.75`. Comparing a 0.85 cosine
+        floor against that value directly makes reuse impossible, every
+        paraphrase mints, and the store fragments with nothing to point at."""
+        t = FakeTools(scores={"the storage subsystem":
+                              [("The storage layer", 7, 0.95)]},
+                      importance=0.5)
+        self.assertEqual(resolve(t, "the storage subsystem", cfg()), 7)
 
     def test_scoreless_results_are_not_resolved(self):
         """Embeddings off means no cosine, and no cosine means no basis for
@@ -128,6 +188,29 @@ class TestResolve(unittest.TestCase):
         t.search = lambda **kw: {"ok": True, "memories": [
             {"id": 7, "text": "something else", "score": None}]}
         self.assertIsNone(resolve(t, "the layer", cfg()))
+
+
+    def test_a_record_with_no_text_does_not_crash(self):
+        t = FakeTools()
+        t.search = lambda **kw: {"ok": True, "memories": [
+            {"id": 7, "text": None, "kind": "semantic", "score": None}]}
+        self.assertIsNone(resolve(t, "the layer", cfg()))
+
+    def test_embeddings_off_skips_the_semantic_pass(self):
+        """It cannot resolve anything without a cosine, so issuing it is one
+        wasted round-trip per mention on a long transcript."""
+        t = FakeTools(embeddings=False)
+        resolve(t, "the storage layer", cfg())
+        self.assertEqual([s["lexical"] for s in t.searches], [True])
+
+    def test_an_episodic_record_tagged_entity_is_not_an_entity(self):
+        """`kind` is a server-side filter older servers ignore, and search
+        documents that callers relying on it must re-check client-side.
+        Otherwise an episodic record becomes a fact's subject."""
+        t = FakeTools(lexical_rows={"the storage layer":
+                                    [("the storage layer", 7, 0.1)]},
+                      kind="episodic")
+        self.assertIsNone(resolve(t, "the storage layer", cfg()))
 
     def test_entity_scoped_search(self):
         t = FakeTools()
@@ -162,6 +245,18 @@ class TestGroundMentions(unittest.TestCase):
         res = ground_mentions(t, ["the layer", "the layer"], cfg())
         self.assertEqual(res.minted, 1)
         self.assertEqual(len(t.saved), 1)
+
+    def test_two_spellings_of_one_mention_collapse_before_searching(self):
+        """Keyed on the raw string these were two mentions: two extra
+        round-trips, and a second minted entity whenever the lexical index had
+        not yet caught the write moments earlier."""
+        t = FakeTools()
+        res = ground_mentions(t, ["The Storage Layer", "the storage layer"],
+                              cfg())
+        self.assertEqual(res.minted, 1)
+        self.assertEqual(len(t.saved), 1)
+        self.assertEqual(res.ids["The Storage Layer"],
+                         res.ids["the storage layer"])
 
     def test_minting_is_capped_and_the_overflow_is_reported(self):
         """Past the cap a mention is reported unresolved rather than guessed
