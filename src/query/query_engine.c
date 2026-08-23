@@ -411,6 +411,19 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
         pthread_rwlock_unlock(&db->index_lock);
         return AEGIS_ERR_IMMUTABLE;
     }
+    /* A fact can be *adopted* onto a record that asserts none, but never
+     * changed: the immutability rule is about altering a claim, and there is
+     * none to alter when the field is empty. Refused rather than ignored, so a
+     * caller cannot quietly get the opposite of what it asked for — and
+     * refused here, before anything is detached from the record, so the error
+     * path has nothing to leak. `update` rejects the field at the wire layer
+     * regardless; this exists for consolidation, which would otherwise destroy
+     * the assertion of the record it absorbs. */
+    if (patch->has_fact && patch->fact && cur.fact.kind != FACT_NONE) {
+        record_free(&cur);
+        pthread_rwlock_unlock(&db->index_lock);
+        return AEGIS_ERR_INVALID_REQUEST;
+    }
 
     /* old tags for index diff */
     /* Detach (rather than free) the superseded payload: the lexical index is
@@ -464,25 +477,14 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
         }
     }
 
-    /* Adopting a fact, and only onto a record that asserts none. The
-     * immutability rule is about *changing* a claim; filling an absent one
-     * destroys nothing, and the alternative — consolidation silently dropping
-     * the assertion of the record it absorbs — is data loss. Refused rather
-     * than ignored if the record already has a fact, so a caller cannot
-     * quietly get the opposite of what it asked for. */
     int adopted_fact = 0;
     if (patch->has_fact && patch->fact) {
-        if (cur.fact.kind != FACT_NONE) {
-            record_free(&cur);
-            free(old_tags);
-            pthread_rwlock_unlock(&db->index_lock);
-            return AEGIS_ERR_INVALID_REQUEST;
-        }
         if (record_set_fact(&cur, patch->fact->kind, patch->fact->subject,
                             patch->fact->predicate, patch->fact->object_id,
                             patch->fact->object_str) != 0) {
+            cur.tags = old_tags; /* reattach so record_free owns them again */
+            cur.tag_count = old_tag_count;
             record_free(&cur);
-            free(old_tags);
             pthread_rwlock_unlock(&db->index_lock);
             return AEGIS_ERR_INTERNAL;
         }

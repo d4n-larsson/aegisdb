@@ -1744,6 +1744,11 @@ def test_consolidate_preserves_facts(binary, port):
                  embedding=v2)
         x2 = ins("c is part of b", {"s": c, "p": "part_of", "o": {"id": b}},
                  embedding=v2)
+        # These close a cycle under a transitive predicate, so the job has more
+        # to derive. Sample the count only once it has settled, or a tick
+        # landing mid-window fails the assertion below with a message that
+        # points at the wrong cause.
+        _await_fixpoint(srv)
         before = facts()
         r = srv.req({"operation": "consolidate", "min_similarity": 0.9})
         check(r.get("merged", 0) == 0,
@@ -1752,6 +1757,35 @@ def test_consolidate_preserves_facts(binary, port):
         check(srv.req({"operation": "get", "id": x1}).get("ok") is True and
               srv.req({"operation": "get", "id": x2}).get("ok") is True,
               "and both records are still live")
+
+        # "Not merged" has to mean it donated nothing either. The tag union and
+        # the relationship migration used to run over every cluster member
+        # before the fact check, so a record left alone had already given the
+        # survivor its tags and edges.
+        srv.req({"operation": "update", "id": x2, "tags": ["donor-tag"]})
+        srv.req({"operation": "consolidate", "min_similarity": 0.9})
+        time.sleep(1)
+        tagged = srv.req({"operation": "search", "tags": ["donor-tag"],
+                          "top_k": 10}).get("records", [])
+        check([r["id"] for r in tagged] == [x2],
+              "an unmerged record donates nothing to the survivor")
+
+        # And an unmergeable cluster must converge: it stays live, so it
+        # re-enters merge_cluster on every pass. Rewriting the survivor anyway
+        # would append a record and fsync forever, for no progress — and would
+        # keep refreshing `updated`, so forget's decay clock never advances.
+        # x2 is the survivor of this cluster (later id, later updated), so it
+        # is the record a needless rewrite would touch.
+        before_upd = {rid: srv.req({"operation": "get", "id": rid})
+                      ["record"]["updated"] for rid in (x1, x2)}
+        for _ in range(3):
+            r = srv.req({"operation": "consolidate", "min_similarity": 0.9})
+            check(r.get("merged", 0) == 0, "repeated passes merge nothing")
+        after_upd = {rid: srv.req({"operation": "get", "id": rid})
+                     ["record"]["updated"] for rid in (x1, x2)}
+        check(after_upd == before_upd,
+              "and write nothing — `updated` is untouched, so forget's decay "
+              "clock still advances")
 
         # The wire is unchanged: a client still cannot edit a fact. Adoption is
         # an internal path for a record that asserts nothing.
