@@ -174,8 +174,17 @@ records.
 Each candidate conclusion is checked against the fact index before it is
 written. This is the payoff from 5.2 that makes the whole job affordable: "does
 `(a p c)` already exist?" is a `{s, p, o}` lookup, not a scan, so re-running the
-job over a quiet corpus is O(facts) index probes and zero writes. Idempotence is
-not a special case; it is the normal case.
+job over a quiet corpus writes nothing. Idempotence is not a special case; it is
+the normal case.
+
+It is *not*, however, free. An earlier draft of this section said a quiet pass
+costs "O(facts) index probes"; implementing it showed the cost is O(candidates),
+which for a transitive predicate is O(facts × fan-out) — and on a corpus whose
+closure is already materialized every one of those candidates is a duplicate.
+Measured on a fully closed chain, a pass went cubic in chain length: 0.5 s at
+400 nodes, 3.7 s at 800, 12.9 s at 1200, producing nothing each time. A cap on
+conclusions *written* never fires there, so it bounds the wrong thing. §5 has
+the cap that bounds the right one.
 
 **Cycles are the obvious hazard** and the fact-index dedup handles them without
 a cycle detector: `a part_of b`, `b part_of a` derives `a part_of a` and
@@ -265,9 +274,17 @@ the only way the two can be compared.
 
 | Cap | Default | Bounds |
 |---|---|---|
+| `--inference-max-candidates` | 1,000,000 | conclusions *considered* per pass |
 | `--inference-max-depth` | 4 | derivation chain length |
-| `--inference-max-derived` | 1000 | records written per pass |
+| `--inference-max-derived` | 1000 | records *written* per pass |
 | `--inference-max-subsume` | 256 | descendants in a `subsume` expansion |
+
+The candidate cap is the one that actually bounds a tick, and it exists because
+the other two do not: depth bounds chain length, and `max-derived` bounds
+writes, but a closed corpus does unbounded work while writing nothing (§4.1).
+A budgeted pass must also start where the last one stopped, or it examines the
+same prefix forever and never reaches the rest — so the pass takes a rotating
+start offset and reports how many candidates it got through.
 
 Hitting a cap is not an error and not silent: the pass stops, logs what it
 deferred, and the next tick continues. The alternative — running to fixpoint —
@@ -458,6 +475,7 @@ mid-retraction state legible instead of confusing.
 |---|---|---|
 | `--inference` | off | master switch; off means no job, no v4 frames |
 | `--inference-interval-sec` | 30 | tick divisor for the pass |
+| `--inference-max-candidates` | 1000000 | conclusions considered per pass |
 | `--inference-max-depth` | 4 | chain length cap |
 | `--inference-max-derived` | 1000 | records written per pass |
 | `--inference-max-subsume` | 256 | descendants per `subsume` expansion |
@@ -549,6 +567,14 @@ revertible. If the horizon stops after 4, nothing is left in a half state.
 - **The confidence number will be read as a probability.** §8 says it is not,
   in the code comment as well as here, because it will end up in a ranking
   function and look authoritative.
+- **A conclusion records one supporting route.** When two chains reach the same
+  triple, the premises written are the lowest-id route, deterministically —
+  but only one. Retracting a premise of that route retracts the conclusion even
+  though the other route still supports it, and the next pass re-derives it
+  under a new id. Bounded churn rather than a wrong answer, and the alternative
+  (disjunctive support: retract only when *every* route is broken) needs the
+  record to carry routes rather than a premise list, which codec v4 does not.
+  Revisit if the churn shows up in practice.
 - **Cap tuning is deployment-specific** and a permanently deferred backlog is
   easy not to notice. Hence `inference_deferred` in `stats` rather than a log
   line nobody greps for.

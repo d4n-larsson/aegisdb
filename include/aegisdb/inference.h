@@ -64,14 +64,32 @@ typedef struct {
 
 #define INFER_DEFAULT_MAX_DEPTH 4
 #define INFER_DEFAULT_CONFIDENCE_FLOOR 0.1F
+/* Candidate conclusions considered per pass. This is the cap that actually
+ * bounds a tick: a corpus whose closure is already materialized offers the
+ * same candidates every pass and keeps none of them, so a cap on conclusions
+ * *written* never fires while the work still grows with the corpus. */
+#define INFER_DEFAULT_MAX_CANDIDATES 1000000
 
 typedef struct {
     /* A conclusion deeper than this is not drawn. Depth is one past the deepest
      * premise, so this caps chain length rather than pass count. 0 = default. */
     uint16_t max_depth;
-    /* Stop after this many conclusions, setting `truncated`. 0 = unlimited. */
+    /* Stop after this many *new* conclusions, setting `truncated`. Duplicates
+     * do not count against it, so meeting the cap and then seeing nothing but
+     * duplicates is not reported as deferred work. 0 = unlimited. */
     size_t max_conclusions;
-    /* Floor under the confidence product; <= 0 = default. */
+    /* Stop after considering this many candidates, setting `truncated`. Unlike
+     * max_conclusions this bounds *work*, so it is what keeps a tick's duration
+     * off the corpus's shape. 0 = INFER_DEFAULT_MAX_CANDIDATES. */
+    size_t max_candidates;
+    /* Where in `facts` rule application begins; it wraps. A budgeted pass that
+     * always started at 0 would examine the same prefix forever and never
+     * reach the rest, so a caller that sees `truncated` should advance this by
+     * `candidates_examined` worth of facts on the next pass. Indexing the dedup
+     * set is always complete regardless. */
+    size_t start_index;
+    /* Floor under the confidence product; <= 0 = default. Note this can raise a
+     * conclusion above its premises — see infer_run. */
     float confidence_floor;
 } InferOpts;
 
@@ -82,6 +100,9 @@ typedef struct {
      * runs again. Reported rather than swallowed, because a pass that never
      * reaches fixpoint is survivable but worth being able to see. */
     int truncated;
+    /* Candidates considered, whether kept, deduped or too deep. The work the
+     * pass actually did, and what a caller advances `start_index` by. */
+    size_t candidates_examined;
 } InferResult;
 
 /* Draw every conclusion derivable in one pass over `facts`.
@@ -100,9 +121,22 @@ typedef struct {
  * would conclude something that exists in neither, and this function cannot
  * tell them apart — the caller scopes the input.
  *
- * The conclusion *set* does not depend on the order of `facts`, but which
- * conclusions survive `max_conclusions` does. Pass a stable order (record id)
+ * Neither the conclusion set nor the provenance recorded for a conclusion
+ * depends on the order of `facts`: when several routes reach the same triple,
+ * the one with the lowest premise ids is the one recorded, not the one seen
+ * first. What *does* depend on order is which conclusions survive
+ * `max_conclusions` and `max_candidates`, so pass a stable order (record id)
  * if reproducibility across passes matters.
+ *
+ * A conclusion records **one** supporting route even when several exist. That
+ * matters to retraction: losing a premise retracts the conclusion even if
+ * another route still supports it, and the next pass then re-derives it under
+ * a new id. Bounded churn, not a wrong answer — see design doc §15.
+ *
+ * Confidence is the product of the premises' with a floor, so it is *not*
+ * monotonic along a chain: the floor can raise a conclusion above the premises
+ * it came from. That is deliberate (§8), and it is a heuristic, not a
+ * probability.
  *
  * Returns 0 with *out populated (free with infer_result_free), or -1 on
  * allocation failure, in which case *out is zeroed. A NULL or empty registry

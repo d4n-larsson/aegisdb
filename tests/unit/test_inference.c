@@ -261,8 +261,9 @@ static void test_self_fact_concludes_nothing_new(void) {
 
 /* ----- attribution ------------------------------------------------------- */
 
-/* Depth is one past the deepest premise, and confidence is the product — so a
- * conclusion never outranks what it was concluded from. */
+/* Depth is one past the deepest premise, and confidence is the product. Above
+ * the floor that makes a conclusion no more confident than its premises; the
+ * floor itself can raise it, which the next test covers. */
 static void test_depth_and_confidence_propagate(void) {
     PredicateRegistry *reg =
         load("{\"part_of\": {\"object\": \"id\", \"transitive\": true}}");
@@ -286,7 +287,9 @@ static void test_depth_and_confidence_propagate(void) {
     predicate_registry_free(reg);
 }
 
-/* The floor keeps a long chain from decaying into noise. */
+/* The floor keeps a long chain from decaying into noise — and in doing so it
+ * deliberately breaks monotonicity, raising the conclusion above both premises.
+ * Asserted explicitly so the trade is visible rather than surprising. */
 static void test_confidence_floor(void) {
     PredicateRegistry *reg =
         load("{\"part_of\": {\"object\": \"id\", \"transitive\": true}}");
@@ -304,6 +307,7 @@ static void test_confidence_floor(void) {
     const InferConclusion *c = find(&res, 10, "part_of", 30);
     TEST_ASSERT_NOT_NULL(c);
     TEST_ASSERT_FLOAT_WITHIN(1e-6F, 0.25F, c->confidence);
+    TEST_ASSERT_TRUE(c->confidence > facts[0].confidence); /* not monotonic */
     infer_result_free(&res);
     predicate_registry_free(reg);
 }
@@ -434,6 +438,141 @@ static void test_conclusion_set_is_order_independent(void) {
     predicate_registry_free(reg);
 }
 
+/* ----- bounded work ------------------------------------------------------ */
+
+/* A corpus whose closure is already materialized offers a candidate for every
+ * pair and keeps none of them. Capping *conclusions* never fires there, so the
+ * pass would grow with the corpus — cubically, for a chain. The candidate
+ * budget is what actually bounds a tick, and this is the shape that proves it:
+ * a fully closed chain, where every candidate is a duplicate. */
+static void test_work_budget_bounds_a_closed_corpus(void) {
+    PredicateRegistry *reg =
+        load("{\"part_of\": {\"object\": \"id\", \"transitive\": true}}");
+    enum { N = 120 };
+    static InferFact facts[N * (N - 1) / 2];
+    size_t n = 0;
+    for (int i = 0; i < N; i++) {
+        for (int j = i + 1; j < N; j++) {
+            facts[n] = f_id(n + 1, (uint64_t)i, "part_of", (uint64_t)j);
+            n++;
+        }
+    }
+    InferOpts opts = {0};
+    opts.max_depth = 100;
+    opts.max_conclusions = 1000; /* never reached: everything is a duplicate */
+    opts.max_candidates = 5000;
+    InferResult res;
+    TEST_ASSERT_EQUAL_INT(0, infer_run(facts, n, reg, &opts, &res));
+    TEST_ASSERT_EQUAL_size_t(0, res.n);      /* nothing new to conclude */
+    TEST_ASSERT_EQUAL_INT(1, res.truncated); /* and it says it stopped early */
+    TEST_ASSERT_TRUE(res.candidates_examined <= 5001);
+    infer_result_free(&res);
+    predicate_registry_free(reg);
+}
+
+/* A budgeted pass that always began at 0 would examine the same prefix forever.
+ * start_index is what lets the caller sweep the rest. */
+static void test_start_index_rotates_the_scan(void) {
+    PredicateRegistry *reg =
+        load("{\"conflicts_with\": {\"object\": \"id\", \"symmetric\": true}}");
+    InferFact facts[] = {
+        f_id(1, 10, "conflicts_with", 20),
+        f_id(2, 30, "conflicts_with", 40),
+        f_id(3, 50, "conflicts_with", 60),
+    };
+    InferOpts opts = {0};
+    opts.max_candidates = 1;
+    InferResult a;
+    TEST_ASSERT_EQUAL_INT(0, infer_run(facts, 3, reg, &opts, &a));
+    TEST_ASSERT_NOT_NULL(find(&a, 20, "conflicts_with", 10));
+
+    opts.start_index = 2; /* the third fact, this time */
+    InferResult b;
+    TEST_ASSERT_EQUAL_INT(0, infer_run(facts, 3, reg, &opts, &b));
+    TEST_ASSERT_NOT_NULL(find(&b, 60, "conflicts_with", 50));
+    TEST_ASSERT_NULL(find(&b, 20, "conflicts_with", 10));
+
+    infer_result_free(&b);
+    infer_result_free(&a);
+    predicate_registry_free(reg);
+}
+
+/* Meeting the conclusion cap and then seeing only duplicates is a *complete*
+ * pass, not a deferred one — reporting otherwise would have the caller
+ * scheduling follow-up work that does not exist. */
+static void test_duplicates_past_the_cap_are_not_truncation(void) {
+    PredicateRegistry *reg =
+        load("{\"conflicts_with\": {\"object\": \"id\", \"symmetric\": true}}");
+    /* 30<->40 is already symmetric in the input, so it yields no conclusion;
+     * only 10->20 does. One conclusion exists in total. */
+    InferFact facts[] = {
+        f_id(1, 10, "conflicts_with", 20),
+        f_id(2, 30, "conflicts_with", 40),
+        f_id(3, 40, "conflicts_with", 30),
+    };
+    InferOpts opts = {0};
+    opts.max_conclusions = 1;
+    InferResult res;
+    TEST_ASSERT_EQUAL_INT(0, infer_run(facts, 3, reg, &opts, &res));
+    TEST_ASSERT_EQUAL_size_t(1, res.n);
+    TEST_ASSERT_EQUAL_INT(0, res.truncated);
+    infer_result_free(&res);
+    predicate_registry_free(reg);
+}
+
+/* ----- provenance -------------------------------------------------------- */
+
+/* When two routes reach the same triple, the recorded premises must not depend
+ * on which the scan met first: the provenance ends up in a durable record, so
+ * scan order would otherwise decide what the log says. */
+static void test_provenance_is_order_independent(void) {
+    PredicateRegistry *reg =
+        load("{\"part_of\": {\"object\": \"id\", \"transitive\": true}}");
+    InferFact fwd[] = {
+        f_id(1, 10, "part_of", 20),
+        f_id(2, 20, "part_of", 40),
+        f_id(3, 10, "part_of", 30),
+        f_id(4, 30, "part_of", 40),
+    };
+    InferFact rev[] = {fwd[2], fwd[3], fwd[0], fwd[1]};
+
+    InferResult a;
+    InferResult b;
+    TEST_ASSERT_EQUAL_INT(0, infer_run(fwd, 4, reg, NULL, &a));
+    TEST_ASSERT_EQUAL_INT(0, infer_run(rev, 4, reg, NULL, &b));
+    const InferConclusion *ca = find(&a, 10, "part_of", 40);
+    const InferConclusion *cb = find(&b, 10, "part_of", 40);
+    TEST_ASSERT_NOT_NULL(ca);
+    TEST_ASSERT_NOT_NULL(cb);
+    TEST_ASSERT_EQUAL_UINT64(ca->premises[0], cb->premises[0]);
+    TEST_ASSERT_EQUAL_UINT64(ca->premises[1], cb->premises[1]);
+    TEST_ASSERT_EQUAL_UINT64(1, ca->premises[0]); /* the lower-id route wins */
+    TEST_ASSERT_EQUAL_UINT64(2, ca->premises[1]);
+    infer_result_free(&b);
+    infer_result_free(&a);
+    predicate_registry_free(reg);
+}
+
+/* A premise at the top of the depth range must not wrap to 0: a conclusion at
+ * depth 0 is indistinguishable from an asserted fact, and the chain cap would
+ * never bite again. */
+static void test_depth_does_not_wrap(void) {
+    PredicateRegistry *reg =
+        load("{\"part_of\": {\"object\": \"id\", \"transitive\": true}}");
+    InferFact facts[] = {
+        f_id(1, 10, "part_of", 20),
+        f_id(2, 20, "part_of", 30),
+    };
+    facts[0].depth = UINT16_MAX;
+    InferOpts opts = {0};
+    opts.max_depth = UINT16_MAX;
+    InferResult res;
+    TEST_ASSERT_EQUAL_INT(0, infer_run(facts, 2, reg, &opts, &res));
+    TEST_ASSERT_EQUAL_size_t(0, res.n); /* refused, not wrapped to depth 0 */
+    infer_result_free(&res);
+    predicate_registry_free(reg);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_transitive);
@@ -453,5 +592,10 @@ int main(void) {
     RUN_TEST(test_empty_input);
     RUN_TEST(test_closure_takes_successive_passes);
     RUN_TEST(test_conclusion_set_is_order_independent);
+    RUN_TEST(test_work_budget_bounds_a_closed_corpus);
+    RUN_TEST(test_start_index_rotates_the_scan);
+    RUN_TEST(test_duplicates_past_the_cap_are_not_truncation);
+    RUN_TEST(test_provenance_is_order_independent);
+    RUN_TEST(test_depth_does_not_wrap);
     return UNITY_END();
 }

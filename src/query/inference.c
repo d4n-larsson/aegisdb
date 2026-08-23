@@ -35,8 +35,15 @@ typedef struct {
     FactKind okind;
     uint64_t oid;
     const char *ostr; /* borrowed */
+    /* Index into the output buffer for a triple this pass concluded, or
+     * SEEN_INPUT for one that was already a fact. Keeping it lets a second
+     * route to the same triple compare itself against the route already
+     * recorded, instead of being dropped along with its provenance. */
+    size_t out_idx;
     uint8_t used;
 } SeenSlot;
+
+#define SEEN_INPUT ((size_t)-1)
 
 typedef struct {
     SeenSlot *slots;
@@ -92,10 +99,29 @@ static int seen_grow(Seen *t) {
     return 0;
 }
 
+/* The slot holding this triple, or NULL. */
+static SeenSlot *seen_find(const Seen *t, uint64_t subject,
+                           const char *predicate, FactKind okind, uint64_t oid,
+                           const char *ostr) {
+    if (!t->cap) {
+        return NULL;
+    }
+    size_t i = (size_t)(triple_hash(subject, predicate, okind, oid, ostr) &
+                        (t->cap - 1));
+    while (t->slots[i].used) {
+        if (triple_eq(&t->slots[i], subject, predicate, okind, oid, ostr)) {
+            return &t->slots[i];
+        }
+        i = (i + 1) & (t->cap - 1);
+    }
+    return NULL;
+}
+
 /* Insert if absent. Returns 1 if newly inserted, 0 if already present, -1 on
  * allocation failure. */
 static int seen_put(Seen *t, uint64_t subject, const char *predicate,
-                    FactKind okind, uint64_t oid, const char *ostr) {
+                    FactKind okind, uint64_t oid, const char *ostr,
+                    size_t out_idx) {
     if (t->n * 4 >= t->cap * 3 && seen_grow(t) != 0) {
         return -1;
     }
@@ -112,6 +138,7 @@ static int seen_put(Seen *t, uint64_t subject, const char *predicate,
     t->slots[i].okind = okind;
     t->slots[i].oid = oid;
     t->slots[i].ostr = ostr;
+    t->slots[i].out_idx = out_idx;
     t->slots[i].used = 1;
     t->n++;
     return 1;
@@ -242,12 +269,13 @@ static int out_push(OutBuf *o, const InferConclusion *c) {
     return 0;
 }
 
-/* Depth is one past the deepest premise; confidence is the product, floored.
- * The product is a heuristic and not a probability — see the design doc §8 —
- * but it is monotonic (a conclusion never outranks its premises) and
- * deterministic, which is what it is relied on for. */
-static void attribute(InferConclusion *c, const InferFact *a,
-                      const InferFact *b, float floor) {
+/* The deepest premise, and the confidence product. Depth is *not* incremented
+ * here: the caller compares this against max_depth first, because incrementing
+ * a premise already at UINT16_MAX would wrap to 0 and produce a conclusion
+ * indistinguishable from an asserted fact — after which the chain cap would
+ * never bite again. */
+static void route_of(InferConclusion *c, const InferFact *a, const InferFact *b,
+                     float floor, uint16_t *deepest) {
     uint16_t d = a->depth;
     float conf = a->confidence;
     c->premises[0] = a->record_id;
@@ -260,19 +288,76 @@ static void attribute(InferConclusion *c, const InferFact *a,
         c->premises[1] = b->record_id;
         c->premise_count = 2;
     }
-    c->depth = (uint16_t)(d + 1);
+    *deepest = d;
+    /* The floor can raise a conclusion above its premises. That is deliberate
+     * (design §8: max(product, floor)) — it keeps a long chain from decaying
+     * out of ranked results — but it does mean confidence is not monotonic
+     * along a chain, and it is a heuristic rather than a probability. */
     c->confidence = conf < floor ? floor : conf;
 }
 
-/* Record the conclusion unless the triple already exists (in the snapshot, or
- * drawn earlier in this pass). Returns 1 kept, 0 duplicate, -1 on failure. */
-static int emit(OutBuf *out, Seen *seen, const InferConclusion *c) {
-    int fresh = seen_put(seen, c->subject, c->predicate, c->object_kind,
-                         c->object_id, c->object_str);
-    if (fresh <= 0) {
-        return fresh;
+/* A total order over the routes to one triple, so which route gets recorded
+ * does not depend on the order the caller happened to pass its facts in. The
+ * provenance ends up in a durable record, so "whichever we saw first" would
+ * make the log a function of scan order. */
+static int route_is_better(const InferConclusion *cand,
+                           const InferConclusion *cur) {
+    if (cand->premises[0] != cur->premises[0]) {
+        return cand->premises[0] < cur->premises[0];
     }
-    return out_push(out, c) == 0 ? 1 : -1;
+    uint64_t a = cand->premise_count > 1 ? cand->premises[1] : 0;
+    uint64_t b = cur->premise_count > 1 ? cur->premises[1] : 0;
+    if (a != b) {
+        return a < b;
+    }
+    return (int)cand->rule < (int)cur->rule;
+}
+
+/* Offer one candidate conclusion to the pass. Returns 1 if it was recorded, 0
+ * if the triple was already known (as an input fact, or by another route), or
+ * -1 on allocation failure. `*stop` is set when a cap ends the pass. */
+static int offer(OutBuf *out, Seen *seen, const InferConclusion *c,
+                 uint16_t deepest, uint16_t max_depth, size_t max_conc,
+                 int *stop, int *truncated) {
+    /* Compared before the increment, so a premise at UINT16_MAX cannot wrap. */
+    if (deepest >= max_depth) {
+        return 0;
+    }
+    SeenSlot *slot = seen_find(seen, c->subject, c->predicate, c->object_kind,
+                               c->object_id, c->object_str);
+    if (slot) {
+        /* Already a fact: nothing to record, and no provenance to improve. */
+        if (slot->out_idx == SEEN_INPUT) {
+            return 0;
+        }
+        InferConclusion *cur = &out->items[slot->out_idx];
+        if (route_is_better(c, cur)) {
+            uint16_t keep_depth = cur->depth;
+            *cur = *c;
+            cur->depth = keep_depth < (uint16_t)(deepest + 1)
+                             ? keep_depth
+                             : (uint16_t)(deepest + 1);
+        }
+        return 0;
+    }
+    /* Genuinely new, so the output cap applies — and only here, so a pass that
+     * meets the cap and then sees nothing but duplicates is not reported as
+     * having deferred work it does not have. */
+    if (max_conc && out->n >= max_conc) {
+        *truncated = 1;
+        *stop = 1;
+        return 0;
+    }
+    InferConclusion rec = *c;
+    rec.depth = (uint16_t)(deepest + 1);
+    if (out_push(out, &rec) != 0) {
+        return -1;
+    }
+    if (seen_put(seen, rec.subject, rec.predicate, rec.object_kind,
+                 rec.object_id, rec.object_str, out->n - 1) < 0) {
+        return -1;
+    }
+    return 1;
 }
 
 int infer_run(const InferFact *facts, size_t nfacts,
@@ -286,19 +371,27 @@ int infer_run(const InferFact *facts, size_t nfacts,
     uint16_t max_depth =
         (opts && opts->max_depth) ? opts->max_depth : INFER_DEFAULT_MAX_DEPTH;
     size_t max_conc = opts ? opts->max_conclusions : 0;
+    size_t max_cand = (opts && opts->max_candidates)
+                          ? opts->max_candidates
+                          : INFER_DEFAULT_MAX_CANDIDATES;
     float floor = (opts && opts->confidence_floor > 0.0F)
                       ? opts->confidence_floor
                       : INFER_DEFAULT_CONFIDENCE_FLOOR;
+    size_t start = (opts && nfacts) ? opts->start_index % nfacts : 0;
 
     Seen seen = {0};
     Adj adj = {0};
     OutBuf out_buf = {0};
+    size_t cands = 0;
+    int stop = 0;
     int rc = -1;
 
+    /* Phase 1 is linear and unbudgeted: it is what makes dedup possible, so
+     * skipping part of it would re-derive facts that already exist. */
     for (size_t i = 0; i < nfacts; i++) {
         const InferFact *f = &facts[i];
         if (seen_put(&seen, f->subject, f->predicate, f->object_kind,
-                     f->object_id, f->object_str) < 0) {
+                     f->object_id, f->object_str, SEEN_INPUT) < 0) {
             goto done;
         }
         /* Only id-objects can be joined or reversed, and only those predicates
@@ -310,8 +403,14 @@ int infer_run(const InferFact *facts, size_t nfacts,
         }
     }
 
-    for (size_t i = 0; i < nfacts; i++) {
-        const InferFact *f = &facts[i];
+    /* Phase 2 is budgeted, and starts wherever the caller asked. A closed
+     * corpus offers the same candidates every pass and keeps none of them, so
+     * a budget that counted *kept* conclusions would never fire and the pass
+     * would grow with the corpus; counting candidates is what actually bounds
+     * a tick. Rotating the start is what keeps a budgeted pass from examining
+     * the same prefix forever and never reaching the rest. */
+    for (size_t k = 0; k < nfacts && !stop; k++) {
+        const InferFact *f = &facts[(start + k) % nfacts];
         if (f->object_kind != FACT_OBJ_ID) {
             continue;
         }
@@ -321,71 +420,76 @@ int infer_run(const InferFact *facts, size_t nfacts,
         }
 
         if (spec->symmetric) {
+            if (++cands > max_cand) {
+                out->truncated = 1;
+                stop = 1;
+                break;
+            }
             InferConclusion c = {0};
+            uint16_t deepest = 0;
             c.rule = DERIV_SYMMETRIC;
             c.subject = f->object_id;
             c.predicate = f->predicate;
             c.object_kind = FACT_OBJ_ID;
             c.object_id = f->subject;
-            attribute(&c, f, NULL, floor);
-            if (c.depth <= max_depth) {
-                if (max_conc && out_buf.n >= max_conc) {
-                    out->truncated = 1;
-                    goto finish;
-                }
-                if (emit(&out_buf, &seen, &c) < 0) {
-                    goto done;
-                }
+            route_of(&c, f, NULL, floor, &deepest);
+            if (offer(&out_buf, &seen, &c, deepest, max_depth, max_conc, &stop,
+                      &out->truncated) < 0) {
+                goto done;
             }
         }
 
-        if (spec->inverse_of) {
+        if (spec->inverse_of && !stop) {
+            if (++cands > max_cand) {
+                out->truncated = 1;
+                stop = 1;
+                break;
+            }
             InferConclusion c = {0};
+            uint16_t deepest = 0;
             c.rule = DERIV_INVERSE;
             c.subject = f->object_id;
             c.predicate = spec->inverse_of; /* borrowed from the registry */
             c.object_kind = FACT_OBJ_ID;
             c.object_id = f->subject;
-            attribute(&c, f, NULL, floor);
-            if (c.depth <= max_depth) {
-                if (max_conc && out_buf.n >= max_conc) {
-                    out->truncated = 1;
-                    goto finish;
-                }
-                if (emit(&out_buf, &seen, &c) < 0) {
-                    goto done;
-                }
+            route_of(&c, f, NULL, floor, &deepest);
+            if (offer(&out_buf, &seen, &c, deepest, max_depth, max_conc, &stop,
+                      &out->truncated) < 0) {
+                goto done;
             }
         }
 
-        if (spec->transitive) {
+        if (spec->transitive && !stop) {
             const AdjSlot *next = adj_get(&adj, f->object_id, f->predicate);
-            for (size_t k = 0; next && k < next->n; k++) {
-                const InferFact *g = &facts[next->idx[k]];
+            for (size_t j = 0; next && j < next->n && !stop; j++) {
+                if (++cands > max_cand) {
+                    /* `stop` and not a bare break: this is the inner join loop,
+                     * and breaking only it would let the outer scan carry on
+                     * spending a budget that is already gone. */
+                    out->truncated = 1;
+                    stop = 1;
+                    break;
+                }
+                const InferFact *g = &facts[next->idx[j]];
                 InferConclusion c = {0};
+                uint16_t deepest = 0;
                 c.rule = DERIV_TRANSITIVE;
                 c.subject = f->subject;
                 c.predicate = f->predicate;
                 c.object_kind = FACT_OBJ_ID;
                 c.object_id = g->object_id;
-                attribute(&c, f, g, floor);
-                if (c.depth > max_depth) {
-                    continue;
-                }
-                if (max_conc && out_buf.n >= max_conc) {
-                    out->truncated = 1;
-                    goto finish;
-                }
-                if (emit(&out_buf, &seen, &c) < 0) {
+                route_of(&c, f, g, floor, &deepest);
+                if (offer(&out_buf, &seen, &c, deepest, max_depth, max_conc,
+                          &stop, &out->truncated) < 0) {
                     goto done;
                 }
             }
         }
     }
 
-finish:
     out->items = out_buf.items;
     out->n = out_buf.n;
+    out->candidates_examined = cands;
     out_buf.items = NULL;
     rc = 0;
 done:
