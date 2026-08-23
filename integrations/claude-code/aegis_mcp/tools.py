@@ -139,7 +139,13 @@ class MemoryTools:
     # ---- operations ------------------------------------------------------
 
     def save(self, text: str, tags=None, importance: float = 0.5,
-             semantic: bool = False, confidence: float = 1.0) -> dict:
+             semantic: bool = False, confidence: float = 1.0,
+             fact: dict | None = None) -> dict:
+        """`fact` attaches a typed {s, p, o} assertion (ROADMAP 5.2) alongside
+        the prose. The server validates it against its predicate registry and
+        refuses the whole insert if it does not match — which is the intended
+        arrangement: a client-side check is an optimization, and the server's
+        answer is the one that counts."""
         if not text or not text.strip():
             return results.err("invalid", "text must be non-empty")
         payload = {
@@ -151,6 +157,8 @@ class MemoryTools:
         }
         if semantic:
             payload["confidence"] = confidence
+        if fact is not None:
+            payload["fact"] = fact
         if self._embeddings_usable():
             payload["embedding"] = self.provider.embed_document(text)
         resp, err = self._send(payload)
@@ -169,7 +177,8 @@ class MemoryTools:
                start_time: int | None = None, end_time: int | None = None,
                top_k: int | None = None, kind: str | None = None,
                max_importance: float | None = None,
-               order: str | None = None, lexical: bool = False) -> dict:
+               order: str | None = None, lexical: bool = False,
+               pattern: dict | None = None) -> dict:
         """Recall memories. `lexical` opts into the server's BM25 keyword index
         (fused with the embedding when one is available), which is what makes an
         exact identifier findable and is the *only* content-based path when
@@ -181,10 +190,18 @@ class MemoryTools:
         would silently discard everything if handed fused scores."""
         top_k = top_k or self.config.recall_top_k
         tags = list(tags or [])
-        if not query and not tags and start_time is None and end_time is None:
-            return results.err("invalid", "search requires query, tags, or a time range")
+        if (not query and not tags and start_time is None
+                and end_time is None and pattern is None):
+            return results.err("invalid",
+                               "search requires query, tags, a pattern, or a "
+                               "time range")
 
         payload = {"operation": "search", "top_k": top_k}
+        if pattern is not None:
+            # Filter on the typed fact a record asserts (ROADMAP 5.2). With all
+            # three positions bound this is an index probe, which is what makes
+            # "does the corpus already say this?" cheap enough to ask per write.
+            payload["pattern"] = pattern
         if tags:
             payload["tags"] = tags
             payload["match"] = match

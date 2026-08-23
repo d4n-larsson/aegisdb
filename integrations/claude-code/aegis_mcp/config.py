@@ -98,7 +98,16 @@ class Config:
     # the middle, where this cannot.
     grounding_min_score: float = 0.85  # cosine floor for reusing an entity
     grounding_top_k: int = 5  # entity candidates considered per mention
-    grounding_max_mint: int = 8  # new entity records per extraction
+    # Two mentions per triple at worst (subject and an id-valued object), so
+    # this has to cover 2 * extract_max_triples or a first capture on a rich
+    # transcript silently drops the overflow as ungrounded.
+    grounding_max_mint: int = 32  # new entity records per extraction
+    # Confidence for a fact a model proposed, deliberately below what a human
+    # or a rule writes (ROADMAP 5.4 §7). It is not decoration: 5.3 propagates
+    # confidence as a product along a derivation chain, so this number silently
+    # sets how much weight every conclusion drawn from parsed facts carries
+    # relative to one drawn from asserted facts.
+    extract_triple_confidence: float = 0.6
 
 
 # Map each config field to its environment variable name.
@@ -146,6 +155,7 @@ _ENV = {
     "grounding_min_score": "AEGIS_GROUNDING_MIN_SCORE",
     "grounding_top_k": "AEGIS_GROUNDING_TOP_K",
     "grounding_max_mint": "AEGIS_GROUNDING_MAX_MINT",
+    "extract_triple_confidence": "AEGIS_EXTRACT_TRIPLE_CONFIDENCE",
 }
 
 _BOOL = {"recall_enabled", "capture_enabled", "extract_supersede",
@@ -160,7 +170,7 @@ _INT = {
     "extract_max_triples", "grounding_top_k", "grounding_max_mint",
 }
 _FLOAT = {"recall_min_score", "recall_dedup_threshold", "capture_min_salience",
-          "grounding_min_score",
+          "grounding_min_score", "extract_triple_confidence",
           "summary_max_importance", "summary_min_confidence",
           "extract_supersede_min_score"}
 

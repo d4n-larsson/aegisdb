@@ -10,11 +10,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 
 from .client import AegisClient
 from .embeddings import EmbeddingProvider
-from .extract import make_extraction_provider
+from .extract import (VocabularyError, load_vocabulary,
+                      make_extraction_provider)
+from .triples import store_triples
 from .tools import MemoryTools
 
 # Phrases that signal a salient outcome worth remembering, with a weight.
@@ -177,6 +180,21 @@ def _drop_ephemeral(texts: list) -> list:
             if not any(m in t.lower() for m in _EPHEMERAL_MARKERS)]
 
 
+def _transcript_blob(texts: list, config) -> str:
+    """The transcript as one capped string. Shared so prose extraction and
+    triple extraction read exactly the same text — proposing triples about
+    turns the fact extractor never saw would make the two disagree for a reason
+    nobody could see from the output."""
+    kept = _drop_ephemeral(texts)
+    if not kept:
+        return ""
+    blob = "\n".join(kept)
+    cap = getattr(config, "extract_max_input_chars", 24000)
+    if cap and len(blob) > cap:
+        blob = blob[-cap:]  # keep the most recent turns
+    return blob
+
+
 def extract_facts(texts: list, config, provider=None) -> list | None:
     """LLM extraction path (ROADMAP 2.1): distil the transcript into durable
     Facts. Returns a list[Fact] (possibly empty) when an extractor ran, or None
@@ -186,13 +204,9 @@ def extract_facts(texts: list, config, provider=None) -> list | None:
         provider = make_extraction_provider(config)
     if not provider.available():
         return None
-    kept = _drop_ephemeral(texts)
-    if not kept:
+    blob = _transcript_blob(texts, config)
+    if not blob:
         return []
-    blob = "\n".join(kept)
-    cap = getattr(config, "extract_max_input_chars", 24000)
-    if cap and len(blob) > cap:
-        blob = blob[-cap:]  # keep the most recent turns
     try:
         return provider.extract(blob, getattr(config, "extract_max_facts", 12))
     except Exception:
@@ -221,6 +235,48 @@ def _find_superseded_ids(fact, tools, config, extractor) -> list:
     return [mems[i]["id"] for i in idxs if 0 <= i < len(mems)]
 
 
+def _store_triples(texts, config, tools, extractor) -> int:
+    """Propose and store typed triples for this transcript. Never raises.
+
+    A misconfigured registry is a hard error inside load_vocabulary — it must
+    not silently disable the contract — but capture is documented as never
+    raising, so it is caught here and reported as zero triples rather than a
+    failed capture. The prose facts are already stored by then.
+    """
+    if not getattr(config, "extract_triples", False):
+        return 0
+    try:
+        vocab = load_vocabulary(getattr(config, "extract_registry", ""))
+    except VocabularyError as e:
+        # Said out loud. A configured-but-unreadable registry disables the
+        # contract, and silence here is indistinguishable from a session with
+        # nothing to extract — an operator who typos the path would capture
+        # prose only, forever, with no output pointing at why.
+        print(f"[aegis-mcp] triples disabled: {e}", file=sys.stderr)
+        return 0
+    if vocab is None:
+        print("[aegis-mcp] triples enabled but no registry configured "
+              "(AEGIS_EXTRACT_REGISTRY); the vocabulary is the contract, so "
+              "nothing is proposed", file=sys.stderr)
+        return 0
+    blob = _transcript_blob(texts, config)
+    try:
+        res = store_triples(tools, blob, vocab, config, extractor)
+    except Exception:
+        return 0
+    if res.proposed:
+        # The in-vocabulary rate is the number 5.4 is judged on, and without
+        # this line a store that rejects everything, one that mints for every
+        # mention, and one working perfectly all print the same thing.
+        print(f"[aegis-mcp] triples: {res.stored} stored, {res.proposed} "
+              f"proposed, {res.rejected} out of vocabulary "
+              f"({res.in_vocabulary_rate:.0%} in-vocabulary), "
+              f"{res.ungrounded} ungrounded, {res.failed} refused; entities "
+              f"{res.entities_resolved} reused / {res.entities_minted} minted",
+              file=sys.stderr)
+    return res.stored
+
+
 def run_capture(event: dict, config, provider: EmbeddingProvider,
                 client: AegisClient | None = None) -> int:
     """Capture salient memories for an ended session. Returns the number stored.
@@ -237,8 +293,10 @@ def run_capture(event: dict, config, provider: EmbeddingProvider,
     extractor = make_extraction_provider(config)
     facts = extract_facts(texts, config, extractor)
     if facts is not None:  # extractor ran (even if it found nothing)
-        if not facts:
-            return 0
+        # Not `if not facts: return 0`. A session can hold a groundable
+        # relation while holding nothing worth keeping as prose, and returning
+        # early there made the triple path depend on the *prose* extractor
+        # finding something — which is not what "strictly additive" means.
         if client is None:
             client = AegisClient.from_config(config)
         tools = MemoryTools(config, client, provider)
@@ -259,6 +317,10 @@ def run_capture(event: dict, config, provider: EmbeddingProvider,
                     continue
                 tools.relate(new_id, old_id, "supersedes")
                 tools.delete(old_id)
+        # Typed triples (ROADMAP 5.4), strictly additive: the prose facts above
+        # are stored either way, so a transcript yielding no usable triple
+        # behaves exactly as it does with the feature off.
+        stored += _store_triples(texts, config, tools, extractor)
         return stored
 
     # heuristic fallback (extraction disabled/unavailable)
