@@ -107,9 +107,10 @@ typedef struct {
     size_t max_candidates;
     /* Where in `facts` rule application begins; it wraps. A budgeted pass that
      * always started at 0 would examine the same prefix forever and never
-     * reach the rest, so a caller that sees `truncated` should advance this by
-     * `candidates_examined` worth of facts on the next pass. Indexing the dedup
-     * set is always complete regardless. */
+     * reach the rest, so a caller that sees `truncated` advances this by
+     * `facts_scanned` — a count in the same unit, which `candidates_examined`
+     * is not: one fact can yield as many candidates as it has join partners.
+     * Indexing the dedup set is always complete regardless. */
     size_t start_index;
     /* Floor under the confidence product; <= 0 = default. Note this can raise a
      * conclusion above its premises — see infer_run. */
@@ -123,9 +124,13 @@ typedef struct {
      * runs again. Reported rather than swallowed, because a pass that never
      * reaches fixpoint is survivable but worth being able to see. */
     int truncated;
-    /* Candidates considered, whether kept, deduped or too deep. The work the
-     * pass actually did, and what a caller advances `start_index` by. */
+    /* Candidates considered, whether kept, deduped or too deep — the work the
+     * pass actually did. Not a position: see facts_scanned. */
     size_t candidates_examined;
+    /* Input facts the rule loop consumed before it stopped, counted from
+     * `start_index`. This is what a truncated pass advances `start_index` by,
+     * so the next one resumes where this one gave up. */
+    size_t facts_scanned;
 } InferResult;
 
 /* Draw every conclusion derivable in one pass over `facts`.

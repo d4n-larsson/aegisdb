@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "aegisdb/hash_mix.h"
+#include "aegisdb/logging.h"
 
 /* Predicate interning: string-keyed and low-cardinality, so a fixed chained
  * table (tag_index's shape). The subject/object tables are keyed by values that
@@ -654,6 +655,49 @@ int fact_index_by_predicate(const FactIndex *f, const char *predicate,
         return -1;
     }
     memcpy(res, f->pred_recs[pred - 1], n * sizeof(*res));
+    *out = res;
+    *out_n = n;
+    return 0;
+}
+
+static int cmp_u64(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a;
+    uint64_t y = *(const uint64_t *)b;
+    return (x > y) - (x < y);
+}
+
+int fact_index_all_records(const FactIndex *f, uint64_t **out, size_t *out_n) {
+    *out = NULL;
+    *out_n = 0;
+    if (!f || f->facts == 0) {
+        return 0;
+    }
+    /* A record carries at most one fact, so the per-predicate postings are
+     * disjoint and their total is exactly f->facts — no dedup pass needed,
+     * only a sort, which the callers of every other lookup here already
+     * expect and which the inference job needs for a reproducible scan. */
+    uint64_t *res = malloc(f->facts * sizeof(*res));
+    if (!res) {
+        return -1;
+    }
+    size_t n = 0;
+    for (size_t i = 0; i < FACT_MAX_PREDICATES; i++) {
+        for (size_t j = 0; j < f->pred_n[i]; j++) {
+            if (n == f->facts) {
+                /* The postings hold more than `facts` says: the two have
+                 * drifted. Refuse rather than overrun — and say so, because
+                 * the only other symptom is inference quietly never running
+                 * again, which looks exactly like a settled corpus. */
+                LOG_WARN("fact index: postings exceed the fact count (%zu); "
+                         "enumeration refused",
+                         f->facts);
+                free(res);
+                return -1;
+            }
+            res[n++] = f->pred_recs[i][j];
+        }
+    }
+    qsort(res, n, sizeof(*res), cmp_u64);
     *out = res;
     *out_n = n;
     return 0;

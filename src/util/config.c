@@ -1,6 +1,8 @@
 /* Server configuration defaults and CLI parsing (T008). */
 #include "aegisdb/config.h"
 
+#include "aegisdb/inference.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -66,8 +68,16 @@ void config_defaults(Config *cfg) {
     cfg->lexical_index = 1;       /* BM25 keyword index on by default */
     cfg->edge_index = 1;          /* reverse edge index on by default */
     cfg->fact_index = 1;          /* fact/triple indexes on by default */
-    cfg->usage_feedback = 1;      /* per-record recall feedback on by default */
-    cfg->enabled_phase = 4;       /* all features enabled by default */
+    /* Inference is opt-in: it writes records, and a log cannot be rebuilt the
+     * way an index can. See config.h. */
+    cfg->inference = 0;
+    cfg->inference_interval_sec = 30;
+    cfg->inference_max_depth = INFER_DEFAULT_MAX_DEPTH;
+    cfg->inference_max_derived = 1000;
+    cfg->inference_max_candidates = INFER_DEFAULT_MAX_CANDIDATES;
+    cfg->inference_confidence_floor = INFER_DEFAULT_CONFIDENCE_FLOOR;
+    cfg->usage_feedback = 1; /* per-record recall feedback on by default */
+    cfg->enabled_phase = 4;  /* all features enabled by default */
     cfg->log_level = AEGIS_LOG_INFO;
 
     /* AEGISDB_LOG_LEVEL seeds the default; --log-level overrides it. */
@@ -358,6 +368,18 @@ static void usage(const char *prog) {
         "0=off)\n"
         "  --predicate-registry <f> declare the fact predicate vocabulary "
         "(JSON); off by default\n"
+        "  --inference              materialize the closures the registry "
+        "declares; off by default\n"
+        "  --inference-interval-sec <n>  seconds between inference passes "
+        "(default 30)\n"
+        "  --inference-max-depth <n>     derivation chain length cap "
+        "(default 4)\n"
+        "  --inference-max-derived <n>   records written per pass "
+        "(default 1000)\n"
+        "  --inference-max-candidates <n> conclusions considered per pass "
+        "(default 1000000)\n"
+        "  --inference-confidence-floor <f>  floor under a conclusion's "
+        "confidence (default 0.1)\n"
         "  --no-fact-index          skip the subject/object/predicate fact "
         "indexes (disables `pattern`)\n"
         "  --no-edge-index          skip the reverse relationship index "
@@ -529,6 +551,39 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
             NEXT("--predicate-registry");
             snprintf(cfg->predicate_registry, sizeof(cfg->predicate_registry),
                      "%s", val);
+        } else if (strcmp(a, "--inference") == 0) {
+            cfg->inference = 1;
+        } else if (strcmp(a, "--inference-interval-sec") == 0) {
+            UINT_OPT(cfg->inference_interval_sec, 1, unsigned,
+                     "inference-interval-sec");
+        } else if (strcmp(a, "--inference-max-depth") == 0) {
+            UINT_OPT(cfg->inference_max_depth, 1, unsigned,
+                     "inference-max-depth");
+            /* The pass carries depth as a uint16, so a larger value would be
+             * truncated — and 65536 would truncate to 0, which reads as
+             * "unset" and silently restores the default. Refuse instead of
+             * quietly meaning something else. */
+            if (cfg->inference_max_depth > UINT16_MAX) {
+                fprintf(stderr, "config: --inference-max-depth must be <= %u\n",
+                        (unsigned)UINT16_MAX);
+                return -1;
+            }
+        } else if (strcmp(a, "--inference-max-derived") == 0) {
+            UINT_OPT(cfg->inference_max_derived, 1, size_t,
+                     "inference-max-derived");
+        } else if (strcmp(a, "--inference-max-candidates") == 0) {
+            UINT_OPT(cfg->inference_max_candidates, 1, size_t,
+                     "inference-max-candidates");
+        } else if (strcmp(a, "--inference-confidence-floor") == 0) {
+            NEXT("--inference-confidence-floor");
+            char *endp = NULL;
+            double fl = strtod(val, &endp);
+            if (endp == val || *endp || !(fl > 0.0) || fl > 1.0) {
+                fprintf(stderr, "config: --inference-confidence-floor must be "
+                                "in (0, 1]\n");
+                return -1;
+            }
+            cfg->inference_confidence_floor = (float)fl;
         } else if (strcmp(a, "--no-fact-index") == 0) {
             cfg->fact_index = 0;
         } else if (strcmp(a, "--no-edge-index") == 0) {

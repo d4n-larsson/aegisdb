@@ -1152,6 +1152,219 @@ def test_replication_codec_gate(binary, port):
         check(resp.get("ok") is True, "a well-formed handshake still works")
 
 
+def _await_derived(srv, at_least, timeout=15.0, token=None):
+    """Wait for the inference job to write at least `at_least` conclusions.
+
+    The job runs on the maintenance tick, so a test cannot drive it directly;
+    polling the counter is what turns that into a bounded wait rather than a
+    sleep long enough to be slow and short enough to be flaky.
+    """
+    q = {"operation": "stats"}
+    if token:
+        q["token"] = token
+    deadline = time.time() + timeout
+    n = 0
+    while time.time() < deadline:
+        n = srv.req(q)["indexes"]["derived"]
+        if n >= at_least:
+            return n
+        time.sleep(0.25)
+    return n
+
+
+def _await_fixpoint(srv, timeout=20.0, token=None, quiet_polls=4):
+    """Wait until the derived count stops moving, and return it.
+
+    One pass draws only from the facts it can see, so a conclusion becomes the
+    next pass's premise and closure takes several ticks. Waiting for the count
+    to settle is the honest way to assert idempotence — asserting it after a
+    single tick tests the wrong thing and fails intermittently.
+    """
+    q = {"operation": "stats"}
+    if token:
+        q["token"] = token
+    deadline = time.time() + timeout
+    last = -1
+    quiet = 0
+    while time.time() < deadline:
+        n = srv.req(q)["indexes"]["derived"]
+        quiet = quiet + 1 if n == last else 0
+        last = n
+        if quiet >= quiet_polls:
+            return n
+        time.sleep(0.5)
+    return last
+
+
+def test_inference_job(binary, port):
+    print("[inference: the job derives, links and stops (ROADMAP 5.3)]")
+    d = tempfile.mkdtemp(prefix="aegis_infer_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"part_of": {"object": "id", "transitive": True,
+                               "inverse_of": "contains"},
+                   "contains": {"object": "id", "inverse_of": "part_of"}}, fh)
+
+    # Off by default: the same corpus and registry, with no --inference, must
+    # derive nothing at all. This is the claim that an unconfigured deployment
+    # is untouched by the whole horizon.
+    with Server(binary, port, phase=4,
+                extra_args=["--predicate-registry", reg]) as srv:
+        a = srv.req({"operation": "insert", "type": "semantic",
+                     "data": "a"})["record"]["id"]
+        b = srv.req({"operation": "insert", "type": "semantic",
+                     "data": "b"})["record"]["id"]
+        srv.req({"operation": "insert", "type": "semantic", "data": "a in b",
+                 "fact": {"s": a, "p": "part_of", "o": {"id": b}}})
+        time.sleep(3)
+        st = srv.req({"operation": "stats"})["indexes"]
+        check(st["derived"] == 0, "no --inference means nothing is derived")
+        check(st["facts"] == 1, "and the fact set is untouched")
+
+    with Server(binary, port, phase=4,
+                extra_args=["--predicate-registry", reg, "--inference",
+                            "--inference-interval-sec", "1"]) as srv:
+        def ids(r):
+            return sorted(x["id"] for x in r.get("records", []))
+
+        a = srv.req({"operation": "insert", "type": "semantic",
+                     "data": "a"})["record"]["id"]
+        b = srv.req({"operation": "insert", "type": "semantic",
+                     "data": "b"})["record"]["id"]
+        c = srv.req({"operation": "insert", "type": "semantic",
+                     "data": "c"})["record"]["id"]
+        p1 = srv.req({"operation": "insert", "type": "semantic",
+                      "data": "a in b",
+                      "fact": {"s": a, "p": "part_of",
+                               "o": {"id": b}}})["record"]["id"]
+        p2 = srv.req({"operation": "insert", "type": "semantic",
+                      "data": "b in c",
+                      "fact": {"s": b, "p": "part_of",
+                               "o": {"id": c}}})["record"]["id"]
+
+        derived = _await_derived(srv, at_least=3)
+        check(derived >= 3, f"the job derives without being asked ({derived})")
+
+        # transitive: a part_of c, from both premises
+        r = srv.req({"operation": "search",
+                     "pattern": {"s": a, "p": "part_of", "o": {"id": c}},
+                     "top_k": 5})
+        check(len(r.get("records", [])) == 1,
+              "the transitive conclusion is a real, findable record")
+        conc = r["records"][0]
+        check(conc["fact"] == {"s": a, "p": "part_of", "o": {"id": c}},
+              "and asserts the triple it concluded")
+        linked = sorted(e["to_id"] for e in conc.get("relationships", [])
+                        if e["kind"] == "derived_from")
+        check(linked == sorted([p1, p2]),
+              "with derived_from edges to both premises")
+
+        # inverse_of fired too, in the other direction
+        r = srv.req({"operation": "search",
+                     "pattern": {"s": b, "p": "contains", "o": {"id": a}},
+                     "top_k": 5})
+        check(len(r.get("records", [])) == 1,
+              "inverse_of derives the reverse assertion")
+
+        # Closure takes several passes, not one: each pass draws only from the
+        # facts it can see, so pass 1's conclusions are pass 2's premises. Here
+        # `a part_of c` (pass 1) yields `c contains a` (pass 2). Settling is
+        # therefore the property to assert, not stability after one tick.
+        settled = _await_fixpoint(srv)
+        check(settled == 4, f"the corpus settles at a fixpoint ({settled})")
+
+        # And once settled, every candidate is already a fact, so a further
+        # pass writes nothing. This is what makes a quiet corpus cost nothing.
+        time.sleep(3)
+        after = srv.req({"operation": "stats"})["indexes"]["derived"]
+        check(after == settled, f"a settled corpus derives nothing new ({after})")
+        check(srv.req({"operation": "stats"})["indexes"]["inference_deferred"]
+              == 0, "and reports no deferred work")
+
+
+def test_inference_flag_validation(binary, port):
+    print("[inference: a cap that cannot mean what it says refuses to start]")
+
+    def try_start(extra):
+        datadir = tempfile.mkdtemp(prefix="aegis_inferflag_")
+        proc = subprocess.Popen(
+            [binary, "--data-dir", datadir, "--port", str(port)] + extra,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            _, errout = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return None, b""
+        return proc.returncode, errout
+
+    # The pass carries depth as a uint16. 65536 truncates to 0, which reads as
+    # "unset" and silently restores the default — an operator asking for a
+    # deeper chain would get a shallower one and never know.
+    rc, err = try_start(["--inference-max-depth", "65536"])
+    check(rc is not None and rc != 0, "a max-depth past uint16 refuses to start")
+    check(b"65535" in err, "and the message says what the bound is")
+
+    # Documented in the design's flag table, so it has to exist: following the
+    # doc must not produce "unknown argument".
+    rc, err = try_start(["--inference-confidence-floor", "0.25", "--help"])
+    check(rc == 0 and b"unknown" not in err.lower(),
+          "--inference-confidence-floor is accepted")
+    for bad in ("0", "1.5", "abc"):
+        rc, err = try_start(["--inference-confidence-floor", bad])
+        check(rc is not None and rc != 0,
+              f"a confidence floor of {bad!r} refuses to start")
+
+
+def test_inference_respects_namespaces(binary, port):
+    print("[inference: a rule never joins two tenants' facts]")
+    d = tempfile.mkdtemp(prefix="aegis_infer_ns_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"part_of": {"object": "id", "transitive": True}}, fh)
+
+    with Server(binary, port, phase=4,
+                token_lines=["admintok", "tok-a acme rw", "tok-b beta rw"],
+                extra_args=["--predicate-registry", reg, "--inference",
+                            "--inference-interval-sec", "1"]) as srv:
+        def ins(tok, data, fact=None):
+            p = {"operation": "insert", "type": "semantic", "data": data,
+                 "token": tok}
+            if fact:
+                p["fact"] = fact
+            return srv.req(p)["record"]["id"]
+
+        # A holds a->b; B holds b->c. Each half is useless alone, and the fact
+        # indexes are server-wide, so a pass that ignored namespaces would join
+        # them and write a->c that belongs to neither tenant.
+        a = ins("tok-a", "a")
+        b = ins("tok-a", "b")
+        c = ins("tok-b", "c")
+        ins("tok-a", "a in b", {"s": a, "p": "part_of", "o": {"id": b}})
+        ins("tok-b", "b in c", {"s": b, "p": "part_of", "o": {"id": c}})
+        time.sleep(3)
+
+        for tok in ("tok-a", "tok-b"):
+            r = srv.req({"operation": "search", "token": tok,
+                         "pattern": {"s": a, "p": "part_of", "o": {"id": c}},
+                         "top_k": 5})
+            check(len(r.get("records", [])) == 0,
+                  f"{tok} sees no cross-tenant conclusion")
+
+        # And within one tenant the same rule does fire, so the test is not
+        # merely observing that inference is off.
+        d2 = ins("tok-b", "d")
+        ins("tok-b", "c in d", {"s": c, "p": "part_of", "o": {"id": d2}})
+        _await_derived(srv, at_least=1, token="admintok")
+        r = srv.req({"operation": "search", "token": "tok-b",
+                     "pattern": {"s": b, "p": "part_of", "o": {"id": d2}},
+                     "top_k": 5})
+        check(len(r.get("records", [])) == 1,
+              "but a rule inside one tenant still fires")
+        check(r["records"][0].get("agent_id") == "beta",
+              "and the conclusion carries its premises' namespace")
+
+
 def test_typed_facts(binary, port):
     print("[typed facts: stored, echoed, indexed, rebuilt (ROADMAP 5.2)]")
     datadir = tempfile.mkdtemp(prefix="aegis_facts_")
@@ -3610,6 +3823,9 @@ def main():
     test_pattern_search(binary, 19552)
     test_pattern_search_disabled_and_isolated(binary, 19553)
     test_predicate_registry(binary, 19570)
+    test_inference_job(binary, 19572)
+    test_inference_respects_namespaces(binary, 19573)
+    test_inference_flag_validation(binary, 19575)
     test_predicate_registry_refuses_to_start(binary, 19551)
     test_codec_gate_with_a_real_v3_frame(binary, 19568)  # uses port, +1
     test_typed_facts_replica_parity(binary, 19548)  # uses port, +1 (repl stream), +2 (replica)

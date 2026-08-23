@@ -86,6 +86,14 @@ int fact_index_by_object(const FactIndex *f, FactKind okind, uint64_t object_id,
 int fact_index_by_predicate(const FactIndex *f, const char *predicate,
                             uint64_t **out, size_t *out_n);
 
+/* Every record carrying a fact, whatever it says (ROADMAP 5.3). This is what
+ * lets the inference job read the fact set without a corpus scan: a record
+ * holds exactly one fact, so the per-predicate postings partition the set and
+ * their union is every fact-bearing record and nothing else. The job still has
+ * to load each record — depth and confidence live there, not in the index —
+ * but it loads O(facts) of them rather than O(live records). */
+int fact_index_all_records(const FactIndex *f, uint64_t **out, size_t *out_n);
+
 /* Facts currently indexed. */
 size_t fact_index_facts(const FactIndex *f);
 /* Distinct predicates carrying at least one live fact — not predicates ever

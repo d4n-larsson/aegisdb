@@ -336,6 +336,22 @@ static void stats_add_storage(cJSON *o, AegisDB *db) {
                                 (double)fact_index_facts(db->facts));
         cJSON_AddNumberToObject(idx, "fact_predicates",
                                 (double)fact_index_predicates(db->facts));
+        /* Inference (ROADMAP 5.3). `derived` counts conclusions written since
+         * start rather than live derived records, and is named for what it
+         * measures: a live count would need maintaining on every delete, and a
+         * number that drifts is worse than one that is honest about its span.
+         * `inference_deferred` is the one to alert on — permanently set means
+         * the caps are too small for the corpus and the job never reaches
+         * fixpoint, which is survivable but worth seeing. */
+        cJSON_AddNumberToObject(idx, "derived",
+                                (double)atomic_load_explicit(
+                                    &db->derived_total, memory_order_relaxed));
+        cJSON_AddNumberToObject(idx, "inference_last_ms",
+                                (double)atomic_load_explicit(
+                                    &db->infer_last_ms, memory_order_relaxed));
+        cJSON_AddNumberToObject(idx, "inference_deferred",
+                                (double)atomic_load_explicit(
+                                    &db->infer_deferred, memory_order_relaxed));
         /* Declared, not in use: 0 means no registry is configured, so every
          * predicate is accepted. Worth being able to confirm from outside. */
         cJSON_AddNumberToObject(
