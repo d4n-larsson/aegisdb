@@ -260,6 +260,15 @@ def _store_triples(texts, config, tools, extractor) -> int:
               "nothing is proposed", file=sys.stderr)
         return 0
     blob = _transcript_blob(texts, config)
+    if not blob:
+        # Same guard extract_facts uses, and it stopped being free with PR 4:
+        # until the model-backed providers had a triple target they inherited
+        # `extract_triples -> []` and never called out. Now an empty transcript
+        # would buy a completion whose prompt ends in a bare "TRANSCRIPT:",
+        # and a model answering that with invented triples would have them
+        # grounded and written — entity records minted for a session that
+        # contained nothing.
+        return 0
     try:
         res = store_triples(tools, blob, vocab, config, extractor)
     except Exception:
@@ -271,6 +280,7 @@ def _store_triples(texts, config, tools, extractor) -> int:
         print(f"[aegis-mcp] triples: {res.stored} stored, {res.proposed} "
               f"proposed, {res.rejected} out of vocabulary "
               f"({res.in_vocabulary_rate:.0%} in-vocabulary), "
+              f"{res.malformed} unusable, "
               f"{res.ungrounded} ungrounded, {res.failed} refused; entities "
               f"{res.entities_resolved} reused / {res.entities_minted} minted",
               file=sys.stderr)

@@ -31,6 +31,7 @@ class TripleStoreResult:
     stored: int = 0
     proposed: int = 0
     rejected: int = 0  # out of vocabulary, client-side
+    malformed: int = 0  # well-formed JSON, unusable as a triple
     ungrounded: int = 0  # no entity id, and the mint cap was spent
     duplicate: int = 0  # the corpus already asserts exactly this
     failed: int = 0  # the server refused the write
@@ -41,9 +42,13 @@ class TripleStoreResult:
     def in_vocabulary_rate(self) -> float:
         """The number 5.4 is judged on. Reported even when nothing was stored,
         because a registry that rejects most of what the model proposes and one
-        that fits the corpus look identical from the accepted count alone."""
-        return (self.proposed - self.rejected) / self.proposed \
-            if self.proposed else 0.0
+        that fits the corpus look identical from the accepted count alone.
+
+        Malformed candidates leave the denominator: they never put a predicate
+        to the registry, so counting them would move the vocabulary number for
+        a reason that has nothing to do with vocabulary."""
+        testable = self.proposed - self.malformed
+        return (testable - self.rejected) / testable if testable > 0 else 0.0
 
 
 def render(subject: str, predicate: str, obj: str) -> str:
@@ -109,6 +114,7 @@ def store_triples(tools, text, vocab, config, extractor) -> TripleStoreResult:
     checked = validate_triples(cands, vocab)
     res.proposed = checked.proposed
     res.rejected = len(checked.rejected)
+    res.malformed = len(checked.malformed)
     if not checked.accepted:
         return res
 
