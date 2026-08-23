@@ -51,9 +51,12 @@ declaration in a config file and two facts already in the log.
   Choosing which of two conflicting facts survives is a judgment, and this layer
   does not make judgments — that is what `supersedes` and a human or a model
   are for.
-- **Not entity resolution.** Still 5.4. Two records denoting the same thing
-  stay two things here, which is precisely why the `is_a` taxonomy has to be
-  authored rather than inferred.
+- **Not entity resolution.** Still 5.4 (`neuro-symbolic-design.md` §4). Two
+  records denoting the same thing stay two things here, which is precisely why
+  the `is_a` taxonomy has to be authored rather than inferred. 5.4 also consumes
+  what this horizon produces without extending it: the model verbalizes an
+  `explain.derivation` it cannot alter, and adjudicates the contradictions §4.3
+  reports but refuses to settle.
 - **Not a new query surface.** `pattern` gains reach (§4.2) but not syntax. No
   variables, no joins — the 5.2 line holds.
 
