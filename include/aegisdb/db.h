@@ -117,6 +117,10 @@ typedef struct {
      * previous one, so a pass that reached the end does not skip anything on
      * the next tick. The rest is what `stats` reports. */
     atomic_uint_fast64_t infer_cursor;
+    /* Which namespace group the next pass starts with. The write budget is
+     * shared across tenants, so visiting them in a fixed order would starve
+     * whoever sorts last behind whoever is busiest. */
+    atomic_uint_fast64_t infer_ns_cursor;
     atomic_uint_fast64_t derived_total; /* conclusions written since start */
     atomic_uint_fast64_t infer_last_ms;
     atomic_uint_fast64_t infer_deferred; /* a cap stopped the last pass */

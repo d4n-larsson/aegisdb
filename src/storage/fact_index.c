@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "aegisdb/hash_mix.h"
+#include "aegisdb/logging.h"
 
 /* Predicate interning: string-keyed and low-cardinality, so a fixed chained
  * table (tag_index's shape). The subject/object tables are keyed by values that
@@ -683,7 +684,14 @@ int fact_index_all_records(const FactIndex *f, uint64_t **out, size_t *out_n) {
     for (size_t i = 0; i < FACT_MAX_PREDICATES; i++) {
         for (size_t j = 0; j < f->pred_n[i]; j++) {
             if (n == f->facts) {
-                free(res); /* accounting drift: refuse rather than overrun */
+                /* The postings hold more than `facts` says: the two have
+                 * drifted. Refuse rather than overrun — and say so, because
+                 * the only other symptom is inference quietly never running
+                 * again, which looks exactly like a settled corpus. */
+                LOG_WARN("fact index: postings exceed the fact count (%zu); "
+                         "enumeration refused",
+                         f->facts);
+                free(res);
                 return -1;
             }
             res[n++] = f->pred_recs[i][j];

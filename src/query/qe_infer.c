@@ -162,8 +162,23 @@ static int write_conclusion(AegisDB *db, const InferConclusion *c,
      * the routes still name it, and retraction will act on that. */
     for (size_t i = 0; i < c->route_count; i++) {
         for (size_t j = 0; j < c->routes[i].premise_count; j++) {
-            (void)qe_relate(db, written.id, c->routes[i].premises[j],
-                            "derived_from", ns && *ns ? ns : NULL);
+            aegis_status_t rst =
+                qe_relate(db, written.id, c->routes[i].premises[j],
+                          "derived_from", ns && *ns ? ns : NULL);
+            /* NOT_FOUND is the benign race: a premise tombstoned since the
+             * pass read it. The record's routes still name it, so retraction
+             * has what it needs. Anything else is not benign and must not be
+             * silent — notably NOT_READY, since qe_relate requires phase 4
+             * while a semantic insert needs only phase 2, so a server below
+             * phase 4 would otherwise write every conclusion with no
+             * provenance edges at all and say nothing. */
+            if (rst != AEGIS_OK && rst != AEGIS_ERR_NOT_FOUND) {
+                LOG_WARN("inference: record %llu could not link premise %llu "
+                         "(%d); its routes still name it",
+                         (unsigned long long)written.id,
+                         (unsigned long long)c->routes[i].premises[j],
+                         (int)rst);
+            }
         }
     }
     record_free(&written);
@@ -179,7 +194,8 @@ out:
 /* One namespace's pass. Returns the number of conclusions written, and sets
  * *deferred when a cap stopped it short. */
 static size_t run_namespace(AegisDB *db, const LoadedFact *facts, size_t n,
-                            const char *ns, size_t budget, int *deferred) {
+                            const char *ns, size_t budget, size_t *cand_budget,
+                            int *deferred) {
     InferFact *in = calloc(n, sizeof(*in));
     if (!in) {
         return 0;
@@ -199,7 +215,11 @@ static size_t run_namespace(AegisDB *db, const LoadedFact *facts, size_t n,
     InferOpts opts = {0};
     opts.max_depth = (uint16_t)db->config.inference_max_depth;
     opts.max_conclusions = budget;
-    opts.max_candidates = db->config.inference_max_candidates;
+    /* Shared across namespaces, not reset per group: a per-group cap would
+     * make a tick's real ceiling groups × the cap, which on a server with many
+     * tenants whose closures are already materialized is exactly the unbounded
+     * work the candidate budget exists to prevent. */
+    opts.max_candidates = *cand_budget;
     opts.confidence_floor = db->config.inference_confidence_floor;
     /* Rotate the scan so a budgeted pass eventually reaches every fact rather
      * than re-examining the same prefix each tick. */
@@ -217,10 +237,18 @@ static size_t run_namespace(AegisDB *db, const LoadedFact *facts, size_t n,
             written++;
         }
     }
+    *cand_budget -= res.candidates_examined < *cand_budget
+                        ? res.candidates_examined
+                        : *cand_budget;
     if (res.truncated) {
         *deferred = 1;
+        /* Advanced by facts, not candidates: start_index is a position in the
+         * fact array, and one fact can yield as many candidates as it has join
+         * partners. Advancing by the wrong unit skips facts wholesale, and a
+         * candidate count that happens to be a multiple of the fact count
+         * makes the rotation a no-op — the same prefix forever. */
         atomic_fetch_add_explicit(&db->infer_cursor,
-                                  (uint_fast64_t)res.candidates_examined,
+                                  (uint_fast64_t)res.facts_scanned,
                                   memory_order_relaxed);
     }
     infer_result_free(&res);
@@ -239,35 +267,69 @@ size_t db_inference_step(AegisDB *db) {
         return 0;
     }
 
-    LoadedFact *facts = NULL;
-    size_t n = 0;
-    if (load_facts(db, &facts, &n) != 0 || n == 0) {
-        free_loaded(facts, n);
-        return 0;
-    }
-
     uint64_t t0 = db_now_ms();
-    size_t budget = db->config.inference_max_derived;
     size_t total = 0;
     int deferred = 0;
-    /* Grouped by namespace, so no rule ever joins two tenants' facts. */
-    size_t i = 0;
-    while (i < n) {
+    LoadedFact *facts = NULL;
+    size_t n = 0;
+    if (load_facts(db, &facts, &n) != 0) {
+        LOG_WARN("inference: could not read the fact set; skipping this pass");
+        goto done;
+    }
+    if (n == 0) {
+        goto done;
+    }
+
+    /* Namespace boundaries, so no rule ever joins two tenants' facts. */
+    size_t starts[64];
+    size_t ngroups = 0;
+    for (size_t i = 0; i < n && ngroups < 64;) {
+        starts[ngroups++] = i;
         size_t j = i;
         while (j < n && strcmp(facts[j].ns, facts[i].ns) == 0) {
             j++;
         }
-        size_t left = budget > total ? budget - total : 0;
-        if (left == 0) {
-            deferred = 1; /* namespaces after this one wait for the next tick */
-            break;
-        }
-        total +=
-            run_namespace(db, &facts[i], j - i, facts[i].ns, left, &deferred);
         i = j;
     }
-    free_loaded(facts, n);
 
+    size_t derived_budget = db->config.inference_max_derived;
+    size_t cand_budget = db->config.inference_max_candidates;
+    /* Groups are visited round-robin from a rotating offset. Always starting
+     * at the first would let one busy tenant consume the whole write budget
+     * every tick and starve every tenant that sorts after it — the budget is
+     * shared, and strcmp order is not a fairness policy. */
+    size_t g0 = ngroups ? (size_t)atomic_load_explicit(&db->infer_ns_cursor,
+                                                       memory_order_relaxed) %
+                              ngroups
+                        : 0;
+    size_t advanced = 0;
+    for (size_t k = 0; k < ngroups; k++) {
+        size_t g = (g0 + k) % ngroups;
+        size_t lo = starts[g];
+        size_t hi = (g + 1 < ngroups) ? starts[g + 1] : n;
+        if (derived_budget == 0 || cand_budget == 0) {
+            deferred = 1; /* the groups not reached wait for the next tick */
+            break;
+        }
+        size_t got = run_namespace(db, &facts[lo], hi - lo, facts[lo].ns,
+                                   derived_budget, &cand_budget, &deferred);
+        derived_budget -= got < derived_budget ? got : derived_budget;
+        total += got;
+        advanced = k + 1;
+    }
+    /* Resume at the group after the last one reached, so the next tick starts
+     * where this one ran out rather than repeating the same prefix. */
+    if (deferred && ngroups) {
+        atomic_store_explicit(&db->infer_ns_cursor,
+                              (uint_fast64_t)((g0 + advanced) % ngroups),
+                              memory_order_relaxed);
+    }
+
+done:
+    free_loaded(facts, n);
+    /* Stored on every path, including the ones that did nothing: an operator
+     * is told to alert on inference_deferred staying set, so leaving a stale 1
+     * behind after the work drained away would be a permanent false alarm. */
     atomic_store_explicit(&db->infer_last_ms, db_now_ms() - t0,
                           memory_order_relaxed);
     atomic_store_explicit(&db->infer_deferred, deferred ? 1 : 0,

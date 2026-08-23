@@ -1282,6 +1282,40 @@ def test_inference_job(binary, port):
               == 0, "and reports no deferred work")
 
 
+def test_inference_flag_validation(binary, port):
+    print("[inference: a cap that cannot mean what it says refuses to start]")
+
+    def try_start(extra):
+        datadir = tempfile.mkdtemp(prefix="aegis_inferflag_")
+        proc = subprocess.Popen(
+            [binary, "--data-dir", datadir, "--port", str(port)] + extra,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            _, errout = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return None, b""
+        return proc.returncode, errout
+
+    # The pass carries depth as a uint16. 65536 truncates to 0, which reads as
+    # "unset" and silently restores the default — an operator asking for a
+    # deeper chain would get a shallower one and never know.
+    rc, err = try_start(["--inference-max-depth", "65536"])
+    check(rc is not None and rc != 0, "a max-depth past uint16 refuses to start")
+    check(b"65535" in err, "and the message says what the bound is")
+
+    # Documented in the design's flag table, so it has to exist: following the
+    # doc must not produce "unknown argument".
+    rc, err = try_start(["--inference-confidence-floor", "0.25", "--help"])
+    check(rc == 0 and b"unknown" not in err.lower(),
+          "--inference-confidence-floor is accepted")
+    for bad in ("0", "1.5", "abc"):
+        rc, err = try_start(["--inference-confidence-floor", bad])
+        check(rc is not None and rc != 0,
+              f"a confidence floor of {bad!r} refuses to start")
+
+
 def test_inference_respects_namespaces(binary, port):
     print("[inference: a rule never joins two tenants' facts]")
     d = tempfile.mkdtemp(prefix="aegis_infer_ns_")
@@ -3791,6 +3825,7 @@ def main():
     test_predicate_registry(binary, 19570)
     test_inference_job(binary, 19572)
     test_inference_respects_namespaces(binary, 19573)
+    test_inference_flag_validation(binary, 19575)
     test_predicate_registry_refuses_to_start(binary, 19551)
     test_codec_gate_with_a_real_v3_frame(binary, 19568)  # uses port, +1
     test_typed_facts_replica_parity(binary, 19548)  # uses port, +1 (repl stream), +2 (replica)

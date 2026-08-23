@@ -467,7 +467,9 @@ int infer_run(const InferFact *facts, size_t nfacts,
      * would grow with the corpus; counting candidates is what actually bounds
      * a tick. Rotating the start is what keeps a budgeted pass from examining
      * the same prefix forever and never reaching the rest. */
+    size_t scanned = 0;
     for (size_t k = 0; k < nfacts && !stop; k++) {
+        scanned = k + 1;
         const InferFact *f = &facts[(start + k) % nfacts];
         if (f->object_kind != FACT_OBJ_ID) {
             continue;
@@ -540,6 +542,7 @@ int infer_run(const InferFact *facts, size_t nfacts,
     out->items = out_buf.items;
     out->n = out_buf.n;
     out->candidates_examined = cands;
+    out->facts_scanned = scanned;
     out_buf.items = NULL;
     rc = 0;
 done:
