@@ -73,6 +73,13 @@ typedef enum {
  * one has room, and small enough that the array is never a memory concern. */
 #define DERIV_MAX_PREMISES 8
 
+/* Independent justifications kept per conclusion. Support is *disjunctive*: a
+ * conclusion stands while any one route's premises are all live, so retraction
+ * must not fire on the first broken route. Past this cap the lowest-id routes
+ * are the ones kept — dropping a route can only cause a conclusion to be
+ * retracted and then re-derived, never a wrong answer. */
+#define DERIV_MAX_ROUTES 4
+
 /* How a derived record came to exist (ROADMAP 5.3): which rule fired, how deep
  * in a chain it sits, and which records it was concluded from.
  *
@@ -84,14 +91,25 @@ typedef enum {
  * also what lets recovery reconcile every derived record against its premises
  * without consulting an index at all (docs/inference-design.md §6).
  *
- * `rule == DERIV_NONE` is the default and means the record was asserted, not
+ * `route_count == 0` is the default and means the record was asserted, not
  * derived — in which case it encodes exactly as it did before 5.3. */
+/* One way the conclusion follows: a rule, the records it fired on, and how deep
+ * that particular chain runs. */
 typedef struct {
     DerivRule rule;
-    uint16_t depth;     /* 0 for a conclusion drawn only from assertions */
-    uint64_t *premises; /* owned; non-NULL exactly when rule != DERIV_NONE */
-    size_t premise_count;
+    uint16_t depth; /* 0 when drawn only from assertions */
+    uint64_t premises[DERIV_MAX_PREMISES];
+    uint8_t premise_count;
+} DerivRoute;
+
+typedef struct {
+    DerivRoute *routes; /* owned; non-NULL exactly when route_count > 0 */
+    size_t route_count; /* 0 = asserted, not derived */
 } Derivation;
+
+/* The shallowest justification, which is the depth a further conclusion should
+ * be measured from. 0 for an underived record. */
+uint16_t derivation_depth(const Derivation *d);
 
 /* Primary persisted (or RAM-held, for working) entity.
  * All pointer fields are owned by the record and freed by record_free(). */
@@ -157,19 +175,25 @@ int record_set_fact(MemoryRecord *r, FactKind kind, uint64_t subject,
                     const char *predicate, uint64_t object_id,
                     const char *object_str);
 
-/* Set (or clear) the record's derivation, copying the premise ids and releasing
- * whatever was there. Pass DERIV_NONE to clear; otherwise `premises` must hold
- * 1..DERIV_MAX_PREMISES ids. Returns 0, or -1 on a bad argument combination or
- * allocation failure (in which case the previous derivation is left intact).
+/* Append one justification, copying the premise ids. `premises` must hold
+ * 1..DERIV_MAX_PREMISES ids. Returns 0 when the route was added; 1 when it was
+ * already present or DERIV_MAX_ROUTES is full (neither is an error — support is
+ * disjunctive, so a further route is redundant by construction); -1 on a bad
+ * argument combination or allocation failure, in which case the record's
+ * existing routes are left intact. Routes are kept ordered by premise ids, so
+ * a record's provenance does not depend on the order they were added in.
  *
- * A derived record must also carry the `fact` its derivation explains: every
- * 5.3 rule concludes a triple, so provenance without a conclusion is
- * provenance for nothing. That invariant is *not* checked here — the two
- * fields are set independently and either order is fine — but record_encode
- * refuses the record, so setting one without the other turns into a failed
- * write rather than a bad frame. */
-int record_set_derivation(MemoryRecord *r, DerivRule rule, uint16_t depth,
-                          const uint64_t *premises, size_t n);
+ * A derived record must also carry the `fact` its routes explain: every 5.3
+ * rule concludes a triple, so provenance without a conclusion is provenance for
+ * nothing. That invariant is *not* checked here — the two fields are set
+ * independently and either order is fine — but record_encode refuses the
+ * record, so setting one without the other is a failed write, not a bad
+ * frame. */
+int record_add_route(MemoryRecord *r, DerivRule rule, uint16_t depth,
+                     const uint64_t *premises, size_t n);
+
+/* Drop every route, making the record asserted again. */
+void record_clear_derivation(MemoryRecord *r);
 
 /* Codec versions of the on-disk record encoding. v1 held a single embedding;
  * v2 added multi-vector; v3 added the optional Fact above; v4 added the optional

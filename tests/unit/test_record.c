@@ -670,8 +670,8 @@ static void test_derived_record_roundtrips_as_v4(void) {
     src.data_len = 11;
     TEST_ASSERT_EQUAL_INT(
         0, record_set_fact(&src, FACT_OBJ_ID, 12, "part_of", 56, NULL));
-    TEST_ASSERT_EQUAL_INT(
-        0, record_set_derivation(&src, DERIV_TRANSITIVE, 2, prem, 2));
+    TEST_ASSERT_EQUAL_INT(0,
+                          record_add_route(&src, DERIV_TRANSITIVE, 2, prem, 2));
 
     uint8_t *buf = NULL;
     size_t n = 0;
@@ -680,11 +680,12 @@ static void test_derived_record_roundtrips_as_v4(void) {
 
     MemoryRecord out;
     TEST_ASSERT_EQUAL_INT(0, record_decode(buf, n, &out));
-    TEST_ASSERT_EQUAL_INT(DERIV_TRANSITIVE, out.derivation.rule);
-    TEST_ASSERT_EQUAL_UINT16(2, out.derivation.depth);
-    TEST_ASSERT_EQUAL_size_t(2, out.derivation.premise_count);
-    TEST_ASSERT_EQUAL_UINT64(88, out.derivation.premises[0]);
-    TEST_ASSERT_EQUAL_UINT64(91, out.derivation.premises[1]);
+    TEST_ASSERT_EQUAL_size_t(1, out.derivation.route_count);
+    TEST_ASSERT_EQUAL_INT(DERIV_TRANSITIVE, out.derivation.routes[0].rule);
+    TEST_ASSERT_EQUAL_UINT16(2, out.derivation.routes[0].depth);
+    TEST_ASSERT_EQUAL_UINT8(2, out.derivation.routes[0].premise_count);
+    TEST_ASSERT_EQUAL_UINT64(88, out.derivation.routes[0].premises[0]);
+    TEST_ASSERT_EQUAL_UINT64(91, out.derivation.routes[0].premises[1]);
     /* the fact it explains survives alongside it */
     TEST_ASSERT_EQUAL_INT(FACT_OBJ_ID, out.fact.kind);
     TEST_ASSERT_EQUAL_STRING("part_of", out.fact.predicate);
@@ -712,9 +713,8 @@ static void test_v3_frame_decodes_with_no_derivation(void) {
 
     MemoryRecord out;
     TEST_ASSERT_EQUAL_INT(0, record_decode(buf, n, &out));
-    TEST_ASSERT_EQUAL_INT(DERIV_NONE, out.derivation.rule);
-    TEST_ASSERT_NULL(out.derivation.premises);
-    TEST_ASSERT_EQUAL_size_t(0, out.derivation.premise_count);
+    TEST_ASSERT_EQUAL_size_t(0, out.derivation.route_count);
+    TEST_ASSERT_NULL(out.derivation.routes);
     record_free(&out);
     free(buf);
     record_free(&src);
@@ -731,18 +731,19 @@ static void test_decode_rejects_unknown_deriv_rule(void) {
     src.data_len = 7;
     TEST_ASSERT_EQUAL_INT(
         0, record_set_fact(&src, FACT_OBJ_ID, 1, "part_of", 2, NULL));
-    TEST_ASSERT_EQUAL_INT(
-        0, record_set_derivation(&src, DERIV_SYMMETRIC, 1, prem, 1));
+    TEST_ASSERT_EQUAL_INT(0,
+                          record_add_route(&src, DERIV_SYMMETRIC, 1, prem, 1));
     uint8_t *buf = NULL;
     size_t n = 0;
     TEST_ASSERT_EQUAL_INT(0, record_encode(&src, &buf, &n));
 
     /* Same fixed-offset reasoning as the fact-kind test: no agent_id, tags,
      * vectors or relationships, so the fact block starts at 59 and occupies
-     * kind 1 + subject 8 + predlen 4 + "part_of" 7 + object_id 8 = 28. The rule
-     * byte therefore sits at 87. Asserted before it is corrupted, so a format
-     * change fails loudly here rather than testing the wrong byte. */
-    const size_t RULE_OFF = 87;
+     * kind 1 + subject 8 + predlen 4 + "part_of" 7 + object_id 8 = 28, ending
+     * at 87. The derivation opens with a u16 route count, so the first route's
+     * rule byte sits at 89. Asserted before it is corrupted, so a format change
+     * fails loudly here rather than testing the wrong byte. */
+    const size_t RULE_OFF = 89;
     TEST_ASSERT_TRUE(n > RULE_OFF);
     TEST_ASSERT_EQUAL_UINT8((uint8_t)DERIV_SYMMETRIC, buf[RULE_OFF]);
 
@@ -768,20 +769,24 @@ static void test_decode_rejects_premise_count_past_cap(void) {
     src.data_len = 7;
     TEST_ASSERT_EQUAL_INT(
         0, record_set_fact(&src, FACT_OBJ_ID, 1, "part_of", 2, NULL));
-    TEST_ASSERT_EQUAL_INT(
-        0, record_set_derivation(&src, DERIV_SYMMETRIC, 1, prem, 1));
+    TEST_ASSERT_EQUAL_INT(0,
+                          record_add_route(&src, DERIV_SYMMETRIC, 1, prem, 1));
     uint8_t *buf = NULL;
     size_t n = 0;
     TEST_ASSERT_EQUAL_INT(0, record_encode(&src, &buf, &n));
 
-    const size_t COUNT_OFF = 87 + 1 + 2; /* rule, depth, then the u16 count */
+    /* route count 2 + rule 1 + depth 2, then the route's u8 premise count */
+    const size_t COUNT_OFF = 87 + 2 + 1 + 2;
     TEST_ASSERT_TRUE(n > COUNT_OFF + 1);
     TEST_ASSERT_EQUAL_UINT8(1, buf[COUNT_OFF]);
     buf[COUNT_OFF] = DERIV_MAX_PREMISES + 1;
     MemoryRecord out;
     TEST_ASSERT_EQUAL_INT(-1, record_decode(buf, n, &out));
-    buf[COUNT_OFF] = 0; /* zero premises is not a derivation either */
+    buf[COUNT_OFF] = 0; /* zero premises is not a justification either */
     TEST_ASSERT_EQUAL_INT(-1, record_decode(buf, n, &out));
+    buf[COUNT_OFF] = 1; /* restored: decodes again */
+    TEST_ASSERT_EQUAL_INT(0, record_decode(buf, n, &out));
+    record_free(&out);
     free(buf);
     record_free(&src);
 }
@@ -795,15 +800,14 @@ static void test_encode_refuses_derivation_without_fact(void) {
     r.id = 4;
     r.data = strdup("x");
     r.data_len = 1;
-    TEST_ASSERT_EQUAL_INT(0,
-                          record_set_derivation(&r, DERIV_INVERSE, 0, prem, 1));
+    TEST_ASSERT_EQUAL_INT(0, record_add_route(&r, DERIV_INVERSE, 0, prem, 1));
     uint8_t *buf = NULL;
     size_t n = 0;
     TEST_ASSERT_EQUAL_INT(-1, record_encode(&r, &buf, &n));
     record_free(&r);
 }
 
-static void test_set_derivation_validates_and_clears(void) {
+static void test_add_route_validates_dedups_and_clears(void) {
     const uint64_t prem[] = {1, 2, 3};
     uint64_t many[DERIV_MAX_PREMISES + 1];
     for (size_t i = 0; i < DERIV_MAX_PREMISES + 1; i++) {
@@ -812,34 +816,121 @@ static void test_set_derivation_validates_and_clears(void) {
     MemoryRecord r;
     record_init(&r);
     /* premises are required, and bounded */
-    TEST_ASSERT_EQUAL_INT(
-        -1, record_set_derivation(&r, DERIV_TRANSITIVE, 0, NULL, 0));
-    TEST_ASSERT_EQUAL_INT(
-        -1, record_set_derivation(&r, DERIV_TRANSITIVE, 0, prem, 0));
     TEST_ASSERT_EQUAL_INT(-1,
-                          record_set_derivation(&r, DERIV_TRANSITIVE, 0, many,
-                                                DERIV_MAX_PREMISES + 1));
+                          record_add_route(&r, DERIV_TRANSITIVE, 0, NULL, 0));
+    TEST_ASSERT_EQUAL_INT(-1,
+                          record_add_route(&r, DERIV_TRANSITIVE, 0, prem, 0));
+    TEST_ASSERT_EQUAL_INT(-1, record_add_route(&r, DERIV_TRANSITIVE, 0, many,
+                                               DERIV_MAX_PREMISES + 1));
     /* an unknown rule is refused — including the sentinel, which exists only
      * to trip the codec-bump assertion and must never reach a record */
+    TEST_ASSERT_EQUAL_INT(-1, record_add_route(&r, (DerivRule)7, 0, prem, 1));
     TEST_ASSERT_EQUAL_INT(-1,
-                          record_set_derivation(&r, (DerivRule)7, 0, prem, 1));
-    TEST_ASSERT_EQUAL_INT(
-        -1, record_set_derivation(&r, DERIV_RULE_COUNT, 0, prem, 1));
-    TEST_ASSERT_EQUAL_INT(DERIV_NONE, r.derivation.rule);
+                          record_add_route(&r, DERIV_RULE_COUNT, 0, prem, 1));
+    TEST_ASSERT_EQUAL_size_t(0, r.derivation.route_count);
 
-    /* set, then replace, then clear — the old array goes each time */
-    TEST_ASSERT_EQUAL_INT(
-        0, record_set_derivation(&r, DERIV_TRANSITIVE, 1, prem, 3));
-    TEST_ASSERT_EQUAL_size_t(3, r.derivation.premise_count);
-    TEST_ASSERT_EQUAL_INT(0,
-                          record_set_derivation(&r, DERIV_INVERSE, 2, prem, 1));
-    TEST_ASSERT_EQUAL_INT(DERIV_INVERSE, r.derivation.rule);
-    TEST_ASSERT_EQUAL_size_t(1, r.derivation.premise_count);
-    TEST_ASSERT_EQUAL_UINT16(2, r.derivation.depth);
-    TEST_ASSERT_EQUAL_INT(0, record_set_derivation(&r, DERIV_NONE, 0, NULL, 0));
-    TEST_ASSERT_EQUAL_INT(DERIV_NONE, r.derivation.rule);
-    TEST_ASSERT_NULL(r.derivation.premises);
+    /* routes accumulate — support is disjunctive, so a second one adds to the
+     * first rather than replacing it */
+    const uint64_t a[] = {5, 6};
+    const uint64_t b[] = {3, 4};
+    TEST_ASSERT_EQUAL_INT(0, record_add_route(&r, DERIV_TRANSITIVE, 1, a, 2));
+    TEST_ASSERT_EQUAL_INT(0, record_add_route(&r, DERIV_TRANSITIVE, 2, b, 2));
+    TEST_ASSERT_EQUAL_size_t(2, r.derivation.route_count);
+    /* and are kept ordered, so provenance does not depend on insertion order */
+    TEST_ASSERT_EQUAL_UINT64(3, r.derivation.routes[0].premises[0]);
+    TEST_ASSERT_EQUAL_UINT64(5, r.derivation.routes[1].premises[0]);
+    /* the shallowest justification is the record's depth */
+    TEST_ASSERT_EQUAL_UINT16(1, derivation_depth(&r.derivation));
+
+    /* a repeat is redundant, not an error, and does not grow the set */
+    TEST_ASSERT_EQUAL_INT(1, record_add_route(&r, DERIV_TRANSITIVE, 1, a, 2));
+    TEST_ASSERT_EQUAL_size_t(2, r.derivation.route_count);
+
+    /* past the cap, the lowest-ordered routes are the ones kept */
+    for (uint64_t i = 0; i < DERIV_MAX_ROUTES + 4; i++) {
+        const uint64_t p2[] = {100 + i, 200 + i};
+        record_add_route(&r, DERIV_SYMMETRIC, 1, p2, 2);
+    }
+    TEST_ASSERT_EQUAL_size_t(DERIV_MAX_ROUTES, r.derivation.route_count);
+    TEST_ASSERT_EQUAL_UINT64(3, r.derivation.routes[0].premises[0]);
+    for (size_t i = 1; i < r.derivation.route_count; i++) {
+        TEST_ASSERT_TRUE(r.derivation.routes[i - 1].premises[0] <
+                         r.derivation.routes[i].premises[0]);
+    }
+
+    record_clear_derivation(&r);
+    TEST_ASSERT_EQUAL_size_t(0, r.derivation.route_count);
+    TEST_ASSERT_NULL(r.derivation.routes);
+    TEST_ASSERT_EQUAL_UINT16(0, derivation_depth(&r.derivation));
     record_free(&r);
+}
+
+/* Every justification survives the round trip, not just the first: retraction
+ * has to be able to ask whether *any* route still stands. */
+static void test_multiple_routes_roundtrip(void) {
+    const uint64_t a[] = {3, 4};
+    const uint64_t b[] = {5, 6};
+    MemoryRecord src;
+    record_init(&src);
+    src.id = 31;
+    src.data = strdup("two ways");
+    src.data_len = 8;
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_fact(&src, FACT_OBJ_ID, 1, "part_of", 2, NULL));
+    TEST_ASSERT_EQUAL_INT(0, record_add_route(&src, DERIV_TRANSITIVE, 1, a, 2));
+    TEST_ASSERT_EQUAL_INT(0, record_add_route(&src, DERIV_TRANSITIVE, 3, b, 2));
+
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&src, &buf, &n));
+    TEST_ASSERT_EQUAL_UINT8(RECORD_CODEC_V4, buf[0]);
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(0, record_decode(buf, n, &out));
+    TEST_ASSERT_EQUAL_size_t(2, out.derivation.route_count);
+    TEST_ASSERT_EQUAL_UINT64(3, out.derivation.routes[0].premises[0]);
+    TEST_ASSERT_EQUAL_UINT64(5, out.derivation.routes[1].premises[0]);
+    TEST_ASSERT_EQUAL_UINT16(1, out.derivation.routes[0].depth);
+    TEST_ASSERT_EQUAL_UINT16(3, out.derivation.routes[1].depth);
+    TEST_ASSERT_EQUAL_UINT16(1, derivation_depth(&out.derivation));
+    record_free(&out);
+    free(buf);
+    record_free(&src);
+}
+
+/* A route count of zero is not a derivation, and one past the cap cannot be
+ * read into the decoder's fixed buffer — both refused on the way in. */
+static void test_decode_rejects_bad_route_count(void) {
+    const uint64_t prem[] = {2};
+    MemoryRecord src;
+    record_init(&src);
+    src.id = 14;
+    src.data = strdup("payload");
+    src.data_len = 7;
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_fact(&src, FACT_OBJ_ID, 1, "part_of", 2, NULL));
+    TEST_ASSERT_EQUAL_INT(0,
+                          record_add_route(&src, DERIV_SYMMETRIC, 1, prem, 1));
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&src, &buf, &n));
+
+    /* The u16 route count sits where the rule byte used to: offset 87 for this
+     * record (see the fact-kind test for the arithmetic). Asserted before it is
+     * corrupted, so a format change fails loudly rather than testing the wrong
+     * byte. */
+    const size_t COUNT_OFF = 87;
+    TEST_ASSERT_TRUE(n > COUNT_OFF + 1);
+    TEST_ASSERT_EQUAL_UINT8(1, buf[COUNT_OFF]);
+    MemoryRecord out;
+    buf[COUNT_OFF] = 0;
+    TEST_ASSERT_EQUAL_INT(-1, record_decode(buf, n, &out));
+    buf[COUNT_OFF] = DERIV_MAX_ROUTES + 1;
+    TEST_ASSERT_EQUAL_INT(-1, record_decode(buf, n, &out));
+    buf[COUNT_OFF] = 1;
+    TEST_ASSERT_EQUAL_INT(0, record_decode(buf, n, &out));
+    record_free(&out);
+    free(buf);
+    record_free(&src);
 }
 
 static void test_clone_preserves_derivation(void) {
@@ -851,19 +942,20 @@ static void test_clone_preserves_derivation(void) {
     src.data_len = 1;
     TEST_ASSERT_EQUAL_INT(
         0, record_set_fact(&src, FACT_OBJ_ID, 1, "part_of", 2, NULL));
-    TEST_ASSERT_EQUAL_INT(
-        0, record_set_derivation(&src, DERIV_TRANSITIVE, 3, prem, 2));
+    TEST_ASSERT_EQUAL_INT(0,
+                          record_add_route(&src, DERIV_TRANSITIVE, 3, prem, 2));
 
     MemoryRecord *c = record_clone(&src);
     TEST_ASSERT_NOT_NULL(c);
-    TEST_ASSERT_EQUAL_INT(DERIV_TRANSITIVE, c->derivation.rule);
-    TEST_ASSERT_EQUAL_UINT16(3, c->derivation.depth);
-    TEST_ASSERT_EQUAL_size_t(2, c->derivation.premise_count);
-    TEST_ASSERT_EQUAL_UINT64(91, c->derivation.premises[1]);
+    TEST_ASSERT_EQUAL_size_t(1, c->derivation.route_count);
+    TEST_ASSERT_EQUAL_INT(DERIV_TRANSITIVE, c->derivation.routes[0].rule);
+    TEST_ASSERT_EQUAL_UINT16(3, c->derivation.routes[0].depth);
+    TEST_ASSERT_EQUAL_UINT8(2, c->derivation.routes[0].premise_count);
+    TEST_ASSERT_EQUAL_UINT64(91, c->derivation.routes[0].premises[1]);
     /* a deep copy: freeing the source leaves the clone intact */
-    TEST_ASSERT_TRUE(c->derivation.premises != src.derivation.premises);
+    TEST_ASSERT_TRUE(c->derivation.routes != src.derivation.routes);
     record_free(&src);
-    TEST_ASSERT_EQUAL_UINT64(88, c->derivation.premises[0]);
+    TEST_ASSERT_EQUAL_UINT64(88, c->derivation.routes[0].premises[0]);
     record_free(c);
     free(c);
 }
@@ -895,7 +987,9 @@ int main(void) {
     RUN_TEST(test_decode_rejects_unknown_deriv_rule);
     RUN_TEST(test_decode_rejects_premise_count_past_cap);
     RUN_TEST(test_encode_refuses_derivation_without_fact);
-    RUN_TEST(test_set_derivation_validates_and_clears);
+    RUN_TEST(test_add_route_validates_dedups_and_clears);
+    RUN_TEST(test_multiple_routes_roundtrip);
+    RUN_TEST(test_decode_rejects_bad_route_count);
     RUN_TEST(test_clone_preserves_derivation);
     RUN_TEST(test_set_fact_validates_and_clears);
     RUN_TEST(test_set_fact_switching_kinds_releases_object);

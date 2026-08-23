@@ -99,8 +99,16 @@ records were involved but not why they imply anything.
 Codec **v4** adds an optional `Derivation`:
 
 ```
-derivation := { rule: u8, depth: u16, premise_count: u16, premises: u64[] }
+derivation := { route_count: u16,
+                routes: [ { rule: u8, depth: u16,
+                            premise_count: u8, premises: u64[] } ] }
 ```
+
+A conclusion carries **every** justification it has, not one. Support is
+disjunctive — the conclusion stands while any single route's premises are all
+live — so a flattened premise list cannot answer the question retraction has to
+ask. With one list, losing any premise looks fatal and losing all of them looks
+survivable; both are wrong when two independent chains reach the same triple.
 
 Encoded between the fact and the payload, so the variable-length payload stays
 last as it always has. **A derivation requires a fact**: every rule here
@@ -330,6 +338,16 @@ scan, which is exactly what the edge index exists to avoid.
 This is the same shape as the caveat `symbolic-layer-design.md` already records
 about `consolidate`: the `supersedes` edge leaves the reverse index the moment
 it is created, because its target is tombstoned in the same breath.
+
+### Support is disjunctive
+
+A conclusion is retracted when **every** route it carries has lost a premise,
+not when the first one does. Two independent chains reaching the same triple
+each justify it on their own, so retracting on the first broken route would
+tombstone a record the log still fully supports — and the next pass would
+re-derive it under a new id, so the conclusion would flap rather than settle.
+That is what §3's route set is for: the check is "does any route survive?",
+which a flat premise list cannot express.
 
 ### Capture under the lock, retract off it
 
@@ -567,14 +585,10 @@ revertible. If the horizon stops after 4, nothing is left in a half state.
 - **The confidence number will be read as a probability.** §8 says it is not,
   in the code comment as well as here, because it will end up in a ranking
   function and look authoritative.
-- **A conclusion records one supporting route.** When two chains reach the same
-  triple, the premises written are the lowest-id route, deterministically —
-  but only one. Retracting a premise of that route retracts the conclusion even
-  though the other route still supports it, and the next pass re-derives it
-  under a new id. Bounded churn rather than a wrong answer, and the alternative
-  (disjunctive support: retract only when *every* route is broken) needs the
-  record to carry routes rather than a premise list, which codec v4 does not.
-  Revisit if the churn shows up in practice.
+- **Routes are capped at `DERIV_MAX_ROUTES` (4).** A triple reachable more ways
+  than that keeps the lowest-ordered routes. Dropping a route can only cost a
+  conclusion a retraction and a re-derivation on the next pass, never a wrong
+  answer, so the cap is a memory bound rather than a correctness one.
 - **Cap tuning is deployment-specific** and a permanently deferred backlog is
   easy not to notice. Hence `inference_deferred` in `stats` rather than a log
   line nobody greps for.

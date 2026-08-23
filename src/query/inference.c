@@ -269,74 +269,112 @@ static int out_push(OutBuf *o, const InferConclusion *c) {
     return 0;
 }
 
-/* The deepest premise, and the confidence product. Depth is *not* incremented
- * here: the caller compares this against max_depth first, because incrementing
- * a premise already at UINT16_MAX would wrap to 0 and produce a conclusion
- * indistinguishable from an asserted fact — after which the chain cap would
- * never bite again. */
-static void route_of(InferConclusion *c, const InferFact *a, const InferFact *b,
-                     float floor, uint16_t *deepest) {
+/* Build the route this pair of premises constitutes, and its confidence. Depth
+ * is *not* incremented here: the caller compares it against max_depth first,
+ * because incrementing a premise already at UINT16_MAX would wrap to 0 and
+ * produce a conclusion indistinguishable from an asserted fact — after which
+ * the chain cap would never bite again. */
+static void route_of(InferRoute *rt, float *conf_out, DerivRule rule,
+                     const InferFact *a, const InferFact *b, float floor,
+                     uint16_t *deepest) {
     uint16_t d = a->depth;
     float conf = a->confidence;
-    c->premises[0] = a->record_id;
-    c->premise_count = 1;
+    memset(rt, 0, sizeof(*rt));
+    rt->rule = rule;
+    rt->premises[0] = a->record_id;
+    rt->premise_count = 1;
     if (b) {
         if (b->depth > d) {
             d = b->depth;
         }
         conf *= b->confidence;
-        c->premises[1] = b->record_id;
-        c->premise_count = 2;
+        rt->premises[1] = b->record_id;
+        rt->premise_count = 2;
     }
     *deepest = d;
     /* The floor can raise a conclusion above its premises. That is deliberate
      * (design §8: max(product, floor)) — it keeps a long chain from decaying
      * out of ranked results — but it does mean confidence is not monotonic
      * along a chain, and it is a heuristic rather than a probability. */
-    c->confidence = conf < floor ? floor : conf;
+    *conf_out = conf < floor ? floor : conf;
 }
 
-/* A total order over the routes to one triple, so which route gets recorded
- * does not depend on the order the caller happened to pass its facts in. The
- * provenance ends up in a durable record, so "whichever we saw first" would
- * make the log a function of scan order. */
-static int route_is_better(const InferConclusion *cand,
-                           const InferConclusion *cur) {
-    if (cand->premises[0] != cur->premises[0]) {
-        return cand->premises[0] < cur->premises[0];
+/* A total order over routes, so a conclusion's provenance is a function of
+ * which routes exist rather than of the order the scan happened to find them
+ * in — the routes end up in a durable record. */
+static int route_cmp(const InferRoute *a, const InferRoute *b) {
+    size_t n = a->premise_count < b->premise_count ? a->premise_count
+                                                   : b->premise_count;
+    for (size_t i = 0; i < n; i++) {
+        if (a->premises[i] != b->premises[i]) {
+            return a->premises[i] < b->premises[i] ? -1 : 1;
+        }
     }
-    uint64_t a = cand->premise_count > 1 ? cand->premises[1] : 0;
-    uint64_t b = cur->premise_count > 1 ? cur->premises[1] : 0;
-    if (a != b) {
-        return a < b;
+    if (a->premise_count != b->premise_count) {
+        return a->premise_count < b->premise_count ? -1 : 1;
     }
-    return (int)cand->rule < (int)cur->rule;
+    if (a->rule != b->rule) {
+        return (int)a->rule < (int)b->rule ? -1 : 1;
+    }
+    return 0;
 }
 
-/* Offer one candidate conclusion to the pass. Returns 1 if it was recorded, 0
- * if the triple was already known (as an input fact, or by another route), or
- * -1 on allocation failure. `*stop` is set when a cap ends the pass. */
-static int offer(OutBuf *out, Seen *seen, const InferConclusion *c,
+/* Insert into the sorted, capped route set. Returns 1 if the set changed. */
+static int routes_insert(InferConclusion *c, const InferRoute *rt) {
+    size_t at = c->route_count;
+    for (size_t i = 0; i < c->route_count; i++) {
+        int cmp = route_cmp(rt, &c->routes[i]);
+        if (cmp == 0) {
+            return 0; /* disjunctive: a repeat carries no information */
+        }
+        if (cmp < 0) {
+            at = i;
+            break;
+        }
+    }
+    if (c->route_count >= DERIV_MAX_ROUTES) {
+        if (at >= DERIV_MAX_ROUTES) {
+            return 0;
+        }
+        memmove(&c->routes[at + 1], &c->routes[at],
+                (DERIV_MAX_ROUTES - at - 1) * sizeof(*rt));
+        c->routes[at] = *rt;
+        return 1;
+    }
+    memmove(&c->routes[at + 1], &c->routes[at],
+            (c->route_count - at) * sizeof(*rt));
+    c->routes[at] = *rt;
+    c->route_count++;
+    return 1;
+}
+
+/* Offer one candidate route to the pass. Returns 1 if a new conclusion was
+ * recorded, 0 if the triple was already known (as an input fact, or by another
+ * route — in which case the route is merged into it), or -1 on allocation
+ * failure. `*stop` is set when a cap ends the pass. */
+static int offer(OutBuf *out, Seen *seen, uint64_t subject,
+                 const char *predicate, FactKind okind, uint64_t oid,
+                 const char *ostr, const InferRoute *rt, float conf,
                  uint16_t deepest, uint16_t max_depth, size_t max_conc,
                  int *stop, int *truncated) {
     /* Compared before the increment, so a premise at UINT16_MAX cannot wrap. */
     if (deepest >= max_depth) {
         return 0;
     }
-    SeenSlot *slot = seen_find(seen, c->subject, c->predicate, c->object_kind,
-                               c->object_id, c->object_str);
+    InferRoute placed = *rt;
+    placed.depth = (uint16_t)(deepest + 1);
+
+    SeenSlot *slot = seen_find(seen, subject, predicate, okind, oid, ostr);
     if (slot) {
         /* Already a fact: nothing to record, and no provenance to improve. */
         if (slot->out_idx == SEEN_INPUT) {
             return 0;
         }
         InferConclusion *cur = &out->items[slot->out_idx];
-        if (route_is_better(c, cur)) {
-            uint16_t keep_depth = cur->depth;
-            *cur = *c;
-            cur->depth = keep_depth < (uint16_t)(deepest + 1)
-                             ? keep_depth
-                             : (uint16_t)(deepest + 1);
+        routes_insert(cur, &placed);
+        /* The strongest justification wins, not the first one found. */
+        if (conf > cur->confidence) {
+            cur->confidence = conf;
         }
         return 0;
     }
@@ -348,13 +386,18 @@ static int offer(OutBuf *out, Seen *seen, const InferConclusion *c,
         *stop = 1;
         return 0;
     }
-    InferConclusion rec = *c;
-    rec.depth = (uint16_t)(deepest + 1);
+    InferConclusion rec = {0};
+    rec.subject = subject;
+    rec.predicate = predicate;
+    rec.object_kind = okind;
+    rec.object_id = oid;
+    rec.object_str = ostr;
+    rec.confidence = conf;
+    routes_insert(&rec, &placed);
     if (out_push(out, &rec) != 0) {
         return -1;
     }
-    if (seen_put(seen, rec.subject, rec.predicate, rec.object_kind,
-                 rec.object_id, rec.object_str, out->n - 1) < 0) {
+    if (seen_put(seen, subject, predicate, okind, oid, ostr, out->n - 1) < 0) {
         return -1;
     }
     return 1;
@@ -425,16 +468,13 @@ int infer_run(const InferFact *facts, size_t nfacts,
                 stop = 1;
                 break;
             }
-            InferConclusion c = {0};
+            InferRoute rt;
             uint16_t deepest = 0;
-            c.rule = DERIV_SYMMETRIC;
-            c.subject = f->object_id;
-            c.predicate = f->predicate;
-            c.object_kind = FACT_OBJ_ID;
-            c.object_id = f->subject;
-            route_of(&c, f, NULL, floor, &deepest);
-            if (offer(&out_buf, &seen, &c, deepest, max_depth, max_conc, &stop,
-                      &out->truncated) < 0) {
+            float conf = 0.0F;
+            route_of(&rt, &conf, DERIV_SYMMETRIC, f, NULL, floor, &deepest);
+            if (offer(&out_buf, &seen, f->object_id, f->predicate, FACT_OBJ_ID,
+                      f->subject, NULL, &rt, conf, deepest, max_depth, max_conc,
+                      &stop, &out->truncated) < 0) {
                 goto done;
             }
         }
@@ -445,16 +485,14 @@ int infer_run(const InferFact *facts, size_t nfacts,
                 stop = 1;
                 break;
             }
-            InferConclusion c = {0};
+            InferRoute rt;
             uint16_t deepest = 0;
-            c.rule = DERIV_INVERSE;
-            c.subject = f->object_id;
-            c.predicate = spec->inverse_of; /* borrowed from the registry */
-            c.object_kind = FACT_OBJ_ID;
-            c.object_id = f->subject;
-            route_of(&c, f, NULL, floor, &deepest);
-            if (offer(&out_buf, &seen, &c, deepest, max_depth, max_conc, &stop,
-                      &out->truncated) < 0) {
+            float conf = 0.0F;
+            route_of(&rt, &conf, DERIV_INVERSE, f, NULL, floor, &deepest);
+            /* the predicate is borrowed from the registry */
+            if (offer(&out_buf, &seen, f->object_id, spec->inverse_of,
+                      FACT_OBJ_ID, f->subject, NULL, &rt, conf, deepest,
+                      max_depth, max_conc, &stop, &out->truncated) < 0) {
                 goto done;
             }
         }
@@ -471,16 +509,13 @@ int infer_run(const InferFact *facts, size_t nfacts,
                     break;
                 }
                 const InferFact *g = &facts[next->idx[j]];
-                InferConclusion c = {0};
+                InferRoute rt;
                 uint16_t deepest = 0;
-                c.rule = DERIV_TRANSITIVE;
-                c.subject = f->subject;
-                c.predicate = f->predicate;
-                c.object_kind = FACT_OBJ_ID;
-                c.object_id = g->object_id;
-                route_of(&c, f, g, floor, &deepest);
-                if (offer(&out_buf, &seen, &c, deepest, max_depth, max_conc,
-                          &stop, &out->truncated) < 0) {
+                float conf = 0.0F;
+                route_of(&rt, &conf, DERIV_TRANSITIVE, f, g, floor, &deepest);
+                if (offer(&out_buf, &seen, f->subject, f->predicate,
+                          FACT_OBJ_ID, g->object_id, NULL, &rt, conf, deepest,
+                          max_depth, max_conc, &stop, &out->truncated) < 0) {
                     goto done;
                 }
             }
