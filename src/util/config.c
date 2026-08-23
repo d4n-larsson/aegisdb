@@ -75,6 +75,7 @@ void config_defaults(Config *cfg) {
     cfg->inference_max_depth = INFER_DEFAULT_MAX_DEPTH;
     cfg->inference_max_derived = 1000;
     cfg->inference_max_candidates = INFER_DEFAULT_MAX_CANDIDATES;
+    cfg->inference_max_subsume = 256;
     cfg->inference_confidence_floor = INFER_DEFAULT_CONFIDENCE_FLOOR;
     cfg->usage_feedback = 1; /* per-record recall feedback on by default */
     cfg->enabled_phase = 4;  /* all features enabled by default */
@@ -380,6 +381,8 @@ static void usage(const char *prog) {
         "(default 1000000)\n"
         "  --inference-confidence-floor <f>  floor under a conclusion's "
         "confidence (default 0.1)\n"
+        "  --inference-max-subsume <n>   descendants a `subsume` search "
+        "expands to (default 256)\n"
         "  --no-fact-index          skip the subject/object/predicate fact "
         "indexes (disables `pattern`)\n"
         "  --no-edge-index          skip the reverse relationship index "
@@ -574,6 +577,9 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
         } else if (strcmp(a, "--inference-max-candidates") == 0) {
             UINT_OPT(cfg->inference_max_candidates, 1, size_t,
                      "inference-max-candidates");
+        } else if (strcmp(a, "--inference-max-subsume") == 0) {
+            UINT_OPT(cfg->inference_max_subsume, 1, size_t,
+                     "inference-max-subsume");
         } else if (strcmp(a, "--inference-confidence-floor") == 0) {
             NEXT("--inference-confidence-floor");
             char *endp = NULL;

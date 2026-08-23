@@ -181,6 +181,14 @@ A `MemoryRecord` also carries `agent_id`, `embedding`, and `relationships` (an
 array of `{ "from_id", "to_id", "kind" }`) when those are set. `relationships`
 is populated by `relate` and returned by `get`, `search`, and `traverse`.
 
+**Why a record is believed (`explain.derivation`)**: with `"explain": true`, a
+record the inference job derived carries a `derivation` alongside the ranking
+breakdown — the shallowest `depth`, and each `route` with the `rule` that fired
+and its `premises`, every premise marked `live` or not. One level, not a tree: a
+premise that is itself derived carries its own `derivation` when fetched, so a
+client walks the chain by following ids. An asserted record has no `derivation`
+field at all.
+
 **Typed facts (`fact`)**: a record's `data` is prose, which can be searched by
 its words but not *asked* a question. An optional `fact` adds the same claim in a
 form a machine can match on — subject, predicate, object — without replacing the
@@ -605,6 +613,7 @@ when **both** `start_time` and `end_time` are present.
 | `match` | string | `all` (intersection) \| `any` (union); default `all` |
 | `embedding` | number[] | Semantic query vector; ranked by cosine similarity weighted by importance × confidence |
 | `pattern` | object | Filter by the typed fact a record asserts (ROADMAP 5.2); see below. Returns `NOT_READY` if the server runs with `--no-fact-index` |
+| `subsume` | boolean | With a bound `pattern.s`, also match facts about anything that reaches it through `is_a` (ROADMAP 5.3). Off by default; see below |
 | `query` | string | Lexical query text; ranked by Okapi BM25 over record payloads. Combine with `embedding` for hybrid retrieval (see below). Returns `NOT_READY` if the server runs with `--no-lexical-index` |
 | `type` | string | Filter by memory type |
 | `agent_id` | string | Namespace filter |
@@ -687,7 +696,33 @@ It is a **filter, not a ranking**: on its own it orders by time and reports
 the ranked index still chooses the candidates and the pattern removes those that
 do not assert the right thing.
 
-`count` accepts `pattern` too. Bulk `delete` deliberately **rejects** it rather
+**Subsumption (`subsume`)**: a fact about a member also answers a question
+about the category it belongs to. With `subsume: true` and a bound
+`pattern.s`, the subject matches that record *or* anything that reaches it
+through the `is_a` taxonomy:
+
+```json
+{ "operation": "search", "pattern": {"s": 7, "p": "defaults_to"},
+  "subsume": true }
+```
+
+Off by default, because it changes what a pattern *means* — a caller asking
+what record 7 defaults to should not silently receive an answer about a
+different record.
+
+It requires `--inference` and reports `NOT_READY` without it: the expansion
+reads the `is_a` closure the job materializes, and without that closure it would
+reach direct members only — a partial answer indistinguishable from a narrow
+one. That same closure is why it reaches a descendant any number of levels down
+for the cost of one index lookup rather than a graph walk.
+
+The expansion is scoped to the caller's namespace, and deduplicated per entity,
+so a membership asserted twice does not return anything twice. It is bounded by
+`--inference-max-subsume` (default 256); past the cap the response carries
+`"subsume_truncated": true`, and `count` folds the same signal into its existing
+`capped` flag.
+
+`count` accepts `pattern` and `subsume` too. Bulk `delete` deliberately **rejects** it rather
 than ignoring it: deleting by pattern would be a new destructive capability, so
 it is refused until it is asked for explicitly.
 

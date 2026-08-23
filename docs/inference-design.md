@@ -241,8 +241,23 @@ index probe rather than a graph walk.
 Opt-in, and off by default: it changes what a pattern means, and a caller asking
 "what does record 42 default to?" should not silently get an answer about a
 different record. The expansion set is capped (`--inference-max-subsume`,
-default 256 descendants); past the cap the search returns what it has and
-reports truncation in `explain`, rather than quietly narrowing.
+default 256 descendants); past the cap the search returns what it has and says
+so, rather than quietly narrowing — as `subsume_truncated` on the response, not
+inside `explain` as this section first proposed, since truncation is a property
+of the query and not of any one hit. `count` folds the same signal into its
+existing `capped` flag.
+
+Three things implementing it settled. The expansion is **scoped to the caller's
+namespace**: the fact indexes are server-wide, so an unscoped one would let
+another tenant's taxonomy decide which of *this* tenant's records answer —
+nothing of theirs leaks, but the answer set would be chosen by data the caller
+cannot see. It is **deduplicated per entity**, because nothing stops two records
+asserting the same membership and the candidate union does not dedup downstream,
+so a repeat returned every fact of that entity twice. And it **requires
+`--inference`**: without the materialized closure the expansion reaches direct
+members only, and a partial answer that looks exactly like a narrow one is the
+ambiguity this whole feature exists to remove, so it reports `NOT_READY`
+instead.
 
 This keeps `pattern` a filter. It gains no variables and no joins — one boolean
 that says which subjects count as the subject.
@@ -513,6 +528,7 @@ mid-retraction state legible instead of confusing.
 | `--inference-max-candidates` | 1000000 | conclusions considered per pass |
 | `--inference-max-depth` | 4 | chain length cap |
 | `--inference-max-derived` | 1000 | records written per pass |
+| `--inference-max-subsume` | 256 | descendants a `subsume` search expands to |
 | `--inference-max-subsume` | 256 | descendants per `subsume` expansion |
 | `--inference-confidence-floor` | 0.1 | floor on the product |
 

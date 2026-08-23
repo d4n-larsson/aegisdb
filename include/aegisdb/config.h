@@ -120,6 +120,7 @@ typedef struct {
     unsigned inference_max_depth;    /* derivation chain length cap */
     size_t inference_max_derived;    /* records written per pass */
     size_t inference_max_candidates; /* conclusions considered per pass */
+    size_t inference_max_subsume;    /* descendants in a `subsume` expansion */
     float inference_confidence_floor;
     /* Path to the predicate registry (ROADMAP 5.2), or "" for none. With no
      * registry any predicate is accepted; with one, a `fact` naming an
