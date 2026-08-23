@@ -39,7 +39,10 @@ make them possible without pre-empting them.
 - **Not typed literals.** An object literal is a string. No numbers (see §5),
   dates, durations, units, or language tags.
 - **Not entity resolution.** Deciding that two mentions denote the same thing is
-  5.4's job, on top of this.
+  5.4's job, on top of this — see `neuro-symbolic-design.md` §4, which resolves a
+  mention against entity records with 4.1's hybrid retrieval and deliberately
+  errs toward minting a new one, because a wrong merge writes facts about the
+  wrong thing while a split only loses inferences.
 - **Not a change to edge storage.** An earlier note in
   `symbolic-layer-design.md` predicted 5.2 would force the in-record
   relationship question (`MAX_RELATIONSHIPS`, the per-`relate` record rewrite).

@@ -541,6 +541,23 @@ does deterministically, at write time, for free.
   registry — measured as an in-vocabulary rate, not asserted — and a wrong
   inference is traceable to either a bad premise or a bad parse, never to an
   opaque model judgment.
+- **Designed:** `neuro-symbolic-design.md`. Three things the design settled that
+  the entry above left open. **Grounding is deliberately biased toward
+  fragmentation**: conflating two entities writes facts about the wrong thing
+  and 5.3 then derives more of them, with nothing able to detect it, while
+  splitting one entity in two only loses inferences and `consolidate` can merge
+  them afterwards — now that a merge preserves assertions. One error is
+  recoverable and the other is not, so a near-miss mints rather than guesses.
+  **A rejected triple is dropped and counted, never coerced** onto the nearest
+  declared predicate: coercion would convert the in-vocabulary rate, which is
+  the number this item is judged on, into silent corruption of what the corpus
+  asserts. And **nothing is lost by rejection** — the prose stays in `data` and
+  stays searchable, so an extraction that yields no triple degrades to exactly
+  what 2.1 does today.
+- **Sharpened:** the model reads the proof and never produces it. Verbalization
+  renders an `explain.derivation` that already exists and can be checked against
+  the record, rather than an explanation generated alongside an answer — which
+  is the arrangement that makes model reasoning unfalsifiable.
 
 ### Ground rules for the whole horizon
 
