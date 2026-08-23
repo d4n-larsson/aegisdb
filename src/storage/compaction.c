@@ -380,6 +380,12 @@ static void *maint_loop(void *arg) {
             (elapsed % c->db->config.inference_interval_sec) == 0) {
             db_inference_step(c->db);
         }
+        /* Retraction runs on its own cadence, not the inference interval: a
+         * conclusion that has lost its premises should stop being believed
+         * promptly, and the queue is usually empty so the check is free. */
+        if (c->db->config.inference && !c->db->config.read_only) {
+            db_retract_step(c->db);
+        }
         /* On a read-only replica the follower is the sole writer — it applies
          * the primary's stream verbatim (including the primary's own expiry
          * tombstones). Locally sweeping or compacting here would append/rewrite

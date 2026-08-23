@@ -1282,6 +1282,127 @@ def test_inference_job(binary, port):
               == 0, "and reports no deferred work")
 
 
+def _await_stat(srv, key, at_least, timeout=20.0):
+    """Poll one stats counter until it reaches `at_least`, and return it."""
+    deadline = time.time() + timeout
+    n = 0
+    while time.time() < deadline:
+        n = srv.req({"operation": "stats"})["indexes"].get(key, 0)
+        if n >= at_least:
+            return n
+        time.sleep(0.25)
+    return n
+
+
+def test_retraction(binary, port):
+    print("[inference: a conclusion outlives its premises by exactly nothing]")
+    d = tempfile.mkdtemp(prefix="aegis_retract_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"part_of": {"object": "id", "transitive": True}}, fh)
+    args = ["--predicate-registry", reg, "--inference",
+            "--inference-interval-sec", "1"]
+
+    with Server(binary, port, phase=4, extra_args=args) as srv:
+        def ins(data, fact=None):
+            p = {"operation": "insert", "type": "semantic", "data": data}
+            if fact:
+                p["fact"] = fact
+            return srv.req(p)["record"]["id"]
+
+        # Two independent chains a->b->e and a->c->e, so (a part_of e) has two
+        # routes. Support is disjunctive: breaking one must not retract it.
+        a, b, c, e = (ins(x) for x in ("a", "b", "c", "e"))
+        r1 = ins("a in b", {"s": a, "p": "part_of", "o": {"id": b}})
+        ins("b in e", {"s": b, "p": "part_of", "o": {"id": e}})
+        r3 = ins("a in c", {"s": a, "p": "part_of", "o": {"id": c}})
+        ins("c in e", {"s": c, "p": "part_of", "o": {"id": e}})
+        _await_fixpoint(srv)
+
+        found = srv.req({"operation": "search",
+                         "pattern": {"s": a, "p": "part_of", "o": {"id": e}},
+                         "top_k": 5}).get("records", [])
+        check(len(found) == 1, "the two-route conclusion exists")
+        conc = found[0]["id"]
+
+        # One route broken: the other still justifies it. Retracting here would
+        # tombstone a record the log fully supports.
+        srv.req({"operation": "delete", "id": r1})
+        time.sleep(3)
+        check(srv.req({"operation": "get", "id": conc}).get("ok") is True,
+              "breaking one route leaves the conclusion standing")
+
+        # Both broken: nothing justifies it any more.
+        srv.req({"operation": "delete", "id": r3})
+        retracted = _await_stat(srv, "retracted", at_least=1)
+        check(retracted >= 1, f"breaking every route retracts it ({retracted})")
+        check(srv.req({"operation": "get", "id": conc}).get("ok") is False,
+              "and the conclusion is gone")
+
+        # Retraction tombstones; it does not erase. "We believed this, because
+        # of that, until the premise went away" stays recoverable.
+        h = srv.req({"operation": "history", "id": conc})
+        check(len(h.get("versions", [])) >= 2,
+              "history still shows the conclusion and its retraction")
+
+        # An asserted record is never retracted by this machinery: a
+        # human-supplied fact whose neighbour disappeared is just a fact.
+        check(srv.req({"operation": "get", "id": a}).get("ok") is True,
+              "an asserted record is untouched by any of it")
+
+
+def test_retraction_survives_a_lost_queue(binary, port):
+    print("[inference: recovery reconciles what the queue never held]")
+    d = tempfile.mkdtemp(prefix="aegis_retract_crash_")
+    datadir = tempfile.mkdtemp(prefix="aegis_retract_crash_data_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"part_of": {"object": "id", "transitive": True}}, fh)
+    on = ["--predicate-registry", reg, "--inference",
+          "--inference-interval-sec", "1"]
+
+    with Server(binary, port, phase=4, datadir=datadir, extra_args=on) as srv:
+        def ins(data, fact=None):
+            p = {"operation": "insert", "type": "semantic", "data": data}
+            if fact:
+                p["fact"] = fact
+            return srv.req(p)["record"]["id"]
+
+        a, b, c = (ins(x) for x in ("a", "b", "c"))
+        premise = ins("a in b", {"s": a, "p": "part_of", "o": {"id": b}})
+        ins("b in c", {"s": b, "p": "part_of", "o": {"id": c}})
+        _await_fixpoint(srv)
+        conc = srv.req({"operation": "search",
+                        "pattern": {"s": a, "p": "part_of", "o": {"id": c}},
+                        "top_k": 5})["records"][0]["id"]
+        srv.graceful_stop()
+
+    # Delete the premise on a server with inference OFF. db_retract_enqueue
+    # returns early there, so the queue is *provably* empty rather than
+    # racing a tick to be emptied — which is what makes this deterministic
+    # where a kill -9 would be a coin flip. The on-disk state is exactly what
+    # a crash between the tombstone and the next pass leaves behind.
+    with Server(binary, port, phase=4, datadir=datadir,
+                extra_args=["--predicate-registry", reg]) as srv:
+        check(srv.req({"operation": "delete", "id": premise})["ok"] is True,
+              "the premise is tombstoned with no queue to catch it")
+        time.sleep(2)
+        check(srv.req({"operation": "get", "id": conc}).get("ok") is True,
+              "and the conclusion is still standing, unnoticed")
+        srv.graceful_stop()
+
+    # Restart with inference on. Nothing in the queue survived, so if the
+    # conclusion goes it is because recovery re-derived the question from the
+    # record's own premise list — which is the whole reason that list is
+    # stored rather than read back from the edge index.
+    with Server(binary, port, phase=4, datadir=datadir, extra_args=on) as srv:
+        retracted = _await_stat(srv, "retracted", at_least=1)
+        check(retracted >= 1,
+              f"recovery reconciles the orphaned conclusion ({retracted})")
+        check(srv.req({"operation": "get", "id": conc}).get("ok") is False,
+              "no live derived record is left with a dead premise")
+
+
 def test_inference_flag_validation(binary, port):
     print("[inference: a cap that cannot mean what it says refuses to start]")
 
@@ -1301,6 +1422,18 @@ def test_inference_flag_validation(binary, port):
     # The pass carries depth as a uint16. 65536 truncates to 0, which reads as
     # "unset" and silently restores the default — an operator asking for a
     # deeper chain would get a shallower one and never know.
+    # Inference without retraction is not a lesser feature, it is the failure
+    # the feature exists to prevent — conclusions pile up and nothing withdraws
+    # them. Both of these produce exactly that, silently, so both are refused.
+    rc, err = try_start(["--inference", "--phase", "3"])
+    check(rc is not None and rc != 0,
+          "--inference below phase 4 refuses to start")
+    check(b"phase 4" in err, "and says provenance edges are why")
+    rc, err = try_start(["--inference", "--no-edge-index"])
+    check(rc is not None and rc != 0,
+          "--inference with --no-edge-index refuses to start")
+    check(b"reverse edges" in err, "and says retraction is what needs them")
+
     rc, err = try_start(["--inference-max-depth", "65536"])
     check(rc is not None and rc != 0, "a max-depth past uint16 refuses to start")
     check(b"65535" in err, "and the message says what the bound is")
@@ -3826,6 +3959,8 @@ def main():
     test_inference_job(binary, 19572)
     test_inference_respects_namespaces(binary, 19573)
     test_inference_flag_validation(binary, 19575)
+    test_retraction(binary, 19576)
+    test_retraction_survives_a_lost_queue(binary, 19577)
     test_predicate_registry_refuses_to_start(binary, 19551)
     test_codec_gate_with_a_real_v3_frame(binary, 19568)  # uses port, +1
     test_typed_facts_replica_parity(binary, 19548)  # uses port, +1 (repl stream), +2 (replica)

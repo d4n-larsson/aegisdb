@@ -121,6 +121,22 @@ typedef struct {
      * shared across tenants, so visiting them in a fixed order would starve
      * whoever sorts last behind whoever is busiest. */
     atomic_uint_fast64_t infer_ns_cursor;
+    atomic_uint_fast64_t
+        retracted_total; /* conclusions retracted since start */
+    /* Conclusions whose premises may have gone away (ROADMAP 5.3 §6).
+     * qe_delete captures the dependents it is about to orphan while it still
+     * holds index_lock — the reverse edges are gone by the time it returns —
+     * and the maintenance tick drains this off-lock. Deliberately *not*
+     * durable: a derived record names its own premises, so recovery
+     * reconciles the whole live set and rebuilds whatever a crash lost. That
+     * makes the queue a fast path rather than a source of truth. */
+    struct {
+        uint64_t *ids;
+        size_t n;
+        size_t cap;
+        pthread_mutex_t lock; /* ordered BELOW index_lock: qe_delete takes this
+                               * while holding index_lock, never the reverse */
+    } retract;
     atomic_uint_fast64_t derived_total; /* conclusions written since start */
     atomic_uint_fast64_t infer_last_ms;
     atomic_uint_fast64_t infer_deferred; /* a cap stopped the last pass */
@@ -200,6 +216,36 @@ int db_semantic_build_step(AegisDB *db);
  * no-op on a read-only replica — a follower that derived locally would append
  * frames its primary never sent. See docs/inference-design.md §5. */
 size_t db_inference_step(AegisDB *db);
+
+/* Queue every derived record that cites `id` as a premise, so a later tick can
+ * decide whether it still stands. Must be called with index_lock held for
+ * write and *before* the reverse edges are torn down — qe_delete drops every
+ * edge pointing at the tombstone, so afterwards there is nothing to walk.
+ * Cheap and best-effort: what it misses, recovery reconciles. */
+void db_retract_enqueue(AegisDB *db, uint64_t id);
+
+/* Queue one record id directly, without walking the edge index. Recovery uses
+ * this: it has the record in hand and has already decided from the record's own
+ * premise list, which is the point of storing that list at all. */
+void db_retract_enqueue_id(AegisDB *db, uint64_t id);
+
+/* Drain the retraction queue: tombstone each queued conclusion that has lost
+ * *every* justification. Support is disjunctive, so a conclusion whose second
+ * route still holds is left alone. Tombstoning one queues its own dependents,
+ * so a cascade proceeds breadth-first across ticks rather than recursing under
+ * a lock. Returns the number retracted. No-op on a read-only replica. */
+size_t db_retract_step(AegisDB *db);
+
+/* Does at least one of this record's justifications still hold — every premise
+ * of some route being live? True for an underived record, which this machinery
+ * never touches: a human-supplied fact whose neighbour disappeared is not a
+ * contradiction, just a fact.
+ *
+ * Takes index_lock for read internally, so it must be called with **no** index
+ * lock held. The obvious future call site is inside qe_delete, which holds it
+ * for write — and these rwlocks are not recursive, so that would self-deadlock
+ * rather than merely block. */
+int db_derivation_stands(AegisDB *db, const MemoryRecord *r);
 
 /* Apply one replicated log frame on a read-only replica: append the payload to
  * the local log (producing a byte-identical frame at `offset`) is done by the

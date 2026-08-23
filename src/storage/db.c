@@ -633,10 +633,19 @@ static int init_db_locks(AegisDB *db) {
         pthread_mutex_destroy(&db->id_lock);
         return -1;
     }
+    if (pthread_mutex_init(&db->retract.lock, NULL) != 0) {
+        pthread_mutex_destroy(&db->compaction_lock);
+        pthread_rwlock_destroy(&db->auth_lock);
+        pthread_rwlock_destroy(&db->log_lock);
+        pthread_rwlock_destroy(&db->index_lock);
+        pthread_mutex_destroy(&db->id_lock);
+        return -1;
+    }
     return 0;
 }
 
 static void destroy_db_locks(AegisDB *db) {
+    pthread_mutex_destroy(&db->retract.lock);
     pthread_mutex_destroy(&db->id_lock);
     pthread_rwlock_destroy(&db->index_lock);
     pthread_rwlock_destroy(&db->log_lock);
@@ -830,6 +839,10 @@ void db_close(AegisDB *db) {
     tenant_table_free(db->tenants);
     free_token_array(db->config.auth_tokens, db->config.auth_token_count);
     log_close(&db->log);
+    free(db->retract.ids);
+    db->retract.ids = NULL;
+    db->retract.n = db->retract.cap = 0;
+    pthread_mutex_destroy(&db->retract.lock);
     pthread_mutex_destroy(&db->id_lock);
     pthread_rwlock_destroy(&db->index_lock);
     pthread_rwlock_destroy(&db->log_lock);

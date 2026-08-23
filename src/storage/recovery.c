@@ -139,6 +139,8 @@ long recovery_run(AegisDB *db) {
      * time/tag are always rebuilt; semantic is rebuilt fully unless a checkpoint
      * loaded, in which case only the tail (offset >= sem_covered) is applied. */
     long live = 0;
+    long stale_derived = 0;
+    const uint64_t now = db_now_ms();
     HashIndex *h = db->hash;
     for (size_t i = 0; i < h->cap; i++) {
         const HashEntry *e = &h->buckets[i];
@@ -171,6 +173,41 @@ long recovery_run(AegisDB *db) {
                 if (te && !te->deleted) {
                     edge_index_add(db->edges, r.id, r.relationships[k].to_id,
                                    r.relationships[k].kind);
+                }
+            }
+            /* Reconcile derivations against their premises (ROADMAP 5.3 §6).
+             * The retraction queue is deliberately not durable, so a crash
+             * between a premise's tombstone and the tick that would have acted
+             * on it leaves a conclusion standing on nothing. This is what makes
+             * that survivable: a derived record names its own premises, so the
+             * whole live set can be re-checked here, from the record itself
+             * and with no index involved. Pass 1 built the hash index in full,
+             * so these liveness answers are final.
+             *
+             * Queued rather than tombstoned: writing here would append frames
+             * during recovery — wrong on a primary, and forbidden on a replica,
+             * which must only ever apply what its primary sent. The first
+             * maintenance tick applies it. */
+            if (r.derivation.route_count) {
+                int stands = 0;
+                for (size_t k = 0; k < r.derivation.route_count && !stands;
+                     k++) {
+                    const DerivRoute *rt = &r.derivation.routes[k];
+                    int all_live = 1;
+                    for (size_t m = 0; m < rt->premise_count && all_live; m++) {
+                        const HashEntry *pe =
+                            hash_index_get(db->hash, rt->premises[m]);
+                        /* Expired counts as gone here too: a reader cannot see
+                         * an expired premise, so a conclusion resting on one is
+                         * already resting on nothing. */
+                        all_live = pe && !pe->deleted &&
+                                   !(pe->expires_at && now >= pe->expires_at);
+                    }
+                    stands = all_live;
+                }
+                if (!stands) {
+                    stale_derived++;
+                    db_retract_enqueue_id(db, r.id);
                 }
             }
             /* The fact indexes are derived too, so they rebuild in full here.
@@ -232,6 +269,22 @@ long recovery_run(AegisDB *db) {
         }
     }
 
+    if (stale_derived) {
+        /* A replica never drains this queue — it applies its primary's
+         * tombstones through the stream instead — so promising a maintenance
+         * pass there would tell an operator the invariant was restored when on
+         * that node it never will be. */
+        if (db->config.read_only) {
+            LOG_INFO("recovery: %ld derived record(s) outlived a premise; a "
+                     "replica does not retract, so these clear when the "
+                     "primary's own retraction reaches the stream",
+                     stale_derived);
+        } else {
+            LOG_INFO("recovery: %ld derived record(s) outlived a premise; "
+                     "queued for retraction on the first maintenance pass",
+                     stale_derived);
+        }
+    }
     LOG_DEBUG("recovery: secondary indexes populated from %ld live record(s)",
               live);
     return live;

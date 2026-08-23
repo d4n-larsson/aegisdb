@@ -165,14 +165,16 @@ static int write_conclusion(AegisDB *db, const InferConclusion *c,
             aegis_status_t rst =
                 qe_relate(db, written.id, c->routes[i].premises[j],
                           "derived_from", ns && *ns ? ns : NULL);
-            /* NOT_FOUND is the benign race: a premise tombstoned since the
-             * pass read it. The record's routes still name it, so retraction
-             * has what it needs. Anything else is not benign and must not be
-             * silent — notably NOT_READY, since qe_relate requires phase 4
-             * while a semantic insert needs only phase 2, so a server below
-             * phase 4 would otherwise write every conclusion with no
-             * provenance edges at all and say nothing. */
-            if (rst != AEGIS_OK && rst != AEGIS_ERR_NOT_FOUND) {
+            /* NOT_FOUND means the premise was tombstoned between the pass
+             * reading it and this call. That is not benign, as an earlier
+             * version of this comment claimed: the conclusion is now written
+             * already unjustified, and the premise's own qe_delete — the only
+             * thing that enqueues — ran before this record existed, so nothing
+             * would ever judge it. Queue it here instead, and let the drain
+             * decide from its routes; another route may well still hold. */
+            if (rst == AEGIS_ERR_NOT_FOUND) {
+                db_retract_enqueue_id(db, written.id);
+            } else if (rst != AEGIS_OK) {
                 LOG_WARN("inference: record %llu could not link premise %llu "
                          "(%d); its routes still name it",
                          (unsigned long long)written.id,
@@ -341,4 +343,156 @@ done:
                   deferred ? " (a cap deferred the rest)" : "");
     }
     return total;
+}
+
+/* ----- truth maintenance (ROADMAP 5.3 §6) -------------------------------- */
+
+/* Push one id, growing the queue. Caller holds retract.lock. */
+static void retract_push_locked(AegisDB *db, uint64_t id) {
+    if (db->retract.n == db->retract.cap) {
+        size_t nc = db->retract.cap ? db->retract.cap * 2 : 16;
+        uint64_t *ni = realloc(db->retract.ids, nc * sizeof(*ni));
+        if (!ni) {
+            /* Recovery reconciles the live set — but only at process start, so
+             * on a server that survives this the conclusion stays live until
+             * then. Rare enough to tolerate, not rare enough to hide. */
+            LOG_WARN("inference: retraction queue full; record %llu will not "
+                     "be re-judged until the next restart",
+                     (unsigned long long)id);
+            return;
+        }
+        db->retract.ids = ni;
+        db->retract.cap = nc;
+    }
+    db->retract.ids[db->retract.n++] = id;
+}
+
+void db_retract_enqueue_id(AegisDB *db, uint64_t id) {
+    pthread_mutex_lock(&db->retract.lock);
+    retract_push_locked(db, id);
+    pthread_mutex_unlock(&db->retract.lock);
+}
+
+void db_retract_enqueue(AegisDB *db, uint64_t id) {
+    if (!db->config.inference || !db->edges) {
+        return; /* nothing here derives, so nothing here can be orphaned */
+    }
+    static const char *const KIND[] = {"derived_from"};
+    EdgeSource *src = NULL;
+    size_t n = 0;
+    /* Caller holds index_lock for write, so the reverse index is stable and
+     * still intact — this must run before edge_index_remove_target. */
+    if (edge_index_sources(db->edges, id, KIND, 1, &src, &n) != 0 || n == 0) {
+        free(src);
+        return;
+    }
+    pthread_mutex_lock(&db->retract.lock);
+    for (size_t i = 0; i < n; i++) {
+        /* An over-long kind interns as unknown, which makes a filtered source
+         * a candidate rather than a match (see edge_index.h). A candidate is
+         * exactly what this queue wants: the drain re-reads the record and
+         * decides from its routes, not from the edge label. */
+        retract_push_locked(db, src[i].from_id);
+    }
+    pthread_mutex_unlock(&db->retract.lock);
+    free(src);
+}
+
+/* Is this id a live record? */
+static int id_is_live(AegisDB *db, uint64_t id) {
+    uint64_t now = db_now_ms();
+    pthread_rwlock_rdlock(&db->index_lock);
+    const HashEntry *e = hash_index_get(db->hash, id);
+    /* Expiry counts as gone, not merely as pending. `get` and `search` already
+     * treat an expired-but-unswept record as absent, so judging a premise live
+     * until the sweep gets to it would leave a conclusion standing on something
+     * no reader can see — and the sweep runs on its own much slower cadence,
+     * so that window is nothing like the one tick the docs describe. */
+    int live = e && !e->deleted && !(e->expires_at && now >= e->expires_at);
+    pthread_rwlock_unlock(&db->index_lock);
+    return live;
+}
+
+/* Does any justification still stand? Support is disjunctive: one surviving
+ * route is enough, and a conclusion with no routes is asserted, not derived,
+ * so it is never this machinery's business. */
+int db_derivation_stands(AegisDB *db, const MemoryRecord *r) {
+    if (r->derivation.route_count == 0) {
+        return 1;
+    }
+    for (size_t i = 0; i < r->derivation.route_count; i++) {
+        const DerivRoute *rt = &r->derivation.routes[i];
+        int all_live = 1;
+        for (size_t j = 0; j < rt->premise_count && all_live; j++) {
+            all_live = id_is_live(db, rt->premises[j]);
+        }
+        if (all_live) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+size_t db_retract_step(AegisDB *db) {
+    /* A follower applies its primary's tombstones through the stream; deciding
+     * locally would append frames the primary never sent. */
+    if (db->config.read_only) {
+        return 0;
+    }
+    /* Bounded like every other job on this tick. A forget-by-namespace or a
+     * large expiry sweep tombstones thousands of premises at once, and each
+     * dependent costs an index write lock, a log append and a flush — draining
+     * the lot in one tick would stall the interval fsync, the checkpoint and
+     * compaction behind it, and hold index_lock against client traffic. The
+     * remainder stays queued for the next tick; a cascade was already going to
+     * take several. */
+    size_t cap = db->config.inference_max_derived;
+    pthread_mutex_lock(&db->retract.lock);
+    size_t n = db->retract.n < cap ? db->retract.n : cap;
+    uint64_t *batch = NULL;
+    if (n) {
+        batch = malloc(n * sizeof(*batch));
+        if (batch) {
+            memcpy(batch, db->retract.ids, n * sizeof(*batch));
+            db->retract.n -= n;
+            memmove(db->retract.ids, db->retract.ids + n,
+                    db->retract.n * sizeof(*batch));
+        } else {
+            n = 0;
+        }
+    }
+    pthread_mutex_unlock(&db->retract.lock);
+    if (n == 0) {
+        return 0;
+    }
+
+    /* Drained to a local batch first: qe_delete below takes index_lock and
+     * re-enters db_retract_enqueue for the next generation of dependents, so
+     * holding the queue lock across it would deadlock. This is also what makes
+     * the cascade breadth-first — each generation lands on a later tick. */
+    size_t retracted = 0;
+    for (size_t i = 0; i < n; i++) {
+        MemoryRecord r;
+        if (qe_get(db, batch[i], NULL, &r) != AEGIS_OK) {
+            continue; /* already gone */
+        }
+        int stands = db->config.inference ? db_derivation_stands(db, &r) : 1;
+        uint64_t id = r.id;
+        record_free(&r);
+        if (stands) {
+            continue;
+        }
+        if (qe_delete(db, id, NULL) == AEGIS_OK) {
+            retracted++;
+            LOG_DEBUG("inference: retracted record %llu; no route survives",
+                      (unsigned long long)id);
+        }
+    }
+    free(batch);
+    if (retracted) {
+        atomic_fetch_add_explicit(&db->retracted_total,
+                                  (uint_fast64_t)retracted,
+                                  memory_order_relaxed);
+    }
+    return retracted;
 }
