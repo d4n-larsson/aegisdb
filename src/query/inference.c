@@ -348,6 +348,19 @@ static int routes_insert(InferConclusion *c, const InferRoute *rt) {
     return 1;
 }
 
+/* The conclusion is as strong as its best surviving justification. Derived
+ * from the route set rather than tracked alongside it, so the two cannot
+ * disagree after the cap drops a route. */
+static void conclusion_confidence(InferConclusion *c) {
+    float best = 0.0F;
+    for (size_t i = 0; i < c->route_count; i++) {
+        if (c->routes[i].confidence > best) {
+            best = c->routes[i].confidence;
+        }
+    }
+    c->confidence = best;
+}
+
 /* Offer one candidate route to the pass. Returns 1 if a new conclusion was
  * recorded, 0 if the triple was already known (as an input fact, or by another
  * route — in which case the route is merged into it), or -1 on allocation
@@ -371,11 +384,12 @@ static int offer(OutBuf *out, Seen *seen, uint64_t subject,
             return 0;
         }
         InferConclusion *cur = &out->items[slot->out_idx];
+        placed.confidence = conf;
         routes_insert(cur, &placed);
-        /* The strongest justification wins, not the first one found. */
-        if (conf > cur->confidence) {
-            cur->confidence = conf;
-        }
+        /* Recomputed over the routes actually kept, not raised in place: a
+         * route the cap dropped must not leave its confidence behind on a
+         * record whose provenance no longer justifies it. */
+        conclusion_confidence(cur);
         return 0;
     }
     /* Genuinely new, so the output cap applies — and only here, so a pass that
@@ -392,8 +406,9 @@ static int offer(OutBuf *out, Seen *seen, uint64_t subject,
     rec.object_kind = okind;
     rec.object_id = oid;
     rec.object_str = ostr;
-    rec.confidence = conf;
+    placed.confidence = conf;
     routes_insert(&rec, &placed);
+    conclusion_confidence(&rec);
     if (out_push(out, &rec) != 0) {
         return -1;
     }

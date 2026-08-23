@@ -207,15 +207,23 @@ void record_clear_derivation(MemoryRecord *r);
  * with nothing to go on. */
 #define RECORD_CODEC_V2 2
 #define RECORD_CODEC_V3 3
-#define RECORD_CODEC_V4 4
-#define RECORD_CODEC_MAX RECORD_CODEC_V4
+/* 4 is deliberately skipped and refused on decode. It was briefly assigned to
+ * an earlier derivation layout — one flat premise list rather than a set of
+ * routes — that no release ever wrote and no log can contain, since nothing in
+ * that build ever created a Derivation. Reusing the number would still have
+ * been wrong: a build from that window advertises 4 in the replication
+ * handshake, and this build would too, so the codec gate would pass frames
+ * between two peers that disagree about the bytes. A version is cheaper than
+ * a silent divergence. */
+#define RECORD_CODEC_V5 5
+#define RECORD_CODEC_MAX RECORD_CODEC_V5
 
 /* See DerivRule: a new rule changes what a v4 frame can mean, so it must arrive
  * with a new codec version. Both halves are named here so the failure message
  * points at the fix rather than at the assertion. */
-_Static_assert(DERIV_RULE_COUNT == 4 && RECORD_CODEC_MAX == RECORD_CODEC_V4,
+_Static_assert(DERIV_RULE_COUNT == 4 && RECORD_CODEC_MAX == RECORD_CODEC_V5,
                "a new DerivRule needs a new RECORD_CODEC version: an older "
-               "peer would otherwise accept a v4 frame it cannot interpret");
+               "peer would otherwise accept a v5 frame it cannot interpret");
 
 /* Binary (little-endian, length-prefixed) codec used by the append-only log.
  * record_encode allocates *out (free with free()). record_decode fills *out

@@ -676,7 +676,7 @@ static void test_derived_record_roundtrips_as_v4(void) {
     uint8_t *buf = NULL;
     size_t n = 0;
     TEST_ASSERT_EQUAL_INT(0, record_encode(&src, &buf, &n));
-    TEST_ASSERT_EQUAL_UINT8(RECORD_CODEC_V4, buf[0]);
+    TEST_ASSERT_EQUAL_UINT8(RECORD_CODEC_V5, buf[0]);
 
     MemoryRecord out;
     TEST_ASSERT_EQUAL_INT(0, record_decode(buf, n, &out));
@@ -883,7 +883,7 @@ static void test_multiple_routes_roundtrip(void) {
     uint8_t *buf = NULL;
     size_t n = 0;
     TEST_ASSERT_EQUAL_INT(0, record_encode(&src, &buf, &n));
-    TEST_ASSERT_EQUAL_UINT8(RECORD_CODEC_V4, buf[0]);
+    TEST_ASSERT_EQUAL_UINT8(RECORD_CODEC_V5, buf[0]);
     MemoryRecord out;
     TEST_ASSERT_EQUAL_INT(0, record_decode(buf, n, &out));
     TEST_ASSERT_EQUAL_size_t(2, out.derivation.route_count);
@@ -960,6 +960,73 @@ static void test_clone_preserves_derivation(void) {
     free(c);
 }
 
+/* Codec 4 named a layout no release ever wrote, and was reshaped rather than
+ * reused. Decode must refuse it: a build from that window advertises 4 in the
+ * replication handshake, so accepting it here would be accepting bytes that
+ * cannot exist while pretending the two builds agree. */
+static void test_decode_refuses_codec_v4(void) {
+    MemoryRecord src;
+    record_init(&src);
+    src.id = 8;
+    src.data = strdup("x");
+    src.data_len = 1;
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_fact(&src, FACT_OBJ_ID, 1, "part_of", 2, NULL));
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&src, &buf, &n));
+    TEST_ASSERT_EQUAL_UINT8(RECORD_CODEC_V3, buf[0]);
+
+    buf[0] = 4;
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(-1, record_decode(buf, n, &out));
+    buf[0] = RECORD_CODEC_V3;
+    TEST_ASSERT_EQUAL_INT(0, record_decode(buf, n, &out));
+    record_free(&out);
+    free(buf);
+    record_free(&src);
+}
+
+/* A frame declaring routes that collapse on the way in would leave the decoded
+ * record claiming different provenance than the bytes it came from, and
+ * re-encoding it would produce a shorter frame. Refused, like every other
+ * malformed case in this decoder. */
+static void test_decode_refuses_duplicate_routes(void) {
+    const uint64_t a[] = {3, 4};
+    MemoryRecord src;
+    record_init(&src);
+    src.id = 12;
+    src.data = strdup("x");
+    src.data_len = 1;
+    TEST_ASSERT_EQUAL_INT(
+        0, record_set_fact(&src, FACT_OBJ_ID, 1, "part_of", 2, NULL));
+    TEST_ASSERT_EQUAL_INT(0, record_add_route(&src, DERIV_TRANSITIVE, 1, a, 2));
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, record_encode(&src, &buf, &n));
+
+    /* Duplicate the single route by hand: bump the count to 2 and append a
+     * byte-identical route block. Route block = rule 1 + depth 2 + pc 1 +
+     * 2 premises * 8 = 20 bytes, starting at 89 (see the offsets above). */
+    const size_t COUNT_OFF = 87;
+    const size_t ROUTE_OFF = 89;
+    const size_t ROUTE_LEN = 1 + 2 + 1 + 16;
+    TEST_ASSERT_EQUAL_UINT8(1, buf[COUNT_OFF]);
+    uint8_t *twin = malloc(n + ROUTE_LEN);
+    TEST_ASSERT_NOT_NULL(twin);
+    memcpy(twin, buf, ROUTE_OFF + ROUTE_LEN);
+    memcpy(twin + ROUTE_OFF + ROUTE_LEN, buf + ROUTE_OFF, ROUTE_LEN);
+    memcpy(twin + ROUTE_OFF + 2 * ROUTE_LEN, buf + ROUTE_OFF + ROUTE_LEN,
+           n - ROUTE_OFF - ROUTE_LEN);
+    twin[COUNT_OFF] = 2;
+
+    MemoryRecord out;
+    TEST_ASSERT_EQUAL_INT(-1, record_decode(twin, n + ROUTE_LEN, &out));
+    free(twin);
+    free(buf);
+    record_free(&src);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_init_defaults);
@@ -990,6 +1057,8 @@ int main(void) {
     RUN_TEST(test_add_route_validates_dedups_and_clears);
     RUN_TEST(test_multiple_routes_roundtrip);
     RUN_TEST(test_decode_rejects_bad_route_count);
+    RUN_TEST(test_decode_refuses_codec_v4);
+    RUN_TEST(test_decode_refuses_duplicate_routes);
     RUN_TEST(test_clone_preserves_derivation);
     RUN_TEST(test_set_fact_validates_and_clears);
     RUN_TEST(test_set_fact_switching_kinds_releases_object);

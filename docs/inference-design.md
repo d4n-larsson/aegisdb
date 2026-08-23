@@ -85,7 +85,7 @@ before the design leans on them:
 - **A fact is immutable.** `update` refuses one. Changing what a record asserts
   is a supersession.
 
-## 3. Where a conclusion lives: codec v4
+## 3. Where a conclusion lives: codec v5
 
 A derived fact is a `MemoryRecord` like any other — a `semantic` record with a
 `fact`, a payload, and `derived_from` relationships to each premise. It goes
@@ -96,7 +96,7 @@ What it needs that no existing field provides is **the rule that fired**. The
 roadmap asks for it explicitly, and without it a derivation tree can show which
 records were involved but not why they imply anything.
 
-Codec **v4** adds an optional `Derivation`:
+Codec **v5** adds an optional `Derivation`:
 
 ```
 derivation := { route_count: u16,
@@ -122,9 +122,18 @@ and the same compatibility rule that governed v3 governs this: **`record_encode`
 emits the lowest version that represents the record.** A record with no
 derivation still encodes as v3 if it has a fact and v2 if it does not, so a
 deployment that never enables inference is unchanged on disk and on the wire,
-and the first v4 frame appears exactly when someone turns the job on. The
+and the first v5 frame appears exactly when someone turns the job on. The
 replication codec gate shipped in 5.2 already handles the rest: a primary
-writing v4 withholds those frames from a v3 replica and says why.
+writing v5 withholds those frames from an older replica and says why.
+
+**Why v5 and not v4.** 4 was assigned to a first version of this field — one
+flat premise list — and then reshaped into the route set below. No release ever
+wrote a v4 frame and none can exist, since nothing in that build ever created a
+`Derivation`, so reusing the number looked free. It is not: a build from that
+window advertises `4` in the replication handshake, and so would this one, so
+the codec gate would pass frames between two peers that disagree about the
+bytes — the exact divergence the gate exists to prevent. 4 is skipped and
+refused on decode. A version number is cheaper than a silent divergence.
 
 `premises` duplicates what the `derived_from` edges say, deliberately. The edges
 are what a *walk* uses; the array is what survives the edges. When a premise is
@@ -480,7 +489,7 @@ mid-retraction state legible instead of confusing.
   function of the log, and running rules during it would make startup produce
   records that the log does not contain.
 - **Replication.** Derived records ship as ordinary frames; the codec gate
-  handles v4 the way it handles v3. A follower never derives and never retracts
+  handles v5 the way it handles v3. A follower never derives and never retracts
   on its own. Primary/replica parity of derived state is therefore the same
   property as log parity, and testable as such.
 - **Compaction** is unaffected. Derived records are records; `derivation`
@@ -491,7 +500,7 @@ mid-retraction state legible instead of confusing.
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--inference` | off | master switch; off means no job, no v4 frames |
+| `--inference` | off | master switch; off means no job, no v5 frames |
 | `--inference-interval-sec` | 30 | tick divisor for the pass |
 | `--inference-max-candidates` | 1000000 | conclusions considered per pass |
 | `--inference-max-depth` | 4 | chain length cap |
@@ -537,7 +546,8 @@ Contract, end to end:
 8. A replica holds exactly the derived records its primary does, and derives
    none of its own.
 9. `insert` with a `derivation` is refused.
-10. A v4 frame is withheld from a v3 replica with `MSG_INCOMPATIBLE`.
+10. A v5 frame is withheld from an older replica with `MSG_INCOMPATIBLE`,
+    and a frame claiming the skipped codec 4 is refused outright.
 
 **`make eval` gains a multi-hop dataset**, which is the roadmap's "done when"
 and the only claim here that retrieval quality is affected. Its queries must be
@@ -548,7 +558,7 @@ dataset does not show it, the dataset is wrong or the horizon is.
 
 ## 13. Rollout (PR sequence)
 
-1. **Codec v4 + `Derivation`** — durable format, encode/decode, the golden test
+1. **Codec v5 + `Derivation`** — durable format, encode/decode, the golden test
    that a derivation-less record still encodes byte-identically, `insert`
    refusing a client-supplied derivation. No job, no rules. Riskiest and
    irreversible, so first, exactly as v3 was.

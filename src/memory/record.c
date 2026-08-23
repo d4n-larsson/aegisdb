@@ -9,11 +9,12 @@
 
 /* v1: single embedding (dim + dim floats). v2 (#85): vec_count + dim +
  * vec_count*dim floats. v3 (ROADMAP 5.2): an optional typed fact between the
- * relationships and the payload. v4 (ROADMAP 5.3): an optional derivation
- * between the fact and the payload.
+ * relationships and the payload. v5 (ROADMAP 5.3): an optional derivation —
+ * a set of independent justifications — between the fact and the payload. v4 is
+ * skipped; see record.h.
  *
  * decode reads all three. encode writes the *lowest* version that can represent
- * the record: v4 only when a derivation is present, v3 when a fact is but a
+ * the record: v5 only when a derivation is present, v3 when a fact is but a
  * derivation is not, v2 otherwise. That is the whole
  * compatibility story — an existing log stays readable, and a deployment that
  * never writes a fact keeps producing byte-identical frames, so nothing about
@@ -435,7 +436,7 @@ int record_encode(const MemoryRecord *r, uint8_t **out, size_t *out_len) {
     if (has_deriv && !has_fact) {
         return -1;
     }
-    put_u8(&b, has_deriv  ? RECORD_CODEC_V4
+    put_u8(&b, has_deriv  ? RECORD_CODEC_V5
                : has_fact ? RECORD_CODEC_V3
                           : RECORD_CODEC_V2);
     put_u64(&b, r->id);
@@ -502,7 +503,7 @@ int record_encode(const MemoryRecord *r, uint8_t **out, size_t *out_len) {
         }
     }
 
-    /* v4 only: the derivation follows the fact it explains and still precedes
+    /* v5 only: the derivation follows the fact it explains and still precedes
      * the payload, so the variable-length payload stays last as it always has.
      * A conclusion carries every justification it has, because support is
      * disjunctive — retraction must be able to ask whether *any* route still
@@ -625,8 +626,11 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
 
     uint8_t ver = get_u8(&c);
     if (ver != 1 && ver != RECORD_CODEC_V2 && ver != RECORD_CODEC_V3 &&
-        ver != RECORD_CODEC_V4) {
-        goto fail; /* v1 (single vec), v2, v3 (fact), v4 (derivation) */
+        ver != RECORD_CODEC_V5) {
+        /* v1 (single vec), v2, v3 (fact), v5 (derivation). 4 is refused: it
+         * named a layout no release ever wrote, and accepting it would mean
+         * decoding bytes that cannot exist. */
+        goto fail;
     }
     out->id = get_u64(&c);
     out->type = (MemoryType)get_u8(&c);
@@ -768,7 +772,7 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
         }
     }
 
-    if (ver >= RECORD_CODEC_V4) {
+    if (ver >= RECORD_CODEC_V5) {
         uint16_t rc_routes = get_u16(&c);
         if (c.err || rc_routes == 0 || rc_routes > DERIV_MAX_ROUTES) {
             goto fail; /* v4 means derived, and derived means at least one */
@@ -796,8 +800,13 @@ int record_decode(const uint8_t *buf, size_t len, MemoryRecord *out) {
             for (uint8_t j = 0; j < pc; j++) {
                 prem[j] = get_u64(&c);
             }
+            /* Refused, not collapsed: a duplicate route (add_route returning
+             * 1) means the frame declares provenance the decoded record would
+             * not carry, so re-encoding it would produce different bytes.
+             * record_encode never writes one, and every other malformed case
+             * here refuses rather than reinterprets. */
             if (c.err ||
-                record_add_route(out, (DerivRule)rule, depth, prem, pc) < 0) {
+                record_add_route(out, (DerivRule)rule, depth, prem, pc) != 0) {
                 goto fail;
             }
         }

@@ -616,6 +616,43 @@ static void test_routes_are_capped_keeping_the_lowest(void) {
     predicate_registry_free(reg);
 }
 
+/* A route the cap dropped must not leave its confidence behind. The dropped
+ * routes here are the *most* confident, so a conclusion that kept the raised
+ * value would carry a number its own recorded provenance cannot justify. */
+static void test_confidence_comes_from_a_kept_route(void) {
+    PredicateRegistry *reg =
+        load("{\"part_of\": {\"object\": \"id\", \"transitive\": true}}");
+    /* six routes to (10 part_of 99); routes are kept by lowest premise id, so
+     * the last two are dropped — and those are the ones given confidence 1.0 */
+    InferFact facts[12];
+    size_t n = 0;
+    for (uint64_t m = 0; m < 6; m++) {
+        facts[n] = f_id(n + 1, 10, "part_of", 20 + m);
+        facts[n].confidence = (m >= 4) ? 1.0F : 0.5F;
+        n++;
+        facts[n] = f_id(n + 1, 20 + m, "part_of", 99);
+        facts[n].confidence = (m >= 4) ? 1.0F : 0.5F;
+        n++;
+    }
+    InferResult res;
+    TEST_ASSERT_EQUAL_INT(0, infer_run(facts, n, reg, NULL, &res));
+    const InferConclusion *c = find(&res, 10, "part_of", 99);
+    TEST_ASSERT_NOT_NULL(c);
+    TEST_ASSERT_EQUAL_size_t(DERIV_MAX_ROUTES, c->route_count);
+    /* 0.5 * 0.5, from a route that survived — not 1.0 from one that did not */
+    TEST_ASSERT_FLOAT_WITHIN(1e-6F, 0.25F, c->confidence);
+    /* and it is exactly the best of the routes actually recorded */
+    float best = 0.0F;
+    for (size_t i = 0; i < c->route_count; i++) {
+        if (c->routes[i].confidence > best) {
+            best = c->routes[i].confidence;
+        }
+    }
+    TEST_ASSERT_FLOAT_WITHIN(1e-6F, best, c->confidence);
+    infer_result_free(&res);
+    predicate_registry_free(reg);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_transitive);
@@ -641,5 +678,6 @@ int main(void) {
     RUN_TEST(test_both_routes_are_recorded_and_ordered);
     RUN_TEST(test_depth_does_not_wrap);
     RUN_TEST(test_routes_are_capped_keeping_the_lowest);
+    RUN_TEST(test_confidence_comes_from_a_kept_route);
     return UNITY_END();
 }
