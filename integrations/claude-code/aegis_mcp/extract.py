@@ -28,8 +28,9 @@ _OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
 _MAX_TOKENS = 1024
 _FACT_MAX_CHARS = 400
 _TAG_MAX = 8
-# A mention is a name, not a paragraph. A model that returns a whole sentence
-# as a subject would mint an entity record nothing could ever match again.
+# A mention is a name, not a paragraph. Past this length a triple is dropped
+# rather than trimmed — see _parse_triples, where the reasoning is that
+# trimming turns a recoverable error into two unrecoverable ones.
 _MENTION_MAX_CHARS = 120
 
 
@@ -246,6 +247,14 @@ def _parse_triples(raw: str, max_triples: int) -> list:
     predicates would make the rate 100% by construction and the metric would
     measure nothing. Malformed elements are still skipped: they are not
     proposals, they are noise.
+
+    An over-long mention is dropped, not trimmed. Trimming looks like the
+    lenient choice and is the opposite: a `string` object is a *literal*, so a
+    trimmed one is a false fact — stored, indexed, and available to 5.3 as a
+    premise — and two long subjects sharing a prefix trim to the same mention,
+    which grounds them to one entity id. That is the conflation grounding.py
+    exists to refuse, arriving before grounding gets a say. Dropping costs one
+    fact, the same price `ungrounded` already pays for the same reason.
     """
     if not raw:
         return []
@@ -277,9 +286,10 @@ def _parse_triples(raw: str, max_triples: int) -> list:
         if not all(isinstance(x, str) and x.strip()
                    for x in (subj, pred, obj)):
             continue
-        out.append(CandidateTriple(subject=subj.strip()[:_MENTION_MAX_CHARS],
-                                   predicate=pred.strip(),
-                                   obj=obj.strip()[:_MENTION_MAX_CHARS]))
+        subj, pred, obj = subj.strip(), pred.strip(), obj.strip()
+        if len(subj) > _MENTION_MAX_CHARS or len(obj) > _MENTION_MAX_CHARS:
+            continue
+        out.append(CandidateTriple(subject=subj, predicate=pred, obj=obj))
         if len(out) >= max_triples:
             break
     return out

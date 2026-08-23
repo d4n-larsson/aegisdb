@@ -373,12 +373,32 @@ class TestParseTriples(unittest.TestCase):
         self.assertEqual(_parse_triples(
             '[{"s": "a", "p": "p", "o": true}]', 8), [])
 
-    def test_a_mention_is_a_name_not_a_paragraph(self):
-        """A whole sentence as a subject mints an entity nothing could ever
-        match again."""
+    def test_an_over_long_mention_is_dropped_not_trimmed(self):
+        """Trimming is not the lenient choice. It corrupts a literal object
+        into a false fact, and it collapses distinct subjects that share a
+        prefix into one entity."""
         long = "x" * 400
-        out = _parse_triples(f'[{{"s": "{long}", "p": "p", "o": "b"}}]', 8)
-        self.assertEqual(len(out[0].subject), 120)
+        self.assertEqual(
+            _parse_triples(f'[{{"s": "{long}", "p": "p", "o": "b"}}]', 8), [])
+        self.assertEqual(
+            _parse_triples(f'[{{"s": "a", "p": "p", "o": "{long}"}}]', 8), [])
+
+    def test_trimming_would_conflate_two_distinct_subjects(self):
+        """The failure trimming causes, named. Two subjects differing only past
+        the cap are two things; a trimmed mention grounds both to one id, which
+        is the error grounding.py calls unrecoverable."""
+        pre = "y" * 130
+        out = _parse_triples(
+            f'[{{"s": "{pre}one", "p": "p", "o": "b"}},'
+            f' {{"s": "{pre}two", "p": "p", "o": "b"}}]', 8)
+        self.assertEqual(out, [], "neither survives, so neither can collide")
+
+    def test_a_mention_at_the_cap_still_passes(self):
+        """The boundary is inclusive: 120 is a long name, not a paragraph."""
+        at = "z" * 120
+        out = _parse_triples(f'[{{"s": "{at}", "p": "p", "o": "b"}}]', 8)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].subject, at)
 
     def test_the_cap_is_respected(self):
         raw = "[" + ",".join('{"s": "a%d", "p": "p", "o": "b"}' % i
