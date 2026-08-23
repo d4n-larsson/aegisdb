@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "aegisdb/ckpt_crypt.h"
 #include "aegisdb/hash_index.h"
@@ -173,6 +174,20 @@ long recovery_run(AegisDB *db) {
                 if (te && !te->deleted) {
                     edge_index_add(db->edges, r.id, r.relationships[k].to_id,
                                    r.relationships[k].kind);
+                } else if (r.relationships[k].kind &&
+                           strcmp(r.relationships[k].kind, "supersedes") == 0) {
+                    /* No `te` test here: hash_index_get returns NULL for a
+                     * tombstone as well as for an absent id, so requiring an
+                     * entry would make this branch unreachable — which is
+                     * exactly what it did on the first attempt. A live record
+                     * claiming to supersede something is enough on its own. */
+                    /* A live record superseding a tombstoned one: rebuild the
+                     * merge mapping truth maintenance uses, so a restart does
+                     * not turn every absorbed premise into a lost one and
+                     * retract conclusions the corpus still supports. This is
+                     * the reverse edge the index deliberately drops, recovered
+                     * from the surviving record itself. */
+                    db_supersede_note(db, r.relationships[k].to_id, r.id);
                 }
             }
             /* Reconcile derivations against their premises (ROADMAP 5.3 §6).

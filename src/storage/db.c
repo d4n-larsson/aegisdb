@@ -840,8 +840,12 @@ void db_close(AegisDB *db) {
     free_token_array(db->config.auth_tokens, db->config.auth_token_count);
     log_close(&db->log);
     free(db->retract.ids);
+    free(db->retract.sup_from);
+    free(db->retract.sup_to);
     db->retract.ids = NULL;
+    db->retract.sup_from = db->retract.sup_to = NULL;
     db->retract.n = db->retract.cap = 0;
+    db->retract.sup_n = db->retract.sup_cap = 0;
     pthread_mutex_destroy(&db->retract.lock);
     pthread_mutex_destroy(&db->id_lock);
     pthread_rwlock_destroy(&db->index_lock);

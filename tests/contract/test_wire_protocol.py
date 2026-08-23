@@ -1403,6 +1403,114 @@ def test_retraction_survives_a_lost_queue(binary, port):
               "no live derived record is left with a dead premise")
 
 
+def test_retraction_follows_supersedes(binary, port):
+    print("[inference: a merged premise is not a lost premise — when it isn't]")
+    d = tempfile.mkdtemp(prefix="aegis_retract_merge_")
+    datadir = tempfile.mkdtemp(prefix="aegis_retract_merge_data_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"part_of": {"object": "id", "transitive": True}}, fh)
+    args = ["--predicate-registry", reg, "--inference",
+            "--inference-interval-sec", "1"]
+    vec = [1.0] + [0.0] * 383  # default --embedding-dim 384
+
+    with Server(binary, port, phase=4, datadir=datadir,
+                extra_args=args) as srv:
+        def ins(data, fact=None, **kw):
+            p = {"operation": "insert", "type": "semantic", "data": data}
+            if fact:
+                p["fact"] = fact
+            p.update(kw)
+            return srv.req(p)["record"]["id"]
+
+        a, b, c = (ins(x) for x in ("a", "b", "c"))
+        # Two records asserting the *same* triple, near-identical so consolidate
+        # merges them. The survivor keeps an equivalent fact, so nothing a
+        # conclusion rests on is actually lost.
+        f = {"s": a, "p": "part_of", "o": {"id": b}}
+        p1 = ins("a is part of b", f, embedding=vec)
+        ins("a is part of b, restated", f, embedding=vec)
+        ins("b in c", {"s": b, "p": "part_of", "o": {"id": c}})
+        _await_fixpoint(srv)
+        got = srv.req({"operation": "search",
+                       "pattern": {"s": a, "p": "part_of", "o": {"id": c}},
+                       "top_k": 5}).get("records", [])
+        check(len(got) == 1, "the conclusion was derived to begin with")
+        conc = got[0]["id"]
+        before = srv.req({"operation": "stats"})["indexes"]["retracted"]
+
+        r = srv.req({"operation": "consolidate", "min_similarity": 0.9})
+        check(r.get("ok") is True and r.get("merged", 0) >= 1,
+              f"consolidate merged something ({r.get('merged')})")
+        time.sleep(3)
+
+        # Asserted, not branched on: "nothing was absorbed" would otherwise be
+        # a pass, and it is precisely the regression this test exists to catch.
+        check(srv.req({"operation": "get", "id": p1}).get("ok") is False,
+              "the premise was absorbed by the merge")
+        check(len(srv.req({"operation": "search", "pattern": f,
+                           "top_k": 5}).get("records", [])) == 1,
+              "and the survivor still asserts the same triple")
+        after = srv.req({"operation": "stats"})["indexes"]["retracted"]
+        check(srv.req({"operation": "get", "id": conc}).get("ok") is True,
+              "so the conclusion drawn from it stands")
+        check(after == before, f"and nothing was retracted ({after})")
+        srv.graceful_stop()
+
+    # The mapping is in RAM only. Recovery has to rebuild it from the
+    # survivor's own supersedes edge, or a restart turns every absorbed
+    # premise back into a lost one.
+    with Server(binary, port, phase=4, datadir=datadir,
+                extra_args=args) as srv:
+        time.sleep(3)
+        check(srv.req({"operation": "get", "id": conc}).get("ok") is True,
+              "and still stands after a restart rebuilds the mapping")
+
+
+def test_retraction_when_a_merge_destroys_the_fact(binary, port):
+    print("[inference: absorbing a fact-bearing record IS a loss]")
+    d = tempfile.mkdtemp(prefix="aegis_merge_lossy_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"part_of": {"object": "id", "transitive": True}}, fh)
+    vec = [0.0, 1.0] + [0.0] * 382
+
+    with Server(binary, port, phase=4,
+                extra_args=["--predicate-registry", reg, "--inference",
+                            "--inference-interval-sec", "1"]) as srv:
+        def ins(data, fact=None, **kw):
+            p = {"operation": "insert", "type": "semantic", "data": data}
+            if fact:
+                p["fact"] = fact
+            p.update(kw)
+            return srv.req(p)["record"]["id"]
+
+        a, b, c = (ins(x) for x in ("a", "b", "c"))
+        f = {"s": a, "p": "part_of", "o": {"id": b}}
+        # This time the near-duplicate carries NO fact, and wins the survivor
+        # tie-break — so the merge destroys the assertion rather than moving
+        # it. consolidate does not migrate a fact: UpdatePatch has no such
+        # field, because a fact is immutable. The conclusion must therefore be
+        # retracted, not kept alive by a mapping that would be lying.
+        ins("a is part of b", f, embedding=vec)
+        ins("a is part of b, roughly", embedding=vec)
+        ins("b in c", {"s": b, "p": "part_of", "o": {"id": c}})
+        _await_fixpoint(srv)
+        got = srv.req({"operation": "search",
+                       "pattern": {"s": a, "p": "part_of", "o": {"id": c}},
+                       "top_k": 5}).get("records", [])
+        check(len(got) == 1, "the conclusion was derived to begin with")
+        conc = got[0]["id"]
+
+        srv.req({"operation": "consolidate", "min_similarity": 0.9})
+        check(len(srv.req({"operation": "search", "pattern": f,
+                           "top_k": 5}).get("records", [])) == 0,
+              "the merge destroyed the premise's fact (a separate defect)")
+        _await_stat(srv, "retracted", at_least=1)
+        check(srv.req({"operation": "get", "id": conc}).get("ok") is False,
+              "so the conclusion is retracted, not kept alive on nothing")
+
+
 def test_inference_flag_validation(binary, port):
     print("[inference: a cap that cannot mean what it says refuses to start]")
 
@@ -3961,6 +4069,8 @@ def main():
     test_inference_flag_validation(binary, 19575)
     test_retraction(binary, 19576)
     test_retraction_survives_a_lost_queue(binary, 19577)
+    test_retraction_follows_supersedes(binary, 19579)
+    test_retraction_when_a_merge_destroys_the_fact(binary, 19581)
     test_predicate_registry_refuses_to_start(binary, 19551)
     test_codec_gate_with_a_real_v3_frame(binary, 19568)  # uses port, +1
     test_typed_facts_replica_parity(binary, 19548)  # uses port, +1 (repl stream), +2 (replica)

@@ -619,6 +619,17 @@ revertible. If the horizon stops after 4, nothing is left in a half state.
 
 ## 15. Open questions
 
+- **`consolidate` destroys a typed fact.** Found while wiring retraction to
+  supersession: `merge_cluster` migrates tags, importance, confidence and
+  relationships onto the survivor, but not the `fact` — `UpdatePatch` has no
+  such field, since 5.2 made facts immutable. So merging a fact-bearing record
+  into one without a fact silently loses the assertion, and `stats.facts` drops.
+  This predates 5.3 and is not caused by it; 5.3 only made it visible, by asking
+  for the first time whether a merged record still supports anything. The fix is
+  a decision about consolidation, not inference: either refuse to merge a
+  fact-bearing record, or let a merge carry a fact onto a survivor that has
+  none — which is the one case where doing so does not overwrite a claim.
+
 - **Should `subsume` also expand the object position?** `{p: "part_of",
   o: {id: storage_layer}}` arguably ought to find things that are part of a
   *descendant* of the storage layer. Symmetrical and cheap — the object index
@@ -637,10 +648,27 @@ revertible. If the horizon stops after 4, nothing is left in a half state.
   age out ahead of its premises, which is probably right (it is recomputable)
   but is currently an accident rather than a decision. Wants a look when 5.3 and
   2.3 are both in front of someone.
-- **Interaction with `consolidate`.** Consolidation merges similar records and
-  writes `supersedes`. If it absorbs a premise, the derived record's premise id
-  points at a tombstone and §6 retracts the conclusion — even though the merged
-  survivor still asserts the same thing. Correct but wasteful: the conclusion
-  will be re-derived on the next pass from the survivor. Acceptable churn, or an
-  argument for teaching retraction to follow `supersedes` one hop before giving
-  up. Not decided.
+- ~~**Interaction with `consolidate`.**~~ **Decided:** retraction follows
+  supersession. Consolidation records the merge (`db_supersede_note`) while both
+  ids still mean something — before the tombstone, since `qe_delete` drops the
+  reverse edge the moment it is created — and a premise that was *merged* counts
+  as standing while its heir is live. The premise ids on the derived record are
+  deliberately **not** rewritten: a derivation should say what it was actually
+  drawn from, and the supersession chain explains the rest. The mapping is
+  in-RAM and rebuilt by recovery from the survivor's own `supersedes` edge, so
+  it needs no durability of its own — the same argument as the retraction queue.
+  Chains are followed up to a small hop cap, and only within one process run:
+  recovery rebuilds the mapping from *live* records' `supersedes` edges, so a
+  middle link that is itself tombstoned is not recovered and a twice-merged
+  premise reads as lost after a restart. Past `SUPERSEDE_MAX` entries the same
+  applies. Both cost a retraction and a re-derivation rather than a wrong
+  answer.
+
+  The rule is also narrower than "merged": a merge does **not** carry the
+  loser's typed fact onto the survivor — `UpdatePatch` has no fact field,
+  because a fact is immutable — so absorbing a fact-bearing record destroys
+  that assertion outright. Recording a supersession there would keep alive a
+  conclusion whose supporting fact exists nowhere and which no later pass could
+  re-derive, so the mapping is only recorded when the survivor asserts the same
+  triple (or the loser asserted none). That consolidation silently drops a fact
+  at all is a separate defect, noted below.
