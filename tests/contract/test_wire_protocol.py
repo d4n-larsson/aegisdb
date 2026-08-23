@@ -1422,6 +1422,18 @@ def test_inference_flag_validation(binary, port):
     # The pass carries depth as a uint16. 65536 truncates to 0, which reads as
     # "unset" and silently restores the default — an operator asking for a
     # deeper chain would get a shallower one and never know.
+    # Inference without retraction is not a lesser feature, it is the failure
+    # the feature exists to prevent — conclusions pile up and nothing withdraws
+    # them. Both of these produce exactly that, silently, so both are refused.
+    rc, err = try_start(["--inference", "--phase", "3"])
+    check(rc is not None and rc != 0,
+          "--inference below phase 4 refuses to start")
+    check(b"phase 4" in err, "and says provenance edges are why")
+    rc, err = try_start(["--inference", "--no-edge-index"])
+    check(rc is not None and rc != 0,
+          "--inference with --no-edge-index refuses to start")
+    check(b"reverse edges" in err, "and says retraction is what needs them")
+
     rc, err = try_start(["--inference-max-depth", "65536"])
     check(rc is not None and rc != 0, "a max-depth past uint16 refuses to start")
     check(b"65535" in err, "and the message says what the bound is")

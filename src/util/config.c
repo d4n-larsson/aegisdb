@@ -725,6 +725,32 @@ int config_parse_args(Config *cfg, int argc, char **argv) {
 #undef UINT_OPT
 #undef SIZE_OPT
     }
+
+    /* Inference without retraction is not a lesser version of the feature, it
+     * is the failure the feature exists to prevent: conclusions accumulate and
+     * nothing ever withdraws them. Both of these silently produce exactly that,
+     * so both are refused rather than quietly half-enabled.
+     *
+     * A conclusion's provenance edges come from qe_relate, which needs phase 4
+     * while a semantic insert needs only phase 2 — so below phase 4 every
+     * conclusion is written with no derived_from edges at all, and deleting a
+     * premise finds nothing to retract. Without the reverse edge index there is
+     * nothing to walk in the first place. */
+    if (cfg->inference && cfg->enabled_phase < 4) {
+        fprintf(stderr,
+                "%s: --inference needs phase 4 (provenance edges are a phase-4 "
+                "operation); got phase %d\n",
+                argv[0], cfg->enabled_phase);
+        return -1;
+    }
+    if (cfg->inference && !cfg->edge_index) {
+        fprintf(stderr,
+                "%s: --inference cannot be combined with --no-edge-index: "
+                "retraction walks the reverse edges to find what a deleted "
+                "premise supported\n",
+                argv[0]);
+        return -1;
+    }
     return 0;
 }
 

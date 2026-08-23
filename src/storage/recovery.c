@@ -140,6 +140,7 @@ long recovery_run(AegisDB *db) {
      * loaded, in which case only the tail (offset >= sem_covered) is applied. */
     long live = 0;
     long stale_derived = 0;
+    const uint64_t now = db_now_ms();
     HashIndex *h = db->hash;
     for (size_t i = 0; i < h->cap; i++) {
         const HashEntry *e = &h->buckets[i];
@@ -196,7 +197,11 @@ long recovery_run(AegisDB *db) {
                     for (size_t m = 0; m < rt->premise_count && all_live; m++) {
                         const HashEntry *pe =
                             hash_index_get(db->hash, rt->premises[m]);
-                        all_live = pe && !pe->deleted;
+                        /* Expired counts as gone here too: a reader cannot see
+                         * an expired premise, so a conclusion resting on one is
+                         * already resting on nothing. */
+                        all_live = pe && !pe->deleted &&
+                                   !(pe->expires_at && now >= pe->expires_at);
                     }
                     stands = all_live;
                 }
@@ -265,9 +270,20 @@ long recovery_run(AegisDB *db) {
     }
 
     if (stale_derived) {
-        LOG_INFO("recovery: %ld derived record(s) outlived a premise; queued "
-                 "for retraction on the first maintenance pass",
-                 stale_derived);
+        /* A replica never drains this queue — it applies its primary's
+         * tombstones through the stream instead — so promising a maintenance
+         * pass there would tell an operator the invariant was restored when on
+         * that node it never will be. */
+        if (db->config.read_only) {
+            LOG_INFO("recovery: %ld derived record(s) outlived a premise; a "
+                     "replica does not retract, so these clear when the "
+                     "primary's own retraction reaches the stream",
+                     stale_derived);
+        } else {
+            LOG_INFO("recovery: %ld derived record(s) outlived a premise; "
+                     "queued for retraction on the first maintenance pass",
+                     stale_derived);
+        }
     }
     LOG_DEBUG("recovery: secondary indexes populated from %ld live record(s)",
               live);

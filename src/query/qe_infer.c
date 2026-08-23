@@ -165,14 +165,16 @@ static int write_conclusion(AegisDB *db, const InferConclusion *c,
             aegis_status_t rst =
                 qe_relate(db, written.id, c->routes[i].premises[j],
                           "derived_from", ns && *ns ? ns : NULL);
-            /* NOT_FOUND is the benign race: a premise tombstoned since the
-             * pass read it. The record's routes still name it, so retraction
-             * has what it needs. Anything else is not benign and must not be
-             * silent — notably NOT_READY, since qe_relate requires phase 4
-             * while a semantic insert needs only phase 2, so a server below
-             * phase 4 would otherwise write every conclusion with no
-             * provenance edges at all and say nothing. */
-            if (rst != AEGIS_OK && rst != AEGIS_ERR_NOT_FOUND) {
+            /* NOT_FOUND means the premise was tombstoned between the pass
+             * reading it and this call. That is not benign, as an earlier
+             * version of this comment claimed: the conclusion is now written
+             * already unjustified, and the premise's own qe_delete — the only
+             * thing that enqueues — ran before this record existed, so nothing
+             * would ever judge it. Queue it here instead, and let the drain
+             * decide from its routes; another route may well still hold. */
+            if (rst == AEGIS_ERR_NOT_FOUND) {
+                db_retract_enqueue_id(db, written.id);
+            } else if (rst != AEGIS_OK) {
                 LOG_WARN("inference: record %llu could not link premise %llu "
                          "(%d); its routes still name it",
                          (unsigned long long)written.id,
@@ -351,7 +353,13 @@ static void retract_push_locked(AegisDB *db, uint64_t id) {
         size_t nc = db->retract.cap ? db->retract.cap * 2 : 16;
         uint64_t *ni = realloc(db->retract.ids, nc * sizeof(*ni));
         if (!ni) {
-            return; /* dropped, not lost: recovery reconciles the live set */
+            /* Recovery reconciles the live set — but only at process start, so
+             * on a server that survives this the conclusion stays live until
+             * then. Rare enough to tolerate, not rare enough to hide. */
+            LOG_WARN("inference: retraction queue full; record %llu will not "
+                     "be re-judged until the next restart",
+                     (unsigned long long)id);
+            return;
         }
         db->retract.ids = ni;
         db->retract.cap = nc;
@@ -392,9 +400,15 @@ void db_retract_enqueue(AegisDB *db, uint64_t id) {
 
 /* Is this id a live record? */
 static int id_is_live(AegisDB *db, uint64_t id) {
+    uint64_t now = db_now_ms();
     pthread_rwlock_rdlock(&db->index_lock);
     const HashEntry *e = hash_index_get(db->hash, id);
-    int live = e && !e->deleted;
+    /* Expiry counts as gone, not merely as pending. `get` and `search` already
+     * treat an expired-but-unswept record as absent, so judging a premise live
+     * until the sweep gets to it would leave a conclusion standing on something
+     * no reader can see — and the sweep runs on its own much slower cadence,
+     * so that window is nothing like the one tick the docs describe. */
+    int live = e && !e->deleted && !(e->expires_at && now >= e->expires_at);
     pthread_rwlock_unlock(&db->index_lock);
     return live;
 }
@@ -425,11 +439,28 @@ size_t db_retract_step(AegisDB *db) {
     if (db->config.read_only) {
         return 0;
     }
+    /* Bounded like every other job on this tick. A forget-by-namespace or a
+     * large expiry sweep tombstones thousands of premises at once, and each
+     * dependent costs an index write lock, a log append and a flush — draining
+     * the lot in one tick would stall the interval fsync, the checkpoint and
+     * compaction behind it, and hold index_lock against client traffic. The
+     * remainder stays queued for the next tick; a cascade was already going to
+     * take several. */
+    size_t cap = db->config.inference_max_derived;
     pthread_mutex_lock(&db->retract.lock);
-    uint64_t *batch = db->retract.ids;
-    size_t n = db->retract.n;
-    db->retract.ids = NULL;
-    db->retract.n = db->retract.cap = 0;
+    size_t n = db->retract.n < cap ? db->retract.n : cap;
+    uint64_t *batch = NULL;
+    if (n) {
+        batch = malloc(n * sizeof(*batch));
+        if (batch) {
+            memcpy(batch, db->retract.ids, n * sizeof(*batch));
+            db->retract.n -= n;
+            memmove(db->retract.ids, db->retract.ids + n,
+                    db->retract.n * sizeof(*batch));
+        } else {
+            n = 0;
+        }
+    }
     pthread_mutex_unlock(&db->retract.lock);
     if (n == 0) {
         return 0;

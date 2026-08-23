@@ -239,7 +239,12 @@ size_t db_retract_step(AegisDB *db);
 /* Does at least one of this record's justifications still hold — every premise
  * of some route being live? True for an underived record, which this machinery
  * never touches: a human-supplied fact whose neighbour disappeared is not a
- * contradiction, just a fact. */
+ * contradiction, just a fact.
+ *
+ * Takes index_lock for read internally, so it must be called with **no** index
+ * lock held. The obvious future call site is inside qe_delete, which holds it
+ * for write — and these rwlocks are not recursive, so that would self-deadlock
+ * rather than merely block. */
 int db_derivation_stands(AegisDB *db, const MemoryRecord *r);
 
 /* Apply one replicated log frame on a read-only replica: append the payload to

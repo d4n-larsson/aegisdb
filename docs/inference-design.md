@@ -521,7 +521,7 @@ state that a client can only observe through a query; this one writes records
 and grows the log, and a feature with that blast radius should be something an
 operator turned on.
 
-`stats` gains `derived`, `conflicts`, `retracted_total`, `inference_last_ms` and
+`stats` gains `derived`, `conflicts`, `retracted`, `inference_last_ms` and
 `inference_deferred` (candidates a cap postponed). The last two are what tell an
 operator whether the caps are sized right — a permanently non-zero
 `inference_deferred` means the job never reaches fixpoint, which is survivable
