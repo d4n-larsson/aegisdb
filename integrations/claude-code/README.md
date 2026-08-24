@@ -515,6 +515,38 @@ Integration/contract tests launch the `aegisdb` binary from `../../build` and
 skip automatically if it is not built. They use a deterministic `fake` embedding
 provider, so no API key or network is needed.
 
+
+## What Claude sees about typed facts
+
+When the server declares a predicate vocabulary — its own
+`--predicate-registry`, or `AEGIS_EXTRACT_REGISTRY` here — the `memory_search`
+tool description **names the predicates**:
+
+> This store keeps typed facts, and a question that maps onto its vocabulary is
+> answered from the fact graph rather than by text similarity. The declared
+> predicates are: defaults_to, part_of. Phrasing a question in those terms —
+> "what does X default to?", "what is part of Y?" — is what lets it be answered
+> structurally; anything else still works and falls back to ordinary search.
+
+The point is not that the model calls a different tool. It is that a question
+can be answered from the fact graph only when it maps onto a declared
+predicate, and the model is what chooses the phrasing — so without this it is
+guessing at a contract the server enforces. The same gap the `predicates` op
+closed for programs, closed for the model.
+
+Three things worth knowing:
+
+- **A server without a vocabulary pays nothing.** The description is then
+  byte-for-byte what it has always been. This is not a feature to opt out of;
+  it appears only when there is something to say.
+- **It is fixed at startup.** MCP clients read the tool list once, when they
+  connect, so changing the registry needs this server restarted before the
+  model sees the change.
+- **Long registries are summarised, not dumped.** At most 24 predicates are
+  named and the rest counted. A tool description is prompt text on *every*
+  request, and a registry of hundreds would quietly become the largest thing in
+  the context.
+
 ## Layout
 
 ```text

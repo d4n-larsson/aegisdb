@@ -101,7 +101,62 @@ def build_tools(config=None) -> MemoryTools:
     return MemoryTools(config, client, provider)
 
 
-def _read_path(tools):
+#: Predicates named in a tool description before it is summarised. A tool
+#: description is prompt text on every request, so a registry that grew to
+#: hundreds would otherwise quietly become the largest thing in the context.
+VOCAB_HINT_MAX = 24
+
+
+def _vocabulary(tools):
+    """The typed-fact vocabulary, and whether resolving it failed.
+
+    Returns `(vocab, ok)`. `ok` is False only when a *configured* registry
+    could not be read — which is an operator error worth keeping distinct from
+    "this server declares no vocabulary", because the first disables a feature
+    someone asked for and the second is the ordinary default.
+
+    Resolved regardless of `ask_pattern`, unlike before: the vocabulary is now
+    also what the tool descriptions say, and a server that enforces one should
+    tell the model about it whether or not the read path is turned on.
+    """
+    from .extract import VocabularyError, resolve_vocabulary
+    try:
+        return resolve_vocabulary(tools.config, tools), True
+    except VocabularyError as e:
+        print(f"[aegis-mcp] vocabulary: {e}", file=sys.stderr)
+        return None, False
+
+
+def vocabulary_hint(vocab) -> str:
+    """The vocabulary, as a line to append to a tool description.
+
+    Empty when there is none, so the description is then byte-for-byte what it
+    has always been — a server without typed facts must not pay for a feature
+    it does not have, in prompt tokens or in a reader's attention.
+
+    Why it belongs in the description at all: the store can answer a question
+    structurally only when the question maps onto a declared predicate, and the
+    model is the thing choosing how to phrase it. Without this it is guessing
+    at a contract the server enforces — the same gap the `predicates` op closed
+    for programs, closed here for the model.
+    """
+    names = [p.name for p in (vocab or [])]
+    if not names:
+        return ""
+    shown = sorted(names)[:VOCAB_HINT_MAX]
+    more = len(names) - len(shown)
+    listed = ", ".join(shown) + (f", and {more} more" if more > 0 else "")
+    return (
+        "\n\nThis store keeps typed facts, and a question that maps onto its "
+        "vocabulary is answered from the fact graph rather than by text "
+        f"similarity. The declared predicates are: {listed}. Phrasing a "
+        "question in those terms — \"what does X default to?\", \"what is part "
+        "of Y?\" — is what lets it be answered structurally; anything else "
+        "still works and falls back to ordinary search."
+    )
+
+
+def _read_path(tools, vocab, vocab_ok):
     """The vocabulary and extractor the read path needs, or (None, None).
 
     Resolved once at startup: the vocabulary is a file the server was started
@@ -110,27 +165,24 @@ def _read_path(tools):
     — never the whole server, which would take ordinary search down with it
     over a feature that is defined as strictly additive.
 
-    Takes `tools` rather than a config because the vocabulary may come from the
-    server now, which needs a connection to ask.
+    Takes the vocabulary already resolved by `_vocabulary`, so startup asks the
+    server for it once rather than once per consumer.
     """
     config = tools.config
     if not (getattr(config, "ask_pattern", False)
             or getattr(config, "ask_verbalize", False)):
         return None, None
-    from .extract import (VocabularyError, make_extraction_provider,
-                          resolve_vocabulary)
-    vocab = None
+    from .extract import make_extraction_provider
     if getattr(config, "ask_pattern", False):
-        try:
-            vocab = resolve_vocabulary(config, tools)
-        except VocabularyError as e:
-            print(f"[aegis-mcp] read path: {e}", file=sys.stderr)
-            return None, None
+        if not vocab_ok:
+            return None, None  # a configured registry that could not be read
         if vocab is None:
             print("[aegis-mcp] AEGIS_ASK_PATTERN is set but no vocabulary is "
                   "available — neither AEGIS_EXTRACT_REGISTRY nor a registry "
                   "on the server; questions fall back to ordinary search",
                   file=sys.stderr)
+    else:
+        vocab = None  # verbalization needs no vocabulary
     provider = make_extraction_provider(config)
     if not provider.available():
         print("[aegis-mcp] read path: no extraction backend available; "
@@ -153,7 +205,12 @@ def main() -> int:
 
     tools = build_tools()
     mcp = _new_server(server_cls, "memory")
-    read_vocab, read_extractor = _read_path(tools)
+    vocab, vocab_ok = _vocabulary(tools)
+    read_vocab, read_extractor = _read_path(tools, vocab, vocab_ok)
+    hint = vocabulary_hint(vocab)
+    if hint:
+        print(f"[aegis-mcp] vocabulary: {len(vocab)} predicate(s) named in the "
+              f"memory_search description", file=sys.stderr)
 
     @mcp.tool()
     def memory_save(text: str, tags: list[str] | None = None,
@@ -163,7 +220,10 @@ def main() -> int:
         return tools.save(text, tags=tags, importance=importance,
                           semantic=semantic, confidence=confidence)
 
-    @mcp.tool()
+    # Registered explicitly rather than with @mcp.tool(), because the
+    # vocabulary is only known at runtime and a docstring literal cannot carry
+    # it. Both SDK majors read `__doc__` at registration, so setting it first
+    # and registering after is the one mechanism that works on each.
     def memory_search(query: str | None = None, tags: list[str] | None = None,
                       match: str = "any", start_time: int | None = None,
                       end_time: int | None = None, top_k: int = 5) -> dict:
@@ -184,6 +244,9 @@ def main() -> int:
         return tools.search(query=query, tags=tags, match=match,
                            start_time=start_time, end_time=end_time,
                            top_k=top_k, lexical=True)
+
+    memory_search.__doc__ = (memory_search.__doc__ or "") + hint
+    mcp.tool()(memory_search)
 
     @mcp.tool()
     def memory_get(id: int) -> dict:
