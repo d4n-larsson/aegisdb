@@ -311,7 +311,7 @@ the same bet, and it needs no model on the hot path.*
 
 ---
 
-## Horizon 5 — Next: reasoning over memory, not just retrieving it
+## Horizon 5 — Now: reasoning over memory, not just retrieving it  ✅ *complete*
 
 *Theme: the relationship graph is the one primitive in the tree that was built
 and then never finished. Horizons 1–2 made memory coherent, 4 made it findable;
@@ -507,7 +507,8 @@ does deterministically, at write time, for free.
   "the queue was flushed" into the far better invariant "no live derived record
   has a dead premise", which is checkable on every restart.
 
-### 5.4 The neuro-symbolic seam
+### 5.4 The neuro-symbolic seam — *shipped (`extract_triples`, `ask_pattern`,
+`ask_verbalize`, `adjudicate_conflicts`); measured by `make eval-extraction`*
 
 - **Why now:** symbols are only worth having if writing and reading them is as
   easy as writing prose. That is exactly what a model is for — and the seam to
@@ -605,6 +606,25 @@ does deterministically, at write time, for free.
   persisted, and replaced **whole** each tick — an accumulating list would hand
   back pairs whose records are already tombstoned, which is exactly the input
   an adjudicator must not be given.
+
+### What the horizon left open
+
+- **The registry is a contract, and where its line sits is empirical.** The
+  extraction eval reports `unstatable` — triples a careful reader would write
+  and the vocabulary cannot express — precisely so "grow the registry" stays a
+  decision with a number behind it rather than a reflex. A registry that grows
+  to fit every transcript has stopped being a contract.
+- **Grounding drifts as the corpus grows.** A threshold tuned on a small store
+  may conflate on a large one, where more entities means more near-misses. The
+  minting rate is the leading indicator and is reported; the eval gates
+  conflation at zero and fragmentation at a ceiling.
+- **Re-grounding old facts.** The first transcript on an empty store mints
+  everything, so the earliest facts are the ones most likely to be fragmented —
+  they had nothing to resolve against. `consolidate` can merge entity records
+  after the fact, but nothing schedules it.
+- **Literal normalization.** "five seconds" and "5s" are one literal to a
+  reader and two to the index. 5.2 deliberately has no normalization, and this
+  is where the cost of that shows up.
 
 ### Ground rules for the whole horizon
 
