@@ -1652,6 +1652,56 @@ def test_a_long_multibyte_entity_name_stays_decodable(binary, port):
         check("part_of" in text, f"it is still a readable conclusion: {text[:60]!r}")
 
 
+def test_offset_paging_composes(binary, port):
+    print("[search: pages compose — the unranked order is total]")
+    # `created` is milliseconds, so a loop of inserts puts a dozen records in a
+    # handful of distinct values and ties are the common case. Without a total
+    # order this is not merely arbitrary but inconsistent BETWEEN pages:
+    # select_top is asked for the `offset + top_k` best, so each page runs a
+    # different selection over the same tied candidates. Before the tiebreak,
+    # twelve records paged two at a time returned eleven distinct — one lost,
+    # one twice — in eight of twelve trials.
+    with Server(binary, port, phase=4) as srv:
+        n = 24
+        for i in range(n):
+            srv.req({"operation": "insert", "type": "semantic",
+                     "data": f"item{i:03d}", "tags": ["page"]})
+
+        stamps = {r["created"] for r in
+                  srv.req({"operation": "search", "tags": ["page"],
+                           "top_k": 100})["records"]}
+        check(len(stamps) < n,
+              f"the records really do share timestamps ({len(stamps)} distinct "
+              f"for {n} records) — without ties this proves nothing")
+
+        whole = [r["data"] for r in
+                 srv.req({"operation": "search", "tags": ["page"],
+                          "top_k": 100})["records"]]
+        check(len(whole) == n, "one page returns everything")
+
+        # Page size 1 makes every boundary a potential tie boundary.
+        for size in (1, 2, 5):
+            paged = []
+            for off in range(0, n, size):
+                paged += [r["data"] for r in
+                          srv.req({"operation": "search", "tags": ["page"],
+                                   "top_k": size, "offset": off})["records"]]
+            check(len(paged) == n and len(set(paged)) == n,
+                  f"page size {size}: every record exactly once "
+                  f"({len(set(paged))}/{n})")
+            # The strong property: pages are not merely complete, they are the
+            # same sequence a single page returns. That is what "total order"
+            # buys and what a caller assembling pages depends on.
+            check(paged == whole, f"page size {size}: pages compose in order")
+
+        # Identical requests agree, which a non-stable sort over ties does not
+        # guarantee on its own.
+        again = [r["data"] for r in
+                 srv.req({"operation": "search", "tags": ["page"],
+                          "top_k": 100})["records"]]
+        check(again == whole, "and repeating a query returns the same order")
+
+
 def test_predicates_op(binary, port):
     print("[predicates: the vocabulary is readable over the wire]")
     d = tempfile.mkdtemp(prefix="aegis_predicates_")
@@ -4885,6 +4935,7 @@ def main():
     test_derived_records_name_what_they_are_about(binary, 19591)
     test_a_conclusion_survives_a_tombstoned_entity(binary, 19592)
     test_a_long_multibyte_entity_name_stays_decodable(binary, 19593)
+    test_offset_paging_composes(binary, 19597)
     test_predicates_op(binary, 19594)
     test_predicates_without_a_registry(binary, 19595)
     test_predicates_counts_are_admin_only(binary, 19596)

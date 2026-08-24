@@ -318,15 +318,11 @@ class AegisStore(BaseStore):
         # too — a server-side offset would skip rows *before* they were
         # filtered, and page 2 would silently omit matches.
         #
-        # Caveat on the unfiltered path, and it is the server's rather than
-        # this adapter's: an unranked search is ordered by `created` alone,
-        # with a non-stable sort. Records written in the same millisecond —
-        # which is what a graph writing several items in one superstep looks
-        # like — have no defined order between them, so a page boundary
-        # falling inside such a group can skip one item and repeat another.
-        # Measured: 12 items across 3 distinct milliseconds, paged two at a
-        # time, returned 11 distinct. A filtered search does not have this
-        # problem: every page issues the identical query and slices it here.
+        # The unfiltered path relies on the server's order being *total* —
+        # `created` with ties broken by id — so that pages compose instead of
+        # each one re-resolving the ties differently. That was not true when
+        # this adapter was written and is what made paging lose rows; it is
+        # now pinned by a contract test on the server.
         if op.filter:
             top_k, offset = self.search_scan_limit, 0
         else:

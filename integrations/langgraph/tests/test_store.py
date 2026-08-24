@@ -412,14 +412,18 @@ class TestReviewFindings(unittest.TestCase):
             self.assertEqual(len(deep), 2, "the last page is served, not empty")
             self.assertEqual(len(store.search(("p",), limit=20)), 12,
                              "one page over the whole set is exact")
-            # NOT asserted: that offset paging covers every item exactly once.
-            # An unranked search is ordered by `created` alone with a
-            # non-stable sort, and these twelve land in ~3 distinct
-            # milliseconds, so a page boundary inside a tie group can skip one
-            # and repeat another. That is the server's ordering, not this
-            # adapter's paging — asserting it here would be asserting a
-            # guarantee nothing makes, and the test would flake (it did, about
-            # one run in three).
+            # Now assertable: the server's unranked order is total (created,
+            # ties broken by id), so pages compose. This assertion used to
+            # flake about one run in three — these twelve records land in only
+            # a few distinct milliseconds, and each page re-resolved the ties
+            # differently. Restored once the server was fixed.
+            seen = []
+            for off in range(0, 12, 2):
+                seen += [h.key for h in store.search(("p",), limit=2,
+                                                     offset=off)]
+            self.assertEqual(len(seen), 12, "no page came back short")
+            self.assertEqual(len(set(seen)), 12,
+                             "paging covers every item exactly once")
 
     def test_scan_limit_is_clamped_to_what_the_server_will_serve(self):
         """Above 1000 the server returns fewer and says nothing, so a larger
