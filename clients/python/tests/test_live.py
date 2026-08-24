@@ -104,15 +104,37 @@ class TestLiveSurface(unittest.TestCase):
             got = db.get(rid)["record"]
             self.assertEqual(got["data"], "prefers dark mode")
 
+            # Validity intervals are millisecond-grained, so an update in the
+            # same millisecond as the insert gives the first version a
+            # zero-width interval — there is then no instant at which it was
+            # live, and `as_of` rightly returns the second. Sleeping past the
+            # boundary is what makes the point-in-time read testable at all;
+            # without it this passes or fails on how fast the machine is, which
+            # is how it passed locally and failed in CI.
+            time.sleep(0.01)
             db.update(rid, data="prefers light mode", importance=0.2)
             self.assertEqual(db.get(rid)["record"]["data"], "prefers light mode")
 
             hist = db.history(rid)["versions"]
-            self.assertGreaterEqual(len(hist), 2, f"{hist}")
-            # as_of reaches the version before the update.
-            first = hist[0]
-            old = db.get(rid, as_of=first["valid_from"])["record"]
-            self.assertEqual(old["data"], "prefers dark mode")
+            self.assertEqual(len(hist), 2, f"{hist}")
+            first, second = hist
+            # Assert the precondition rather than assume it: a zero-width
+            # interval would make the next assertion vacuous instead of failing.
+            self.assertLess(first["valid_from"], first["valid_to"],
+                            f"the first version was never live: {hist}")
+            self.assertEqual(first["valid_to"], second["valid_from"],
+                             "the intervals abut")
+            self.assertEqual(second["valid_to"], 0, "the live version is open")
+
+            # as_of anywhere inside the first interval reaches the old version.
+            for at in (first["valid_from"], first["valid_to"] - 1):
+                self.assertEqual(db.get(rid, as_of=at)["record"]["data"],
+                                 "prefers dark mode", f"as_of={at}")
+            # ...and at the boundary itself, the new one — the interval is
+            # half-open, so valid_to belongs to the version that follows.
+            self.assertEqual(
+                db.get(rid, as_of=first["valid_to"])["record"]["data"],
+                "prefers light mode")
 
             db.delete(rid)
             with self.assertRaises(NotFound):
