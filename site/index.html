@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AegisDB — memory that outlives the context window</title>
-  <meta name="description" content="AegisDB is a small, fast, self-hosted C database that gives AI agents durable memory — episodic, semantic, and working — with hybrid keyword + HNSW vector search over a one-line-of-JSON protocol. Multi-tenant, so a whole team's coding agents share one memory on your own box.">
+  <meta name="description" content="AegisDB is a small, fast, self-hosted C database that gives AI agents durable memory — episodic, semantic, and working — with hybrid keyword + HNSW vector search over a one-line-of-JSON protocol. Memories can also carry typed facts, so the server derives what they entail and shows the premises behind every conclusion. Multi-tenant, so a whole team's coding agents share one memory on your own box.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%2314110E'/%3E%3Ctext x='12' y='17' font-family='monospace' font-size='13' font-weight='700' fill='%23C9A24B' text-anchor='middle'%3E%E2%96%8D%3C/text%3E%3C/svg%3E">
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -265,6 +265,7 @@
           <a href="#tokens" class="nav-hide">why</a>
           <a href="#what" class="nav-hide">memory</a>
           <a href="#curation" class="nav-hide">curation</a>
+          <a href="#reason" class="nav-hide">reasoning</a>
           <a href="#proof" class="nav-hide">proof</a>
           <a href="#wire" class="nav-hide">protocol</a>
           <a href="#claude" class="nav-hide">claude&nbsp;code</a>
@@ -296,7 +297,7 @@
             <div class="specstrip">
               <div>written in <b>C</b></div>
               <div>NDJSON / TCP</div>
-              <div>vector · tag · time</div>
+              <div>vector · keyword · facts</div>
               <div><b>MIT</b></div>
             </div>
           </div>
@@ -382,8 +383,8 @@
             <p>A per-session ring buffer with a <b>TTL</b>. Keep scratch context close, then promote what proves worth keeping.</p>
           </div>
           <div class="feat" data-k="0x02F0">
-            <h3><span class="bar"></span>Recall, four ways</h3>
-            <p>Search by <b>vector similarity</b>, by <b>keyword</b>, by tags (<span class="mono">all</span>/<span class="mono">any</span>), or by time range — each on a purpose-built index, not a scan.</p>
+            <h3><span class="bar"></span>Recall, five ways</h3>
+            <p>Search by <b>vector similarity</b>, by <b>keyword</b>, by tags (<span class="mono">all</span>/<span class="mono">any</span>), by time range, or by <b>the fact a record asserts</b> — each on a purpose-built index, not a scan.</p>
           </div>
           <div class="feat se" data-k="0x0320">
             <h3><span class="bar"></span>Vector search that scales</h3>
@@ -395,7 +396,7 @@
           </div>
           <div class="feat" data-k="0x0360">
             <h3><span class="bar"></span>A graph of context</h3>
-            <p>Link memories with directed edges and walk them breadth-first to <b>pull in what's related</b> to what you just recalled.</p>
+            <p>Link memories with typed, directed edges and walk them breadth-first to <b>pull in what's related</b> to what you just recalled. Follow only the edge kinds you asked for, <b>forwards or backwards</b> — "what supersedes this?" and "what depends on this?" are one call each, not a scan — and every hit reports the hop that reached it, so a walk reads as a path.</p>
           </div>
         </div>
         <details class="more">
@@ -443,11 +444,49 @@
       </div>
     </section>
 
+    <!-- REASONING / SYMBOLIC LAYER -->
+    <section class="rec" id="reason">
+      <div class="off mono">0x0450</div>
+      <div class="col">
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0006</b>&nbsp;·&nbsp;type=semantic</p>
+        <h2 class="title">Answers that live in no single memory.</h2>
+        <p class="lede">Retrieval can only hand back a record that already contains the answer. So a memory can carry a machine-readable fact — <span class="mono">{s, p, o}</span> — beside its sentence, and the server draws the conclusions those facts entail, links each one to the premises it rests on, and withdraws it when a premise goes away.</p>
+        <p class="lede">It is a small set of <b>declared</b> rules, not a reasoner: no rule language, no query dialect, and no model anywhere in the loop — so every step is reproducible and regression-tested. All of it is <b>opt-in and off by default</b>, recall never depends on it, and a deployment that writes no facts is byte-for-byte unchanged on disk and on the wire.</p>
+        <div class="feats">
+          <div class="feat se" data-k="0x0450">
+            <h3><span class="bar"></span>A fact beside the sentence</h3>
+            <p><span class="mono">insert</span> takes an optional <span class="mono">fact: {s, p, o}</span> next to the prose, and <span class="mono">search</span>&nbsp;/&nbsp;<span class="mono">count</span> take a <span class="mono">pattern</span> — <span class="mono">{"s": 42, "p": "prefers", "o": "*"}</span> — answered from an index, not a scan. A <span class="mono">--predicate-registry</span> declares the vocabulary, and a fact naming an undeclared predicate is <b>refused at insert</b> rather than quietly stored.</p>
+          </div>
+          <div class="feat" data-k="0x0455">
+            <h3><span class="bar"></span>Conclusions, drawn off the write path</h3>
+            <p><span class="mono">--inference</span> materializes the <b>transitive</b>, <b>symmetric</b> and <b>inverse-of</b> closures the registry declares — on a background tick, per namespace, depth- and fanout-capped. A write never waits on it, a replica never runs it, and its cost is reported in <span class="mono">stats</span> like every other index.</p>
+          </div>
+          <div class="feat ep" data-k="0x0460">
+            <h3><span class="bar"></span>Retract a premise, lose the conclusion</h3>
+            <p>A derived record names the rule that fired and the premises it stands on — as a <b>set of independent justifications</b>, because a conclusion can have more than one route. Delete a premise and the conclusion is withdrawn once <b>every</b> route has lost one. Nothing is left standing on a fact you deleted.</p>
+          </div>
+          <div class="feat" data-k="0x0465">
+            <h3><span class="bar"></span>“Why do you believe this?”</h3>
+            <p><span class="mono">explain</span> already prints why a memory <i>ranked</i>. On a derived one it also returns a <span class="mono">derivation</span> — rule, depth, premise ids — so a belief is a tree you can walk. It is written server-side and a client cannot manufacture one. Ask, and a model will read that tree back to you in English; it never <i>produces</i> the proof, only renders one you can check.</p>
+          </div>
+          <div class="feat wk" data-k="0x0470">
+            <h3><span class="bar"></span>Contradictions surface, not resolve</h3>
+            <p>Two live values for a single-valued predicate, or a pair the registry marks mutually exclusive, raise a <span class="mono">conflicts_with</span> edge and a counter — <b>caught deterministically, with no model call</b>. AegisDB reports the conflict rather than silently picking a winner.</p>
+          </div>
+          <div class="feat se" data-k="0x0475">
+            <h3><span class="bar"></span>Prose in, symbols out</h3>
+            <p>Capture can distil a transcript into triples, prompted <b>against the registry as a controlled vocabulary</b>, resolving each mention to an existing entity by cosine + BM25 before minting a new one. A triple that doesn't fit is <b>dropped and counted, never bent</b> onto the nearest predicate — and nothing is lost by that, because the prose stays in the record and stays searchable.</p>
+          </div>
+        </div>
+        <p class="moremore">Measured, not asserted: <span class="mono">make eval-multihop</span> scores a question set whose answers live in <em>no single record</em> — the symbolic path answers <b>100%</b> at recall@5 where semantic, keyword and fused retrieval each score <b>0%</b>. The gate bounds retrieval as well, which is what caught a first draft of the dataset answering half its own questions by word overlap. Design notes: <a href="https://github.com/d4n-larsson/aegisdb/blob/main/docs/symbolic-layer-design.md">the graph</a>, <a href="https://github.com/d4n-larsson/aegisdb/blob/main/docs/typed-facts-design.md">typed facts</a>, <a href="https://github.com/d4n-larsson/aegisdb/blob/main/docs/inference-design.md">inference</a> &amp; <a href="https://github.com/d4n-larsson/aegisdb/blob/main/docs/neuro-symbolic-design.md">the model seam</a>.</p>
+      </div>
+    </section>
+
     <!-- CONTROL / COMPLIANCE -->
     <section class="rec" id="control">
       <div class="off mono">0x0480</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0006</b>&nbsp;·&nbsp;type=meta</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0007</b>&nbsp;·&nbsp;type=meta</p>
         <h2 class="title">Yours to inspect, replay, and erase.</h2>
         <p class="lede">It's your data on your box — so you can see all of it, reconstruct any past state, and truly delete it. No console, no support ticket, no export request.</p>
         <div class="feats">
@@ -477,7 +516,7 @@
     <section class="rec" id="speed">
       <div class="off mono">0x0500</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0007</b>&nbsp;·&nbsp;type=semantic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0008</b>&nbsp;·&nbsp;type=semantic</p>
         <div class="twoup">
           <div>
             <h2 class="title">Fast enough to be invisible.</h2>
@@ -501,7 +540,7 @@ read (get)     <span class="ar">→</span> p50 0.8 ms over the wire
     <section class="rec" id="proof">
       <div class="off mono">0x0580</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0008</b>&nbsp;·&nbsp;type=semantic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0009</b>&nbsp;·&nbsp;type=semantic</p>
         <div class="twoup">
           <div>
             <h2 class="title">Does the memory actually work? Run the benchmark.</h2>
@@ -526,7 +565,7 @@ recall quality       <span class="ar">→</span> recall@k / MRR gate</pre>
     <section class="rec" id="wire">
       <div class="off mono">0x0640</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0009</b>&nbsp;·&nbsp;type=semantic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0010</b>&nbsp;·&nbsp;type=semantic</p>
         <h2 class="title">One JSON line in. One JSON line back.</h2>
         <p class="lede">The wire protocol is newline-delimited JSON over TCP. No SDK, no driver — any language that can open a socket can speak it.</p>
         <p class="cap">store a memory, then recall it</p>
@@ -551,7 +590,7 @@ recall quality       <span class="ar">→</span> recall@k / MRR gate</pre>
     <section class="rec" id="claude">
       <div class="off mono">0x07A0</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0010</b>&nbsp;·&nbsp;type=semantic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0011</b>&nbsp;·&nbsp;type=semantic</p>
         <div class="twoup">
           <div>
             <h2 class="title">Long-term memory for Claude&nbsp;Code.</h2>
@@ -588,7 +627,7 @@ recall quality       <span class="ar">→</span> recall@k / MRR gate</pre>
     <section class="rec" id="team">
       <div class="off mono">0x0860</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0011</b>&nbsp;·&nbsp;type=semantic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0012</b>&nbsp;·&nbsp;type=semantic</p>
         <div class="twoup">
           <div>
             <h2 class="title">One agent learns it. Everyone's agent knows it.</h2>
@@ -613,7 +652,7 @@ recall quality       <span class="ar">→</span> recall@k / MRR gate</pre>
     <section class="rec" id="start">
       <div class="off mono">0x0940</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0012</b>&nbsp;·&nbsp;type=episodic</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0013</b>&nbsp;·&nbsp;type=episodic</p>
         <h2 class="title">Run it, talk to it.</h2>
         <p class="lede">Pull the image or build from source — either way you're holding a connection in seconds.</p>
         <div class="start-log">
@@ -655,7 +694,7 @@ docker exec aegisdb aegisdb client search --tags user</code>
     <section class="rec" id="team-setup">
       <div class="off mono">0x0B20</div>
       <div class="col">
-        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0013</b>&nbsp;·&nbsp;type=meta</p>
+        <p class="eyebrow"><span class="tick">▍</span>&nbsp;record&nbsp;·&nbsp;<b>seq=0014</b>&nbsp;·&nbsp;type=meta</p>
         <h2 class="title">Set up shared memory for a team.</h2>
         <p class="lede">One server, one tenant token per project, and Claude&nbsp;Code wired in with <span class="mono">uvx</span> — no clone anywhere. Uses the published image and the <a href="https://pypi.org/project/aegisdb-mcp/"><span class="mono">aegisdb-mcp</span></a> PyPI package.</p>
         <div class="start-log">
@@ -740,6 +779,8 @@ docker exec aegisdb aegisdb client search --tags user</code>
           res: '→ ok  total=3  by similarity×importance' },
         { req: ['{', '"operation"',':','"relate"',', ','"from"',':','42',', ','"to"',':','41','}'], cls:'se',
           res: '→ ok  edge created' },
+        { req: ['{', '"operation"',':','"search"',', ','"pattern"',':','{','"s"',':','42',', ','"p"',':','"depends_on"','}','}'], cls:'se',
+          res: '→ ok  total=2  1 derived: transitive' },
       ];
 
       var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
