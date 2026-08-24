@@ -583,13 +583,28 @@ does deterministically, at write time, for free.
   were not on the list and are mostly true, so they are reported as *beyond
   gold*, and the gate is on recall and never on precision — an extractor that
   reads more of the transcript must not score worse for it.
-- **Remaining:** adjudication (§6 of the design) — hand a contradiction 5.3
-  flagged but refused to settle to the model, and write the verdict as a
-  `supersedes`. Blocked on a smaller decision the design left open: `conflicts`
-  is a gauge recomputed each tick and `conflicts_with` edges are only reachable
-  by `traverse` from an id you already hold, so **there is no way to enumerate
-  the flagged pairs**. The pass already computes them; keeping that set is the
-  cheap answer.
+- **Shipped (adjudication — `adjudicate_conflicts`):** the inverse arrangement
+  the horizon's preamble asks for is now the one that runs. The rules find a
+  contradiction deterministically, at write time, for free; the model sees only
+  the one pair they could not settle and answers A, B or **neither** — and
+  neither is first-class and is the default, so an unreachable backend, an
+  unparseable reply, a reply naming both sides, or a record whose triple has
+  gone all abstain. A verdict is written as a **supersession, never an edit**:
+  the judgment becomes a record and neither fact is rewritten to agree with it.
+  Off by default and capped per run, because this is the one place in 5.4 where
+  a model error becomes durable state.
+- **Found while building it:** the design assumed the adjudicator could be
+  "handed that one pair", and there was no way to *get* the pair. `conflicts`
+  was a gauge recomputed each tick, a `conflicts_with` edge is only walkable
+  from an id you already hold, and the reverse edge index is keyed target →
+  sources with no enumeration by kind — so reaching the flagged pairs meant
+  reading every live record. Fixed by keeping what the pass already computes
+  rather than computing anything new: `conflict_set.h/.c` retains the pairs
+  beside the gauge, filled by the same loop so the two cannot disagree, and a
+  read-only namespace-scoped `conflicts` op lists them. Bounded, derived, never
+  persisted, and replaced **whole** each tick — an accumulating list would hand
+  back pairs whose records are already tombstoned, which is exactly the input
+  an adjudicator must not be given.
 
 ### Ground rules for the whole horizon
 

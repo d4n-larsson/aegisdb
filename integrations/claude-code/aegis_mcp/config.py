@@ -112,6 +112,19 @@ class Config:
     # sets how much weight every conclusion drawn from parsed facts carries
     # relative to one drawn from asserted facts.
     extract_triple_confidence: float = 0.6
+    # Adjudication (ROADMAP 5.4 §6): hand a contradiction the rules flagged and
+    # refused to settle to the model, and write the verdict as a supersession.
+    #
+    # Off by default and capped per run, because this is the one place in the
+    # horizon where a model error becomes durable state. Everything else the
+    # seam does is additive — a bad triple is one bad fact, a bad verbalization
+    # is prose beside a payload that contradicts it — while a bad verdict
+    # tombstones a record somebody wrote. The cap bounds a bad *run*, not just
+    # a bad call: a model that has started answering badly does so for every
+    # pair, and an uncapped loop would work through the whole backlog before
+    # anyone saw it.
+    adjudicate_conflicts: bool = False
+    adjudicate_max_per_run: int = 8
 
 
 # Map each config field to its environment variable name.
@@ -162,10 +175,13 @@ _ENV = {
     "grounding_top_k": "AEGIS_GROUNDING_TOP_K",
     "grounding_max_mint": "AEGIS_GROUNDING_MAX_MINT",
     "extract_triple_confidence": "AEGIS_EXTRACT_TRIPLE_CONFIDENCE",
+    "adjudicate_conflicts": "AEGIS_ADJUDICATE_CONFLICTS",
+    "adjudicate_max_per_run": "AEGIS_ADJUDICATE_MAX_PER_RUN",
 }
 
 _BOOL = {"recall_enabled", "capture_enabled", "extract_supersede",
-         "extract_triples", "ask_pattern", "ask_verbalize"}
+         "extract_triples", "ask_pattern", "ask_verbalize",
+         "adjudicate_conflicts"}
 _INT = {
     "aegis_port", "connect_timeout_ms", "read_timeout_ms",
     "embedding_dimensions", "recall_time_budget_ms", "recall_top_k",
@@ -174,6 +190,7 @@ _INT = {
     "summary_max_clusters_per_run", "summary_scan_top_k",
     "extract_max_facts", "extract_max_input_chars", "extract_supersede_top_k",
     "extract_max_triples", "grounding_top_k", "grounding_max_mint",
+    "adjudicate_max_per_run",
 }
 _FLOAT = {"recall_min_score", "recall_dedup_threshold", "capture_min_salience",
           "grounding_min_score", "extract_triple_confidence",

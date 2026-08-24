@@ -6,6 +6,7 @@
 #include <stdatomic.h>
 
 #include "aegisdb/config.h"
+#include "aegisdb/conflict_set.h"
 #include "aegisdb/edge_index.h"
 #include "aegisdb/fact_index.h"
 #include "aegisdb/hash_index.h"
@@ -126,6 +127,14 @@ typedef struct {
     /* Contradictions the last pass found — a gauge, recomputed each time, not
      * a running total. It answers "is anything contradictory right now?". */
     atomic_uint_fast64_t conflicts_now;
+    /* ...and *which* pairs, for the `conflicts` op (ROADMAP 5.4 §6). Filled by
+     * the same loop that bumps the gauge, so the two cannot disagree, and
+     * swapped in whole at the end of a pass so a reader never sees a half-built
+     * list. Bounded and derived: never persisted, replaced rather than
+     * accumulated, and NULL until the first pass runs. */
+    ConflictSet *conflicts;
+    pthread_mutex_t conflicts_lock; /* independent of every other lock; held
+                                     * only for the swap and for a copy-out */
     /* Conclusions whose premises may have gone away (ROADMAP 5.3 §6).
      * qe_delete captures the dependents it is about to orphan while it still
      * holds index_lock — the reverse edges are gone by the time it returns —

@@ -216,6 +216,28 @@ Three constraints:
   what 5.3 does today; adjudication is an improvement on that state, not a
   requirement for it.
 
+**Shipped**, and one thing this section assumed that turned out not to be true:
+*"when `conflicts` is non-zero, the adjudicator is handed that one pair"* — but
+there was no way to **get** the pair. `conflicts` is a gauge recomputed each
+tick, a `conflicts_with` edge is only walkable from an id you already hold, and
+the reverse edge index is keyed target → sources with no enumeration by kind, so
+reaching the flagged pairs meant reading every live record. Fixed by keeping
+what the pass already computes: `conflict_set.h/.c` retains the pairs beside the
+gauge, filled by the same loop, and a read-only `conflicts` op lists them
+namespace-scoped. Bounded, derived, never persisted, and replaced **whole** each
+tick — an accumulating list would hand back pairs whose records are already
+tombstoned, which is precisely the input an adjudicator must not be given.
+
+The verdict path is `aegis_mcp/adjudicate.py`, run at the end of a capture over
+whatever the *corpus* holds rather than what the session wrote: a transcript
+that produced no triples at all can still be the one that resolves a
+contradiction two earlier sessions created between them. It links before it
+deletes — `relate` against a tombstone is refused, so the other order would
+leave a removed record with nothing naming what replaced it. Abstention is the
+default at every step: an unreachable backend, an unparseable reply, a reply
+naming both sides, a record whose triple has gone, and a side already tombstoned
+by an earlier verdict in the same run all decline rather than guess.
+
 ## 7. The transcript is untrusted
 
 `extract.py` already frames the transcript as data. Triples raise the stakes:
@@ -250,6 +272,7 @@ provenance is inspectable.
 | `grounding_min_score` | high | below this a mention mints a new entity |
 | `grounding_max_mint` | 8 | new entity records per extraction |
 | `adjudicate_conflicts` | off | hand flagged contradictions to the model |
+| `adjudicate_max_per_run` | 8 | contradictions put to the model per capture |
 
 `stats` gains what the metric needs: `triples_proposed`, `triples_accepted`
 (the two that give the **in-vocabulary rate**), `entities_resolved`,
@@ -307,8 +330,14 @@ shape occur in text nobody wrote for the purpose.
    Nothing structural; the prompt and the parser.
 5. **Read path** — question to `pattern`, derivation to English. Contract tests
    8.
-6. **Adjudication.** Contract test 7.
-7. **The extraction eval dataset** and its gates.
+6. **Adjudication.** Contract test 7. *Shipped* — plus the `conflicts` op it
+   turned out to need, and which this document had assumed already existed.
+7. **The extraction eval dataset** and its gates. *Shipped* —
+   `make eval-extraction`. The gates count conflation and fragmentation apart
+   rather than as one accuracy, per §4, and `gold` is scored as a floor: a
+   triple the store holds and the dataset does not name is reported as *beyond
+   gold*, never as an error, so an extractor that reads more of the transcript
+   cannot score worse for it.
 
 PRs 1–3 are the spine: after 3 the seam works end to end with a deterministic
 backend, which is the version whose behaviour can be reasoned about. 4 makes it

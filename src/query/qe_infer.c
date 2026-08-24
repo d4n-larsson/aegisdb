@@ -296,9 +296,16 @@ static int mutually_exclusive(const PredicateSpec *a, const PredicateSpec *b) {
  * right needs to know which is newer, which source is better, or what the world
  * is actually like — none of which this layer knows. What it can guarantee is
  * that the contradiction is *found*, deterministically and with no model call,
- * which is the thing a human or an extractor cannot do reliably. */
+ * which is the thing a human or an extractor cannot do reliably.
+ *
+ * `cs` collects the pairs behind the count so `conflicts` can list them
+ * (ROADMAP 5.4 §6). It is filled beside `found++` and not inside note_conflict:
+ * note_conflict returns early once both edges already exist, so a contradiction
+ * found on an earlier tick and still live would be counted and not listed — the
+ * gauge and the list would drift apart the moment anything stayed unresolved,
+ * which is precisely the case an adjudicator exists for. */
 static size_t find_conflicts(AegisDB *db, const LoadedFact *facts, size_t n,
-                             const char *ns) {
+                             const char *ns, ConflictSet *cs) {
     const LoadedFact **by_sp = malloc(n * sizeof(*by_sp));
     if (!by_sp) {
         return 0;
@@ -354,6 +361,10 @@ static size_t find_conflicts(AegisDB *db, const LoadedFact *facts, size_t n,
                     if (objects_differ(&by_sp[j]->rec.fact,
                                        &by_sp[y]->rec.fact)) {
                         found++;
+                        conflict_set_add(cs, by_sp[j]->rec.id, by_sp[y]->rec.id,
+                                         ns, by_sp[j]->rec.fact.predicate,
+                                         by_sp[y]->rec.fact.predicate,
+                                         "cardinality");
                         note_conflict(db, by_sp[j], by_sp[y], ns,
                                       "cardinality: one");
                     }
@@ -380,6 +391,10 @@ static size_t find_conflicts(AegisDB *db, const LoadedFact *facts, size_t n,
                     db->predicates, by_sp[y]->rec.fact.predicate);
                 if (sy && mutually_exclusive(sx, sy)) {
                     found++;
+                    conflict_set_add(cs, by_sp[x]->rec.id, by_sp[y]->rec.id, ns,
+                                     by_sp[x]->rec.fact.predicate,
+                                     by_sp[y]->rec.fact.predicate,
+                                     "mutex_with");
                     note_conflict(db, by_sp[x], by_sp[y], ns, "mutex_with");
                 }
             }
@@ -471,6 +486,10 @@ size_t db_inference_step(AegisDB *db) {
     size_t conflicts = 0;
     int deferred = 0;
     int scanned = 0; /* did this pass actually look? */
+    /* Built privately and published at the end, so a reader of the `conflicts`
+     * op never observes a half-filled list — and a pass that dies partway
+     * leaves the previous one's answer standing rather than a truncated one. */
+    ConflictSet *cs = NULL;
     LoadedFact *facts = NULL;
     size_t n = 0;
     if (load_facts(db, &facts, &n) != 0) {
@@ -518,10 +537,18 @@ size_t db_inference_step(AegisDB *db) {
      * while contradictions exist. Detection is linear per subject and only
      * writes when it finds something new, so completeness is affordable here in
      * a way deriving is not. */
+    /* A NULL set is tolerated by every entry point, so failing to allocate it
+     * costs the *list* and not the scan: the gauge, the edges, and the warning
+     * an operator alerts on are all unaffected. */
+    cs = conflict_set_create();
+    if (!cs) {
+        LOG_WARN("inference: out of memory for the conflict list; "
+                 "contradictions will be counted but not listable this pass");
+    }
     for (size_t g = 0; g < ngroups; g++) {
         size_t lo = starts[g];
         size_t hi = (g + 1 < ngroups) ? starts[g + 1] : n;
-        conflicts += find_conflicts(db, &facts[lo], hi - lo, facts[lo].ns);
+        conflicts += find_conflicts(db, &facts[lo], hi - lo, facts[lo].ns, cs);
     }
     scanned = 1;
 
@@ -581,6 +608,24 @@ done:
         atomic_store_explicit(&db->conflicts_now, (uint_fast64_t)conflicts,
                               memory_order_relaxed);
     }
+    /* Publish the pairs on the same condition and by the same rule: replaced
+     * whole, so a contradiction resolved since the last pass stops being
+     * reported. Under the same `scanned` guard as the gauge — a pass that could
+     * not read the fact set must not be allowed to publish an empty list, which
+     * would read as an all-clear to anything working through the backlog.
+     *
+     * A pass that scanned but could not allocate publishes NULL, which lists as
+     * empty rather than stale: an adjudicator would rather see nothing to do
+     * than act on a pair from a corpus it no longer describes. */
+    if (scanned) {
+        pthread_mutex_lock(&db->conflicts_lock);
+        ConflictSet *old_set = db->conflicts;
+        db->conflicts = cs;
+        pthread_mutex_unlock(&db->conflicts_lock);
+        cs = NULL;                  /* published; the swap took ownership */
+        conflict_set_free(old_set); /* freed off the lock */
+    }
+    conflict_set_free(cs); /* unpublished (an early exit); NULL-safe */
     if (total) {
         atomic_fetch_add_explicit(&db->derived_total, (uint_fast64_t)total,
                                   memory_order_relaxed);

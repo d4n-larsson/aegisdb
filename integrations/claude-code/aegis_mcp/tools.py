@@ -325,6 +325,29 @@ class MemoryTools:
             return err
         return results.ok(memory=record_to_memory(resp.get("record", {})))
 
+    def conflicts(self, limit: int | None = None) -> dict:
+        """Contradictions the inference job flagged and refused to settle.
+
+        `stats` says how many; this says which, which is what anything meaning
+        to act on one needs. Scoped by the server to the caller's own namespace
+        — nothing here names a tenant, and a request that did would be ignored.
+
+        An older server has no such operation and answers INVALID_REQUEST,
+        which arrives as `{"ok": false}` like any other refusal. Callers treat
+        that as "nothing to adjudicate", because it is: a server that cannot
+        list contradictions is not one that has any to hand over.
+        """
+        payload = {"operation": "conflicts"}
+        if limit is not None:
+            payload["limit"] = limit
+        resp, err = self._send(payload)
+        if err:
+            return err
+        return results.ok(conflicts=resp.get("conflicts") or [],
+                          total=resp.get("total", 0),
+                          capped=bool(resp.get("capped")),
+                          truncated=bool(resp.get("truncated")))
+
     def relate(self, from_id: int, to_id: int, kind: str | None = None) -> dict:
         payload = {"operation": "relate", "from_id": from_id, "to_id": to_id}
         if kind:

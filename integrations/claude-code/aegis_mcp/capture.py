@@ -13,6 +13,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 
+from .adjudicate import adjudicate_conflicts
 from .client import AegisClient
 from .embeddings import EmbeddingProvider
 from .extract import (VocabularyError, load_vocabulary,
@@ -287,6 +288,30 @@ def _store_triples(texts, config, tools, extractor) -> int:
     return res.stored
 
 
+def _adjudicate(config, tools, extractor) -> None:
+    """Put the contradictions the rules flagged to the model. Best-effort.
+
+    Deliberately not folded into `_store_triples`: what this acts on is whatever
+    the *corpus* holds, not what this transcript proposed. A session that wrote
+    no triples at all can still be the one that resolves a contradiction two
+    earlier sessions created between them.
+    """
+    if not getattr(config, "adjudicate_conflicts", False):
+        return
+    try:
+        res = adjudicate_conflicts(tools, config, extractor)
+    except Exception:
+        return
+    if res.seen:
+        # Abstentions are printed, not just resolutions. A run that decides
+        # nothing and a run that found nothing are very different states, and
+        # only one of them means the feature is doing its job safely.
+        print(f"[aegis-mcp] adjudication: {res.resolved} resolved, "
+              f"{res.abstained} left reported, {res.skipped} already gone, "
+              f"{res.failed} unwritable, of {res.seen} flagged",
+              file=sys.stderr)
+
+
 def run_capture(event: dict, config, provider: EmbeddingProvider,
                 client: AegisClient | None = None) -> int:
     """Capture salient memories for an ended session. Returns the number stored.
@@ -331,6 +356,11 @@ def run_capture(event: dict, config, provider: EmbeddingProvider,
         # are stored either way, so a transcript yielding no usable triple
         # behaves exactly as it does with the feature off.
         stored += _store_triples(texts, config, tools, extractor)
+        # Adjudication (ROADMAP 5.4 §6) runs last, over the corpus this capture
+        # just added to. It resolves contradictions rather than storing
+        # anything, so it contributes nothing to `stored` — the count means
+        # "memories kept", and a supersession is the opposite of one.
+        _adjudicate(config, tools, extractor)
         return stored
 
     # heuristic fallback (extraction disabled/unavailable)

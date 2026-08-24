@@ -1282,12 +1282,17 @@ def test_inference_job(binary, port):
               == 0, "and reports no deferred work")
 
 
-def _await_stat(srv, key, at_least, timeout=20.0):
-    """Poll one stats counter until it reaches `at_least`, and return it."""
+def _await_stat(srv, key, at_least, timeout=20.0, token=None):
+    """Poll one stats counter until it reaches `at_least`, and return it.
+
+    `stats` is admin-only, so a server with auth on needs the token passed."""
     deadline = time.time() + timeout
     n = 0
+    req = {"operation": "stats"}
+    if token:
+        req["token"] = token
     while time.time() < deadline:
-        n = srv.req({"operation": "stats"})["indexes"].get(key, 0)
+        n = srv.req(req)["indexes"].get(key, 0)
         if n >= at_least:
             return n
         time.sleep(0.25)
@@ -1505,6 +1510,145 @@ def test_contradiction_detection(binary, port):
         after = srv.req({"operation": "stats"})["indexes"]["conflicts"]
         check(after < steady,
               f"removing one side clears the contradiction ({after})")
+
+
+def test_conflicts_op(binary, port):
+    print("[conflicts: which pairs contradict, not just how many (ROADMAP 5.4)]")
+    d = tempfile.mkdtemp(prefix="aegis_conflicts_op_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({
+            "defaults_to": {"object": "string", "cardinality": "one"},
+            "part_of": {"object": "id", "transitive": True},
+        }, fh)
+
+    with Server(binary, port, phase=4,
+                token_lines=["admintok", "tok-a acme rw", "tok-b beta rw"],
+                extra_args=["--predicate-registry", reg, "--inference",
+                            "--inference-interval-sec", "1"]) as srv:
+        def ins(tok, data, fact=None):
+            p = {"operation": "insert", "type": "semantic", "data": data,
+                 "token": tok}
+            if fact:
+                p["fact"] = fact
+            return srv.req(p)["record"]["id"]
+
+        # Each tenant contradicts itself, so a leak shows up as a pair the
+        # other tenant can see rather than as a merged count.
+        a_subj = ins("tok-a", "the recall hook")
+        a1 = ins("tok-a", "defaults to none",
+                 {"s": a_subj, "p": "defaults_to", "o": "none"})
+        a2 = ins("tok-a", "defaults to local",
+                 {"s": a_subj, "p": "defaults_to", "o": "local"})
+        b_subj = ins("tok-b", "the capture hook")
+        b1 = ins("tok-b", "defaults to session",
+                 {"s": b_subj, "p": "defaults_to", "o": "session"})
+        b2 = ins("tok-b", "defaults to turn",
+                 {"s": b_subj, "p": "defaults_to", "o": "turn"})
+
+        _await_stat(srv, "conflicts", at_least=2, token="admintok")
+
+        # An admin token sees every tenant's, each attributed. Without the
+        # namespace on the pair an admin could not tell whose it is.
+        allc = srv.req({"operation": "conflicts", "token": "admintok"})
+        check(allc.get("ok") is True, "conflicts answers for an admin token")
+        pairs = {(c["a"], c["b"]): c for c in allc["conflicts"]}
+        check(len(pairs) == 2, f"both tenants' pairs are listed ({pairs})")
+        check(tuple(sorted((a1, a2))) in pairs and
+              tuple(sorted((b1, b2))) in pairs,
+              "and they are the pairs that actually contradict")
+        one = pairs[tuple(sorted((a1, a2)))]
+        check(one["namespace"] == "acme", "each pair names its namespace")
+        check(one["reason"] == "cardinality" and
+              one["predicate_a"] == "defaults_to",
+              f"and why it is a contradiction ({one})")
+
+        # THE isolation check. A namespaced token sees its own and nothing
+        # else — the fact indexes are server-wide, so this is the property a
+        # naive implementation gets wrong.
+        mine = srv.req({"operation": "conflicts", "token": "tok-a"})
+        check([(c["a"], c["b"]) for c in mine["conflicts"]]
+              == [tuple(sorted((a1, a2)))],
+              f"a namespaced caller sees only its own tenant ({mine})")
+        check(mine["total"] == 1, "and its total counts only its own")
+
+        # A spoofed agent_id is ignored, exactly as export/purge ignore it:
+        # the token's namespace is the authority, not anything in the request.
+        spoofed = srv.req({"operation": "conflicts", "token": "tok-a",
+                           "agent_id": "beta"})
+        check([(c["a"], c["b"]) for c in spoofed["conflicts"]]
+              == [tuple(sorted((a1, a2)))],
+              "naming another tenant in the request changes nothing")
+
+        # limit is a page size, and `total` is the count regardless — so
+        # limit:0 is a usable "how many are there?" probe rather than an
+        # all-clear.
+        probe = srv.req({"operation": "conflicts", "token": "admintok",
+                         "limit": 0})
+        check(probe["conflicts"] == [] and probe["total"] == 2
+              and probe.get("capped") is True,
+              f"limit 0 counts without listing ({probe})")
+        page = srv.req({"operation": "conflicts", "token": "admintok",
+                        "limit": 1})
+        check(len(page["conflicts"]) == 1 and page["total"] == 2
+              and page.get("capped") is True,
+              f"a short page says so ({page})")
+        check(allc.get("capped") is None,
+              "and a complete answer carries no capped flag")
+
+        # The list is a gauge like the count, not a log: it is replaced whole
+        # each pass, so a contradiction resolved by hand stops being reported.
+        # This is what makes it safe to work through — an accumulating list
+        # would hand back pairs whose records are already gone.
+        srv.req({"operation": "relate", "token": "tok-a", "from_id": a2,
+                 "to_id": a1, "kind": "supersedes"})
+        srv.req({"operation": "delete", "token": "tok-a", "id": a1})
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            left = srv.req({"operation": "conflicts", "token": "tok-a"})
+            if left["total"] == 0:
+                break
+            time.sleep(0.5)
+        check(left["total"] == 0,
+              f"resolving one clears it from the list ({left})")
+        check(srv.req({"operation": "conflicts", "token": "admintok"})["total"]
+              == 1, "and the other tenant's is untouched")
+
+        # The list and the gauge are filled by the same loop, so they cannot
+        # disagree. If they ever do, one of them is lying about the corpus.
+        gauge = srv.req({"operation": "stats",
+                         "token": "admintok"})["indexes"]["conflicts"]
+        listed = srv.req({"operation": "conflicts",
+                          "token": "admintok"})["total"]
+        check(gauge == listed,
+              f"the count and the list agree ({gauge} vs {listed})")
+
+
+def test_conflicts_without_inference(binary, port):
+    print("[conflicts: nothing configured to reason with lists nothing]")
+    d = tempfile.mkdtemp(prefix="aegis_conflicts_off_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"defaults_to": {"object": "string", "cardinality": "one"}},
+                  fh)
+
+    # Same corpus, same registry, no --inference. The op must answer — it is a
+    # read like any other — and answer *empty*, because nothing has scanned.
+    # Failing here instead would make a client's adjudication loop error out on
+    # a server that simply has the feature off.
+    with Server(binary, port, phase=4,
+                extra_args=["--predicate-registry", reg]) as srv:
+        subj = srv.req({"operation": "insert", "type": "semantic",
+                        "data": "the recall hook"})["record"]["id"]
+        for val in ("none", "local"):
+            srv.req({"operation": "insert", "type": "semantic",
+                     "data": f"defaults to {val}",
+                     "fact": {"s": subj, "p": "defaults_to", "o": val}})
+        time.sleep(2)
+        res = srv.req({"operation": "conflicts"})
+        check(res.get("ok") is True, "conflicts answers with the job off")
+        check(res["conflicts"] == [] and res["total"] == 0,
+              f"and reports nothing, because nothing looked ({res})")
 
 
 def test_retraction(binary, port):
@@ -4369,6 +4513,8 @@ def main():
     test_inference_flag_validation(binary, 19575)
     test_retraction(binary, 19576)
     test_contradiction_detection(binary, 19582)
+    test_conflicts_op(binary, 19586)
+    test_conflicts_without_inference(binary, 19587)
     test_subsume_and_explain_derivation(binary, 19584)
     test_subsume_requires_inference(binary, 19585)
     test_retraction_survives_a_lost_queue(binary, 19577)
