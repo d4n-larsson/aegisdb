@@ -30,6 +30,16 @@ def record_to_memory(rec: dict, score: float | None = None) -> dict:
     }
     if score is not None:
         mem["score"] = round(score, 4)
+    # The typed claim (5.2) and the proof of it (5.3), when the record carries
+    # them. Both were being dropped on the floor here: `data` is prose, which a
+    # reader can search but cannot check, and a caller that asked `pattern` a
+    # question got back only the sentence — no way to see which fact matched,
+    # and no way to see why the record is believed at all.
+    if isinstance(rec.get("fact"), dict):
+        mem["fact"] = rec["fact"]
+    exp = rec.get("explain")
+    if isinstance(exp, dict) and isinstance(exp.get("derivation"), dict):
+        mem["derivation"] = exp["derivation"]
     return mem
 
 
@@ -178,7 +188,8 @@ class MemoryTools:
                top_k: int | None = None, kind: str | None = None,
                max_importance: float | None = None,
                order: str | None = None, lexical: bool = False,
-               pattern: dict | None = None) -> dict:
+               pattern: dict | None = None, subsume: bool = False,
+               derivations: bool = False) -> dict:
         """Recall memories. `lexical` opts into the server's BM25 keyword index
         (fused with the embedding when one is available), which is what makes an
         exact identifier findable and is the *only* content-based path when
@@ -202,6 +213,13 @@ class MemoryTools:
             # three positions bound this is an index probe, which is what makes
             # "does the corpus already say this?" cheap enough to ask per write.
             payload["pattern"] = pattern
+            if subsume:
+                # Broaden the subject through `is_a` at query time (5.3). A
+                # question about a layer has to reach a fact about one of its
+                # components, which is the whole multi-hop result — and it is
+                # an expansion of the *query*, not a materialized closure, so
+                # asking for it costs nothing when nothing subsumes.
+                payload["subsume"] = True
         if tags:
             payload["tags"] = tags
             payload["match"] = match
@@ -236,7 +254,11 @@ class MemoryTools:
         # authoritative — re-sorting by client-side cosine would throw the fusion
         # away — so ask it to explain and carry its score through.
         server_ranked = want_lexical
-        if server_ranked:
+        if server_ranked or derivations:
+            # `explain` carries two unrelated things: the ranking breakdown the
+            # fused path needs, and the derivation the read path renders. A
+            # pattern search is not server-ranked, so the flag has to be
+            # reachable on its own.
             payload["explain"] = True
 
         try:
@@ -250,6 +272,8 @@ class MemoryTools:
                 and str(resp.get("error", {}).get("code", "")) == "NOT_READY"):
             for k in ("query", "explain", "min_score"):
                 payload.pop(k, None)
+            if derivations:
+                payload["explain"] = True
             want_lexical = False
             server_ranked = False
             try:

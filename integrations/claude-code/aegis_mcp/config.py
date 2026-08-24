@@ -85,6 +85,10 @@ class Config:
     # server refuses, which looks like a bad model rather than a misconfiguration.
     extract_triples: bool = False
     extract_registry: str = ""  # path to the server's --predicate-registry file
+    # The read path (ROADMAP 5.4 §5). Both default off and both are strictly
+    # additive: with them off, search behaves exactly as it does today.
+    ask_pattern: bool = False  # let the model express a question as a pattern
+    ask_verbalize: bool = False  # render a derivation as prose beside it
     extract_max_triples: int = 16  # cap candidates proposed per transcript
     # Grounding a mention to an entity record (ROADMAP 5.4 §4). The floor is
     # high on purpose: conflating two entities writes facts about the wrong
@@ -150,6 +154,8 @@ _ENV = {
     "extract_supersede_top_k": "AEGIS_EXTRACT_SUPERSEDE_TOP_K",
     "extract_supersede_min_score": "AEGIS_EXTRACT_SUPERSEDE_MIN_SCORE",
     "extract_triples": "AEGIS_EXTRACT_TRIPLES",
+    "ask_pattern": "AEGIS_ASK_PATTERN",
+    "ask_verbalize": "AEGIS_ASK_VERBALIZE",
     "extract_registry": "AEGIS_EXTRACT_REGISTRY",
     "extract_max_triples": "AEGIS_EXTRACT_MAX_TRIPLES",
     "grounding_min_score": "AEGIS_GROUNDING_MIN_SCORE",
@@ -159,7 +165,7 @@ _ENV = {
 }
 
 _BOOL = {"recall_enabled", "capture_enabled", "extract_supersede",
-         "extract_triples"}
+         "extract_triples", "ask_pattern", "ask_verbalize"}
 _INT = {
     "aegis_port", "connect_timeout_ms", "read_timeout_ms",
     "embedding_dimensions", "recall_time_budget_ms", "recall_top_k",

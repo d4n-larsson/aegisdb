@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys
 
+from .ask import ask, verbalize_all
 from .client import AegisClient, check_startup
 from .config import load_config
 from .embeddings import make_provider
@@ -100,6 +101,38 @@ def build_tools(config=None) -> MemoryTools:
     return MemoryTools(config, client, provider)
 
 
+def _read_path(config):
+    """The vocabulary and extractor the read path needs, or (None, None).
+
+    Loaded once: the registry is the file the server was started with, and
+    re-reading it per query would buy nothing but a syscall. A broken registry
+    is said out loud and then disables the read path — never the whole server,
+    which would take ordinary search down with it over a feature that is
+    defined as strictly additive.
+    """
+    if not (getattr(config, "ask_pattern", False)
+            or getattr(config, "ask_verbalize", False)):
+        return None, None
+    from .extract import VocabularyError, load_vocabulary, make_extraction_provider
+    vocab = None
+    if getattr(config, "ask_pattern", False):
+        try:
+            vocab = load_vocabulary(getattr(config, "extract_registry", ""))
+        except VocabularyError as e:
+            print(f"[aegis-mcp] read path: {e}", file=sys.stderr)
+            return None, None
+        if vocab is None:
+            print("[aegis-mcp] AEGIS_ASK_PATTERN is set but no registry is "
+                  "configured (AEGIS_EXTRACT_REGISTRY); questions fall back to "
+                  "ordinary search", file=sys.stderr)
+    provider = make_extraction_provider(config)
+    if not provider.available():
+        print("[aegis-mcp] read path: no extraction backend available; "
+              "questions fall back to ordinary search", file=sys.stderr)
+        return None, None
+    return vocab, provider
+
+
 def main() -> int:
     # Ergonomic alias: `uvx aegisdb-mcp init …` runs the setup scaffolder. Claude
     # Code launches the server with no args, so this never shadows normal use.
@@ -114,6 +147,7 @@ def main() -> int:
 
     tools = build_tools()
     mcp = _new_server(server_cls, "memory")
+    read_vocab, read_extractor = _read_path(tools.config)
 
     @mcp.tool()
     def memory_save(text: str, tags: list[str] | None = None,
@@ -131,6 +165,16 @@ def main() -> int:
         recency. `query` matches both semantically and literally, so searching an
         exact identifier — a flag like `--tenant-max-records`, a `file.c:line`
         reference, an error code — finds the memory containing that token."""
+        # The read path takes the question only when the question is the whole
+        # request. A pattern lookup carries no tags and no time range, so
+        # answering a filtered search symbolically would drop the filters and
+        # return something that looks like an answer to what was asked.
+        unfiltered = bool(query) and not tags and start_time is None \
+            and end_time is None
+        if unfiltered and read_extractor is not None:
+            res = ask(tools, query, read_vocab, tools.config, read_extractor,
+                      top_k=top_k)
+            return verbalize_all(tools, res, tools.config, read_extractor)
         return tools.search(query=query, tags=tags, match=match,
                            start_time=start_time, end_time=end_time,
                            top_k=top_k, lexical=True)
