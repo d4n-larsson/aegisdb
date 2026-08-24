@@ -369,7 +369,7 @@ token: 9f3c…              # give to the client (AEGIS_TOKEN); not recoverable
 | `--no-edge-index` | off (index on) | Disable the reverse edge index; a backward `traverse` then returns `NOT_READY` |
 | `--no-fact-index` | off (indexes on) | Disable the typed-fact indexes; a `pattern` then returns `NOT_READY` |
 | `--no-usage-feedback` | off (tracking on) | Stop tracking recall counts, so `forget` scores on write-time importance alone |
-| `--predicate-registry <path>` | — | Declare the typed-fact vocabulary (cardinality, symmetry, transitivity, `inverse_of`, `mutex_with`). A `fact` naming an undeclared predicate is refused; a malformed registry refuses to start |
+| `--predicate-registry <path>` | — | Declare the typed-fact vocabulary (cardinality, symmetry, transitivity, `inverse_of`, `mutex_with`). A `fact` naming an undeclared predicate is refused; a malformed registry refuses to start. `predicates.example.json` is a starter vocabulary — see [`tools/facts/`](tools/facts/) |
 | `--inference` | off | Materialize the declared closures on a background tick, per namespace, and flag contradictions. Off by default because it grows the log rather than RAM |
 | `--inference-interval-sec <n>` | `30` | Cadence of the inference pass |
 | `--inference-max-depth <n>` | `4` | Longest derivation chain a conclusion may rest on |
@@ -545,6 +545,7 @@ src/
 └── util/               # CRC32, SHA-256, config, health check, client, logging
 include/aegisdb/        # Public headers
 clients/python/         # `aegisdb` — the dependency-free client SDK
+predicates.example.json # starter typed-fact vocabulary (see tools/facts/)
 integrations/           # claude-code (MCP), langgraph (store), prometheus-exporter
 tests/                  # unit/, integration/, contract/
 third_party/            # Vendored cJSON and Unity
@@ -678,4 +679,5 @@ that and the manual step-by-step.
   [`docs/neuro-symbolic-design.md`](docs/neuro-symbolic-design.md)
 - Recall-quality eval harness: [`eval/README.md`](eval/README.md)
 - Python client SDK: [`clients/python/README.md`](clients/python/README.md)
+- Starter predicate vocabulary + a worked fact corpus: [`tools/facts/README.md`](tools/facts/README.md)
 - LangGraph store adapter: [`integrations/langgraph/README.md`](integrations/langgraph/README.md)
