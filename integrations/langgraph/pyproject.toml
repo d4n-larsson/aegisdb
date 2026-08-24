@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aegisdb-langgraph"
+# From the git tag, like every other package here, so the server, the client,
+# the Claude Code integration and this adapter all carry one version.
+dynamic = ["version"]
+description = "Use AegisDB as a LangGraph long-term-memory store"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["aegisdb", "langgraph", "langchain", "agent-memory", "store"]
+dependencies = [
+    # The client. Dependency-free itself, and the only thing that speaks the
+    # wire protocol — this package owns the LangGraph mapping and nothing else.
+    "aegisdb",
+    # `BaseStore` and the op types live here, not in the `langgraph` package,
+    # so the adapter does not drag in the graph runtime to be installed. The
+    # upper bound is deliberate: `BaseStore` is an ABC whose abstract surface a
+    # major could widen, and an unbounded range is what broke aegisdb-mcp on
+    # mcp 2.0. Raise it after checking the next major actually works.
+    "langgraph-checkpoint>=2,<5",
+]
+
+[project.urls]
+Homepage = "https://github.com/d4n-larsson/aegisdb"
+Repository = "https://github.com/d4n-larsson/aegisdb"
+Issues = "https://github.com/d4n-larsson/aegisdb/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "langgraph>=0.2"]
+
+[tool.setuptools]
+packages = ["aegisdb_langgraph"]
+
+[tool.setuptools_scm]
+root = "../.."
