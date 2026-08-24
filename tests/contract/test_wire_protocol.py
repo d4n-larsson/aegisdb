@@ -1512,6 +1512,146 @@ def test_contradiction_detection(binary, port):
               f"removing one side clears the contradiction ({after})")
 
 
+def test_derived_records_name_what_they_are_about(binary, port):
+    print("[inference: a conclusion says what it is about, not '#4 part_of #1']")
+    d = tempfile.mkdtemp(prefix="aegis_prose_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"part_of": {"object": "id", "transitive": True},
+                   "defaults_to": {"object": "string", "cardinality": "one"}},
+                  fh)
+
+    with Server(binary, port, phase=4,
+                extra_args=["--predicate-registry", reg, "--inference",
+                            "--inference-interval-sec", "1"]) as srv:
+        def ins(data, fact=None, tags=None):
+            p = {"operation": "insert", "type": "semantic", "data": data,
+                 "tags": tags or []}
+            if fact:
+                p["fact"] = fact
+            return srv.req(p)["record"]["id"]
+
+        server_e = ins("the server", tags=["entity"])
+        storage = ins("the storage layer", tags=["entity"])
+        hnsw = ins("hnsw.c", tags=["entity"])
+        ins("storage is part of the server",
+            {"s": storage, "p": "part_of", "o": {"id": server_e}})
+        ins("hnsw.c is part of storage",
+            {"s": hnsw, "p": "part_of", "o": {"id": storage}})
+
+        _await_stat(srv, "derived", at_least=1)
+        got = srv.req({"operation": "search",
+                       "pattern": {"s": hnsw, "p": "part_of",
+                                   "o": {"id": server_e}},
+                       "top_k": 5})["records"]
+        check(len(got) == 1, f"the transitive conclusion exists ({got})")
+        text = got[0]["data"]
+        check(text == "hnsw.c part_of the server (derived: transitive)",
+              f"it names its entities: {text!r}")
+
+        # THE consequence. The lexical index tokenizes `data`, so a conclusion
+        # written as "#3 part_of #1" carried none of the words it was about and
+        # no keyword or embedding query could reach it — leaving derived
+        # records gated ONTO the symbolic path, the reverse of the horizon's
+        # rule that recall is never gated on it.
+        hits = srv.req({"operation": "search", "query": "hnsw.c",
+                        "top_k": 10})["records"]
+        check(any("(derived:" in h["data"] for h in hits),
+              f"a keyword query reaches the conclusion ({[h['data'] for h in hits]})")
+
+        # A literal object is quoted, and the subject still named.
+        hook = ins("the recall hook", tags=["entity"])
+        ins("the hook defaults to none",
+            {"s": hook, "p": "defaults_to", "o": "none"})
+        time.sleep(2)
+        rec = srv.req({"operation": "get", "id": hook})
+        check(rec.get("ok") is True, "the entity survives")
+
+
+def test_a_conclusion_survives_a_tombstoned_entity(binary, port):
+    print("[inference: naming falls back to the id when the entity is gone]")
+    d = tempfile.mkdtemp(prefix="aegis_prose_gone_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"part_of": {"object": "id", "transitive": True}}, fh)
+
+    # The subject of a conclusion can be deleted between the pass loading the
+    # facts and the conclusion being written. There is then no prose to name it
+    # with, and a conclusion with an empty payload would be refused by insert —
+    # so the id form has to remain reachable as a fallback.
+    with Server(binary, port, phase=4,
+                extra_args=["--predicate-registry", reg, "--inference",
+                            "--inference-interval-sec", "1"]) as srv:
+        def ins(data, fact=None):
+            p = {"operation": "insert", "type": "semantic", "data": data}
+            if fact:
+                p["fact"] = fact
+            return srv.req(p)["record"]["id"]
+
+        a = ins("alpha")
+        b = ins("beta")
+        c = ins("gamma")
+        ins("a in b", {"s": a, "p": "part_of", "o": {"id": b}})
+        ins("b in c", {"s": b, "p": "part_of", "o": {"id": c}})
+        _await_stat(srv, "derived", at_least=1)
+
+        # Remove the middle entity's prose; the closure is already materialized
+        # so nothing should break, and a later pass must still produce a
+        # non-empty payload.
+        srv.req({"operation": "delete", "id": b})
+        time.sleep(3)
+        st = srv.req({"operation": "stats"})
+        check(st.get("ok") is True, "the job keeps running with a gap")
+        got = srv.req({"operation": "search",
+                       "pattern": {"s": a, "p": "part_of", "o": {"id": c}},
+                       "top_k": 5})["records"]
+        for r in got:
+            check(bool(r["data"]), f"the conclusion still has a payload: {r}")
+
+
+def test_a_long_multibyte_entity_name_stays_decodable(binary, port):
+    print("[inference: truncating a name never splits a UTF-8 sequence]")
+    d = tempfile.mkdtemp(prefix="aegis_prose_utf8_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"part_of": {"object": "id", "transitive": True}}, fh)
+
+    # `data` is opaque bytes to the server — nothing validates it as UTF-8 —
+    # but it is emitted into a JSON response. A name cut mid-codepoint makes
+    # that response undecodable for any client that decodes strictly, which
+    # `srv.req` does. The name is deliberately long enough to be truncated and
+    # built so that a byte-count cut lands inside a multi-byte character.
+    long_name = ("café — naïve résumé 😀 " * 12)
+    with Server(binary, port, phase=4,
+                extra_args=["--predicate-registry", reg, "--inference",
+                            "--inference-interval-sec", "1"]) as srv:
+        def ins(data, fact=None):
+            p = {"operation": "insert", "type": "semantic", "data": data}
+            if fact:
+                p["fact"] = fact
+            return srv.req(p)["record"]["id"]
+
+        a = ins(long_name + " A")
+        b = ins(long_name + " B")
+        c = ins(long_name + " C")
+        ins("a in b", {"s": a, "p": "part_of", "o": {"id": b}})
+        ins("b in c", {"s": b, "p": "part_of", "o": {"id": c}})
+        _await_stat(srv, "derived", at_least=1)
+
+        # Decoding the response at all is the assertion: srv.req does
+        # json.loads over a UTF-8 decode, which raises on a split sequence.
+        got = srv.req({"operation": "search",
+                       "pattern": {"s": a, "p": "part_of", "o": {"id": c}},
+                       "top_k": 5})["records"]
+        check(len(got) == 1, f"the conclusion exists ({len(got)})")
+        text = got[0]["data"]
+        check(text.encode("utf-8").decode("utf-8") == text,
+              "the payload round-trips as UTF-8")
+        check(len(text.encode("utf-8")) < 512,
+              f"and stays inside the conclusion buffer ({len(text)})")
+        check("part_of" in text, f"it is still a readable conclusion: {text[:60]!r}")
+
+
 def test_conflicts_op(binary, port):
     print("[conflicts: which pairs contradict, not just how many (ROADMAP 5.4)]")
     d = tempfile.mkdtemp(prefix="aegis_conflicts_op_")
@@ -4637,6 +4777,9 @@ def main():
     test_inference_flag_validation(binary, 19575)
     test_retraction(binary, 19576)
     test_contradiction_detection(binary, 19582)
+    test_derived_records_name_what_they_are_about(binary, 19591)
+    test_a_conclusion_survives_a_tombstoned_entity(binary, 19592)
+    test_a_long_multibyte_entity_name_stays_decodable(binary, 19593)
     test_conflicts_op(binary, 19586)
     test_conflicts_without_inference(binary, 19587)
     test_conflicts_scope_without_a_namespaced_token(binary, 19588)

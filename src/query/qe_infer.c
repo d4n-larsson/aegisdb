@@ -103,35 +103,167 @@ static int load_facts(AegisDB *db, LoadedFact **out, size_t *out_n) {
     return 0;
 }
 
+/* ----- naming the things a conclusion is about --------------------------- */
+
+/* Longest entity prose carried into a conclusion. Two of these plus a
+ * predicate (64) and the rule suffix must fit the 512-byte buffer below. */
+#define CONCLUSION_NAME_MAX 160
+
+/* Distinct entities cached per namespace pass. A closure names the same few
+ * things over and over — every `part_of` conclusion in a tree shares one
+ * object — so this turns a lookup per conclusion into one per entity. Past the
+ * cap lookups still happen, just uncached: slower, never wrong. */
+#define NAME_CACHE_MAX 512
+
+typedef struct {
+    uint64_t id;
+    char *text; /* owned, already truncated to CONCLUSION_NAME_MAX */
+} NameEntry;
+
+typedef struct {
+    NameEntry *items;
+    size_t n;
+    size_t cap;
+} NameCache;
+
+/* Copy at most `cap`-1 bytes of `src`, never splitting a UTF-8 sequence.
+ *
+ * `data` is opaque bytes to the server — nothing validates it as UTF-8 — but
+ * it is emitted into a JSON response, and a payload cut mid-codepoint makes
+ * that response undecodable for any client that decodes strictly (Python's
+ * json among them). So a truncation walks back to a lead byte rather than
+ * landing wherever the byte count fell. */
+static void copy_utf8_bounded(char *dst, size_t cap, const char *src,
+                              size_t src_len) {
+    if (cap == 0) {
+        return;
+    }
+    size_t n = src_len < cap - 1 ? src_len : cap - 1;
+    if (n < src_len) {
+        /* Walk back off the continuation bytes (10xxxxxx) of the sequence the
+         * cut landed inside. Once src[n] is not a continuation it begins a
+         * codepoint, so src[0, n) ends exactly on a boundary — there is no
+         * second case to handle, because a lead byte at n-1 would mean a
+         * continuation at n, which this loop has already consumed. */
+        while (n > 0 && ((unsigned char)src[n] & 0xC0) == 0x80) {
+            n--;
+        }
+    }
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+/* The prose of the record `id` names, or NULL when it cannot be read.
+ *
+ * NULL is ordinary rather than exceptional: an entity tombstoned between the
+ * pass loading its facts and this call has no prose, and the caller falls back
+ * to the id form. */
+static const char *entity_name(AegisDB *db, NameCache *nc, uint64_t id,
+                               char *scratch, size_t scratch_cap) {
+    for (size_t i = 0; nc && i < nc->n; i++) {
+        if (nc->items[i].id == id) {
+            return nc->items[i].text;
+        }
+    }
+    MemoryRecord r;
+    if (qe_get(db, id, NULL, &r) != AEGIS_OK) {
+        return NULL;
+    }
+    if (!r.data || r.data_len == 0) {
+        record_free(&r);
+        return NULL;
+    }
+    copy_utf8_bounded(scratch, scratch_cap, r.data, r.data_len);
+    record_free(&r);
+    if (!nc || nc->n >= NAME_CACHE_MAX) {
+        return scratch; /* uncached: valid until the next call */
+    }
+    if (nc->n == nc->cap) {
+        size_t ncap = nc->cap ? nc->cap * 2 : 16;
+        NameEntry *ni = realloc(nc->items, ncap * sizeof(*ni));
+        if (!ni) {
+            return scratch; /* out of memory for the cache, not for the name */
+        }
+        nc->items = ni;
+        nc->cap = ncap;
+    }
+    char *owned = strdup(scratch);
+    if (!owned) {
+        return scratch;
+    }
+    nc->items[nc->n].id = id;
+    nc->items[nc->n].text = owned;
+    nc->n++;
+    return owned;
+}
+
+static void name_cache_free(NameCache *nc) {
+    for (size_t i = 0; i < nc->n; i++) {
+        free(nc->items[i].text);
+    }
+    free(nc->items);
+    nc->items = NULL;
+    nc->n = nc->cap = 0;
+}
+
 /* Prose for a derived record. A conclusion that shows up in a search result
  * should be readable by whoever finds it, and `insert` refuses an empty
- * payload — so this is required, not decoration. */
-static void conclusion_text(char *buf, size_t cap, const InferConclusion *c,
-                            const InferRoute *rt) {
+ * payload — so this is required, not decoration.
+ *
+ * It names the entities rather than their ids. The id form was not merely
+ * ugly: the lexical index tokenizes `data`, so a conclusion about `hnsw.c`
+ * that said "#4 part_of #1" carried no `hnsw` token and could not be found by
+ * any keyword or embedding query — reachable only by `pattern`, which inverts
+ * the horizon's rule that recall is never gated on the symbolic path. */
+static void conclusion_text(AegisDB *db, NameCache *nc, char *buf, size_t cap,
+                            const InferConclusion *c, const InferRoute *rt) {
     static const char *const RULE[] = {"", "transitive", "symmetric",
                                        "inverse"};
     const char *rule = (rt->rule >= 1 && rt->rule <= 3) ? RULE[rt->rule] : "?";
+    char subj_buf[CONCLUSION_NAME_MAX + 1];
+    char obj_buf[CONCLUSION_NAME_MAX + 1];
+    char id_buf[32];
+
+    const char *subj =
+        entity_name(db, nc, c->subject, subj_buf, sizeof subj_buf);
+    if (!subj) {
+        snprintf(id_buf, sizeof id_buf, "#%llu",
+                 (unsigned long long)c->subject);
+        subj = id_buf;
+    }
+
     if (c->object_kind == FACT_OBJ_ID) {
-        snprintf(buf, cap, "#%llu %s #%llu (derived: %s)",
-                 (unsigned long long)c->subject, c->predicate,
-                 (unsigned long long)c->object_id, rule);
+        char obj_id_buf[32];
+        const char *obj =
+            entity_name(db, nc, c->object_id, obj_buf, sizeof obj_buf);
+        if (!obj) {
+            snprintf(obj_id_buf, sizeof obj_id_buf, "#%llu",
+                     (unsigned long long)c->object_id);
+            obj = obj_id_buf;
+        }
+        snprintf(buf, cap, "%s %s %s (derived: %s)", subj, c->predicate, obj,
+                 rule);
     } else {
-        snprintf(buf, cap, "#%llu %s \"%s\" (derived: %s)",
-                 (unsigned long long)c->subject, c->predicate,
-                 c->object_str ? c->object_str : "", rule);
+        /* A literal object is client-supplied and unbounded, so it gets the
+         * same treatment as a name. */
+        copy_utf8_bounded(obj_buf, sizeof obj_buf,
+                          c->object_str ? c->object_str : "",
+                          c->object_str ? strlen(c->object_str) : 0);
+        snprintf(buf, cap, "%s %s \"%s\" (derived: %s)", subj, c->predicate,
+                 obj_buf, rule);
     }
 }
 
 /* Write one conclusion as a record, then link it to its premises. Returns 0 on
  * success, -1 if the record could not be written. */
-static int write_conclusion(AegisDB *db, const InferConclusion *c,
-                            const char *ns) {
+static int write_conclusion(AegisDB *db, NameCache *nc,
+                            const InferConclusion *c, const char *ns) {
     MemoryRecord in;
     record_init(&in);
     in.type = MEM_SEMANTIC;
     in.confidence = c->confidence;
     char text[512];
-    conclusion_text(text, sizeof text, c, &c->routes[0]);
+    conclusion_text(db, nc, text, sizeof text, c, &c->routes[0]);
     in.data = text; /* borrowed; qe_insert copies */
     in.data_len = strlen(text);
     if (ns && *ns) {
@@ -455,11 +587,16 @@ static size_t run_namespace(AegisDB *db, const LoadedFact *facts, size_t n,
         return 0;
     }
     size_t written = 0;
+    /* One cache per namespace pass: a closure names the same handful of
+     * entities repeatedly, so this is close to one lookup per entity rather
+     * than two per conclusion. */
+    NameCache names = {0};
     for (size_t i = 0; i < res.n; i++) {
-        if (write_conclusion(db, &res.items[i], ns) == 0) {
+        if (write_conclusion(db, &names, &res.items[i], ns) == 0) {
             written++;
         }
     }
+    name_cache_free(&names);
     *cand_budget -= res.candidates_examined < *cand_budget
                         ? res.candidates_examined
                         : *cand_budget;
