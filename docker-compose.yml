@@ -168,6 +168,14 @@ services:
       AEGIS_PORT: "${AEGIS_PORT:-9470}"
       AEGIS_AUTH_TOKEN: "${AEGIS_AUTH_TOKEN:-}"    # admin token if auth is on
       AEGIS_EXPORTER_PORT: "${AEGIS_METRICS_PORT:-9471}"
+      # Distillation backlog (ROADMAP 3.3). Off unless asked for: unlike every
+      # other metric here it is a filtered scan rather than a counter read, so
+      # only a deployment that actually runs `aegisdb-summarize` should pay it.
+      # The two thresholds are the same variables the summarize sidecar reads,
+      # so a single .env keeps the job and the metric describing the same rule.
+      AEGIS_EXPORTER_DISTILLATION: "${AEGIS_EXPORTER_DISTILLATION:-}"
+      AEGIS_SUMMARY_MIN_AGE_MS: "${AEGIS_SUMMARY_MIN_AGE_MS:-604800000}"
+      AEGIS_SUMMARY_MAX_IMPORTANCE: "${AEGIS_SUMMARY_MAX_IMPORTANCE:-0.6}"
     restart: unless-stopped
 
   # Bundled Prometheus (opt-in): `docker compose --profile monitoring up`.

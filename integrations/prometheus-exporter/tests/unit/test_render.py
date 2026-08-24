@@ -209,3 +209,127 @@ class TestConfig(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestDistillationLag(unittest.TestCase):
+    """The opt-in backlog metrics (ROADMAP 3.3).
+
+    The thing these guard is the difference between "no backlog" and "not
+    measured". Both are the absence of a problem to a careless reader, and only
+    one of them is actually information.
+    """
+
+    def _lines(self, text, needle="distillation"):
+        return [l for l in text.splitlines()
+                if needle in l and not l.startswith("#")]
+
+    def test_absent_entirely_when_disabled(self):
+        """Not zero — absent. A gauge reading 0 for "we did not look" makes the
+        healthy state and the unmeasured state identical on a dashboard."""
+        out = render(SAMPLE, cfg=Config(env={}))
+        self.assertEqual(self._lines(out), [])
+
+    def test_backlog_and_age_are_exported(self):
+        out = render(SAMPLE, distillation={"backlog": 42, "capped": False,
+                                           "oldest_age_ms": 90000},
+                     cfg=Config(env={"AEGIS_EXPORTER_DISTILLATION": "1"}))
+        self.assertIn("aegisdb_distillation_backlog 42", out)
+        self.assertIn("aegisdb_distillation_backlog_capped 0", out)
+        # Milliseconds on the wire, seconds in Prometheus — the base unit.
+        self.assertIn("aegisdb_distillation_oldest_age_seconds 90", out)
+
+    def test_a_capped_backlog_says_so(self):
+        """A scan-capped count is a floor. Presented as a total it is the kind
+        of quiet lie an alert gets built on."""
+        out = render(SAMPLE, distillation={"backlog": 100, "capped": True,
+                                           "oldest_age_ms": 0},
+                     cfg=Config(env={"AEGIS_EXPORTER_DISTILLATION": "1"}))
+        self.assertIn("aegisdb_distillation_backlog_capped 1", out)
+
+    def test_the_thresholds_used_are_exported(self):
+        """The server does not know the distiller's thresholds, so these are
+        the exporter's copy. Exported so a mismatch with the job's own config is
+        visible on the dashboard instead of silently wrong in the backlog."""
+        out = render(SAMPLE, distillation={"backlog": 0, "capped": False,
+                                           "oldest_age_ms": 0},
+                     cfg=Config(env={"AEGIS_EXPORTER_DISTILLATION": "1",
+                                     "AEGIS_SUMMARY_MIN_AGE_MS": "86400000",
+                                     "AEGIS_SUMMARY_MAX_IMPORTANCE": "0.25"}))
+        self.assertIn("aegisdb_distillation_min_age_seconds 86400", out)
+        self.assertIn("aegisdb_distillation_max_importance 0.25", out)
+
+    def test_thresholds_appear_even_when_the_query_failed(self):
+        """`distillation` is None when the backlog query failed and nothing was
+        cached. The thresholds still describe the configuration, and dropping
+        them would make a failing scrape look like a disabled one."""
+        out = render(SAMPLE, distillation=None,
+                     cfg=Config(env={"AEGIS_EXPORTER_DISTILLATION": "1"}))
+        self.assertIn("aegisdb_distillation_min_age_seconds", out)
+        self.assertEqual(self._lines(out, "aegisdb_distillation_backlog"), [])
+
+    def test_defaults_match_the_summarizers(self):
+        """Duplicated config is only safe while the copies agree. These are
+        aegis_mcp.config.Config's defaults; if either moves, this fails."""
+        cfg = Config(env={})
+        self.assertEqual(cfg.summary_min_age_ms, 604800000)  # 7 days
+        self.assertEqual(cfg.summary_max_importance, 0.6)
+        self.assertFalse(cfg.distillation, "off by default: it costs a scan")
+        self.assertEqual(cfg.distillation_interval, 60.0)
+
+
+class TestDistillationCache(unittest.TestCase):
+    def setUp(self):
+        import aegis_exporter
+        aegis_exporter._distillation_cache.update(at=None, value=None)
+
+    def test_recomputed_at_most_once_per_interval(self):
+        """The scan is 13x the cost of `stats` on a 50k corpus, so a tight
+        scrape interval must not turn it into a busy loop."""
+        import aegis_exporter
+        calls = []
+
+        def fake(cfg, now_ms):
+            calls.append(now_ms)
+            return {"backlog": len(calls), "capped": False, "oldest_age_ms": 0}
+
+        real = aegis_exporter.fetch_distillation
+        aegis_exporter.fetch_distillation = fake
+        try:
+            cfg = Config(env={"AEGIS_EXPORTER_DISTILLATION": "1",
+                              "AEGIS_EXPORTER_DISTILLATION_INTERVAL_SEC": "300"})
+            first = aegis_exporter._distillation(cfg, 1000)
+            second = aegis_exporter._distillation(cfg, 2000)
+            self.assertEqual(len(calls), 1, "the second scrape reused the cache")
+            self.assertEqual(first, second)
+        finally:
+            aegis_exporter.fetch_distillation = real
+
+    def test_a_failure_keeps_the_last_value(self):
+        """The backlog moves slowly. Dropping it to nothing on one timed-out
+        query would look exactly like the distiller having caught up."""
+        import aegis_exporter
+        cfg = Config(env={"AEGIS_EXPORTER_DISTILLATION": "1",
+                          "AEGIS_EXPORTER_DISTILLATION_INTERVAL_SEC": "0"})
+        real = aegis_exporter.fetch_distillation
+        aegis_exporter.fetch_distillation = lambda c, n: {
+            "backlog": 7, "capped": False, "oldest_age_ms": 0}
+        try:
+            self.assertEqual(aegis_exporter._distillation(cfg, 1)["backlog"], 7)
+            aegis_exporter.fetch_distillation = _raise_scrape
+            kept = aegis_exporter._distillation(cfg, 2)
+            self.assertEqual(kept["backlog"], 7, "the last good value stands")
+        finally:
+            aegis_exporter.fetch_distillation = real
+
+    def test_disabled_never_queries(self):
+        import aegis_exporter
+        real = aegis_exporter.fetch_distillation
+        aegis_exporter.fetch_distillation = _raise_scrape
+        try:
+            self.assertIsNone(aegis_exporter._distillation(Config(env={}), 1))
+        finally:
+            aegis_exporter.fetch_distillation = real
+
+
+def _raise_scrape(cfg, now_ms):
+    from aegis_exporter import ScrapeError
+    raise ScrapeError("timed out")

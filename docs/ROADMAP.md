@@ -259,10 +259,33 @@ behind the provider seam.*
   for itself immediately — `token_revoke` was coercing a string fingerprint to
   an `int`, which raised on every real id, and `promote` carried a client-side
   copy of a server default that had drifted from it.
+- **Shipped (distillation lag — `AEGIS_EXPORTER_DISTILLATION=1`):** the last
+  gap in the "first-class metrics" list above. Two gauges, because either alone
+  misleads: `aegisdb_distillation_backlog` is how much work is waiting, and
+  `aegisdb_distillation_oldest_age_seconds` is how long the eldest piece has
+  waited — which is what separates a steady trickle from a job that stopped
+  running a month ago. Plus a Grafana panel.
+- **The open question resolved, and its cost stated.** "Who computes the
+  backlog?" — the exporter, because the eligibility rule is the *job's*
+  (episodic, older than `summary_min_age_ms`, under `summary_max_importance`)
+  and the server does not know it. That means the thresholds are duplicated, so
+  they are duplicated **visibly**: the exporter reads the same environment
+  variables the job reads and exports both as gauges, making a mismatch
+  something a dashboard shows rather than a number that quietly lies.
+- **Off by default, and measured rather than assumed.** Every other metric is a
+  read of counters the server already holds; this is a filtered scan. On a
+  50k-record corpus: `stats` 3.4 ms, backlog `count` 44.5 ms, oldest-eligible
+  `search` 44.4 ms — a ~26x scrape that grows with the corpus. Hence opt-in,
+  plus a recompute interval independent of the scrape interval so a tight
+  Prometheus cadence cannot turn a scan into a busy loop.
+- **Two absences that mean opposite things**, kept distinguishable: with the
+  feature off the series are absent rather than `0`, because a gauge reading
+  zero for "we did not look" makes the healthy state and the unmeasured state
+  identical; and past `--query-scan-cap` the backlog is a *floor*, reported as
+  its own `..._capped` gauge rather than folded in, because a floor presented
+  as a total is what an alert gets wrongly built on.
 - **Remaining:** framework adapters beyond MCP (the SDK is the thing they were
-  waiting on); distillation-lag metrics — the summarizer runs as an
-  operator-scheduled job, so "how far behind is it?" needs a decision about who
-  computes the backlog before it needs code.
+  waiting on) — the last item in this horizon.
 
 ---
 
