@@ -36,6 +36,16 @@ def _registry_file():
     return path
 
 
+def res_subject_id(tools, mention):
+    """The entity record id for a mention that grounding just minted."""
+    hits = tools.search(query=mention, tags=["entity"], top_k=5,
+                        lexical=True).get("memories", [])
+    for m in hits:
+        if (m.get("text") or "").strip().casefold() == mention.casefold():
+            return m["id"]
+    raise AssertionError(f"no entity record for {mention!r}: {hits}")
+
+
 @unittest.skipUnless(binary_available(), "aegisdb binary not built")
 class TestTriplesE2E(unittest.TestCase):
     def setUp(self):
@@ -215,6 +225,46 @@ class TestTriplesE2E(unittest.TestCase):
             self.assertEqual(stored, 1, "the triple is stored on its own")
             self.assertEqual(len(tools.search(tags=["fact"], top_k=5)
                                   .get("memories", [])), 1)
+
+    def test_a_model_shaped_reply_survives_the_whole_pipeline(self):
+        """The fake speaks an explicit line format; a real backend returns
+        JSON. This runs the shape a model actually produces — fenced, with a
+        stray out-of-vocabulary predicate and a numeric literal — through
+        parsing, validation, grounding and the server."""
+        from aegis_mcp.extract import _LLMExtractionProvider
+
+        class JSONModel(_LLMExtractionProvider):
+            def available(self):
+                return True
+
+            def _complete(self, prompt):
+                # A real reply: prose around a fence, and one invented
+                # predicate the registry must reject rather than coerce.
+                return (
+                    "Here are the relationships I found:\n"
+                    "```json\n"
+                    '[{"s": "hnsw.c", "p": "part_of", "o": "the storage layer"},\n'
+                    ' {"s": "hnsw.c", "p": "is_maintained_by", "o": "retrieval"},\n'
+                    ' {"s": "the pool", "p": "defaults_to", "o": 20}]\n'
+                    "```\n")
+
+        with AegisServer(extra_args=["--predicate-registry", self.registry]) as srv:
+            cfg, tools = self._wired(srv)
+            res = store_triples(tools, "any transcript",
+                                load_vocabulary(self.registry), cfg, JSONModel())
+
+            self.assertEqual(res.proposed, 3)
+            self.assertEqual(res.rejected, 1, "is_maintained_by is not declared")
+            self.assertEqual(res.stored, 2)
+            self.assertEqual(res.failed, 0)
+            self.assertAlmostEqual(res.in_vocabulary_rate, 2 / 3)
+
+            # The numeric literal survived as text: 5.2 has no numeric object
+            # kind, and refusing it would lose a fact over a JSON type.
+            found = tools.search(pattern={"s": res_subject_id(tools, "the pool"),
+                                          "p": "defaults_to", "o": "20"},
+                                 top_k=5)
+            self.assertEqual(len(found.get("memories", [])), 1)
 
     def test_off_by_default_changes_nothing(self):
         with AegisServer(extra_args=["--predicate-registry", self.registry]) as srv:

@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from aegis_mcp.capture import (score_text, derive_candidates, filter_candidates,
                                load_transcript, run_capture, looks_like_code)
 from aegis_mcp.config import Config
+from aegis_mcp.extract import CandidateTriple
 from aegis_mcp.embeddings import NoneProvider
 
 
@@ -157,6 +158,37 @@ class TestCaptureExtraction(unittest.TestCase):
         # ephemeral content never reached the store
         joined = " ".join(p["data"].lower() for p in client.saved)
         self.assertNotIn("secret token", joined)
+
+    def test_an_empty_transcript_never_calls_the_model_for_triples(self):
+        """Until PR 4 the model-backed providers inherited `extract_triples ->
+        []` and never called out, so the missing guard cost nothing. Now a
+        transcript that is empty after the ephemeral filter would buy a
+        completion whose prompt ends in a bare "TRANSCRIPT:", and a model
+        answering that with invented triples would have them grounded and
+        written — entity records minted for a session that contained nothing.
+        """
+        import json as _json
+        import tempfile
+        from aegis_mcp.capture import _store_triples
+
+        fd, reg = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as fh:
+            _json.dump({"part_of": {"object": "id"}}, fh)
+        self.addCleanup(lambda: os.path.exists(reg) and os.remove(reg))
+
+        class _Loud:
+            calls = 0
+
+            def extract_triples(self, text, vocab, max_triples):
+                _Loud.calls += 1
+                return [CandidateTriple("invented", "part_of", "nothing")]
+
+        cfg = Config(extract_mode="fake", capture_enabled=True,
+                     extract_triples=True, extract_registry=reg)
+        # Every line is ephemeral, so the blob is empty even though the
+        # transcript is not.
+        n = _store_triples(["do not remember this"], cfg, object(), _Loud())
+        self.assertEqual((n, _Loud.calls), (0, 0))
 
     def test_none_mode_uses_heuristic_episodic(self):
         path = self._transcript([
