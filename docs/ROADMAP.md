@@ -311,7 +311,7 @@ the same bet, and it needs no model on the hot path.*
 
 ---
 
-## Horizon 5 — Next: reasoning over memory, not just retrieving it
+## Horizon 5 — Now: reasoning over memory, not just retrieving it  ✅ *complete*
 
 *Theme: the relationship graph is the one primitive in the tree that was built
 and then never finished. Horizons 1–2 made memory coherent, 4 made it findable;
@@ -507,7 +507,8 @@ does deterministically, at write time, for free.
   "the queue was flushed" into the far better invariant "no live derived record
   has a dead premise", which is checkable on every restart.
 
-### 5.4 The neuro-symbolic seam
+### 5.4 The neuro-symbolic seam — *shipped (`extract_triples`, `ask_pattern`,
+`ask_verbalize`, `adjudicate_conflicts`); measured by `make eval-extraction`*
 
 - **Why now:** symbols are only worth having if writing and reading them is as
   easy as writing prose. That is exactly what a model is for — and the seam to
@@ -583,13 +584,49 @@ does deterministically, at write time, for free.
   were not on the list and are mostly true, so they are reported as *beyond
   gold*, and the gate is on recall and never on precision — an extractor that
   reads more of the transcript must not score worse for it.
-- **Remaining:** adjudication (§6 of the design) — hand a contradiction 5.3
-  flagged but refused to settle to the model, and write the verdict as a
-  `supersedes`. Blocked on a smaller decision the design left open: `conflicts`
-  is a gauge recomputed each tick and `conflicts_with` edges are only reachable
-  by `traverse` from an id you already hold, so **there is no way to enumerate
-  the flagged pairs**. The pass already computes them; keeping that set is the
-  cheap answer.
+- **Shipped (adjudication — `adjudicate_conflicts`):** the inverse arrangement
+  the horizon's preamble asks for is now the one that runs. The rules find a
+  contradiction deterministically, at write time, for free; the model sees only
+  the one pair they could not settle and answers A, B or **neither** — and
+  neither is first-class and is the default, so an unreachable backend, an
+  unparseable reply, a reply naming both sides, or a record whose triple has
+  gone all abstain. A verdict is written as a **supersession, never an edit**:
+  the judgment becomes a record and neither fact is rewritten to agree with it.
+  Off by default and capped per run, because this is the one place in 5.4 where
+  a model error becomes durable state. It needs a backend as well as
+  `--inference`: with `extract_mode: none` there is nothing to ask, so the
+  provider abstains and the setting is inert rather than silently wrong.
+- **Found while building it:** the design assumed the adjudicator could be
+  "handed that one pair", and there was no way to *get* the pair. `conflicts`
+  was a gauge recomputed each tick, a `conflicts_with` edge is only walkable
+  from an id you already hold, and the reverse edge index is keyed target →
+  sources with no enumeration by kind — so reaching the flagged pairs meant
+  reading every live record. Fixed by keeping what the pass already computes
+  rather than computing anything new: `conflict_set.h/.c` retains the pairs
+  beside the gauge, filled by the same loop so the two cannot disagree, and a
+  read-only namespace-scoped `conflicts` op lists them. Bounded, derived, never
+  persisted, and replaced **whole** each tick — an accumulating list would hand
+  back pairs whose records are already tombstoned, which is exactly the input
+  an adjudicator must not be given.
+
+### What the horizon left open
+
+- **The registry is a contract, and where its line sits is empirical.** The
+  extraction eval reports `unstatable` — triples a careful reader would write
+  and the vocabulary cannot express — precisely so "grow the registry" stays a
+  decision with a number behind it rather than a reflex. A registry that grows
+  to fit every transcript has stopped being a contract.
+- **Grounding drifts as the corpus grows.** A threshold tuned on a small store
+  may conflate on a large one, where more entities means more near-misses. The
+  minting rate is the leading indicator and is reported; the eval gates
+  conflation at zero and fragmentation at a ceiling.
+- **Re-grounding old facts.** The first transcript on an empty store mints
+  everything, so the earliest facts are the ones most likely to be fragmented —
+  they had nothing to resolve against. `consolidate` can merge entity records
+  after the fact, but nothing schedules it.
+- **Literal normalization.** "five seconds" and "5s" are one literal to a
+  reader and two to the index. 5.2 deliberately has no normalization, and this
+  is where the cost of that shows up.
 
 ### Ground rules for the whole horizon
 

@@ -1551,6 +1551,112 @@ static cJSON *handle_traverse(AegisDB *db, const cJSON *req,
     return o;
 }
 
+/* Contradictions the last inference pass flagged (ROADMAP 5.4 §6).
+ *
+ * `stats.metrics.conflicts` says *how many*; this says *which*, which is what
+ * anything meaning to act on one needs. A `conflicts_with` edge is only
+ * walkable from an id you already hold and the edge index has no enumeration by
+ * kind, so before this the only way to find the pairs was to read every live
+ * record.
+ *
+ * Read-only, and deliberately so. 5.3 detects contradictions and refuses to
+ * resolve them, because choosing between two conflicting facts needs to know
+ * which is newer, which source is better, or what the world is like. This op
+ * does not resolve them either — it hands the pair to whoever *can*, and a
+ * verdict comes back through `relate` + `delete` as an ordinary supersession,
+ * on the record and in the log like every other write.
+ *
+ * Scoped by the same rule `export` and `purge` use: the token's namespace when
+ * it has one, otherwise the `agent_id` the request names. A namespaced token is
+ * therefore authoritative and a spoofed `agent_id` changes nothing — but a
+ * caller the server has not namespaced (auth off, or an admin token) can still
+ * say which tenant it means, which is not a nicety. The Claude Code integration
+ * runs unauthenticated by default and scopes every request by `agent_id`
+ * (`tools.py`), so ignoring it here handed the adjudicator every tenant's
+ * contradictions: it filled its page with pairs whose records its own
+ * namespaced `get` then refused, and never reached its own.
+ *
+ * Unlike `export`, a subjectless request is *allowed* and means every
+ * namespace. Export refuses one because it would dump the whole database;
+ * this returns a handful of id pairs and no payload, which is the same posture
+ * `stats` takes for an unrestricted caller. */
+#define CONFLICTS_DEFAULT_LIMIT 100
+
+static cJSON *handle_conflicts(AegisDB *db, const cJSON *req,
+                               const AuthCtx *ctx) {
+    const char *ns = ctx->ns;
+    const char *target = ns ? ns : jr_str(req, "agent_id", NULL);
+    /* Absent means the default; an explicit 0 means *none*, not "unbounded".
+     * A caller that wants everything asks for the maximum — reading 0 as
+     * unlimited is the sort of default that turns a typo into the largest
+     * response the server can build. `total` still reports how many matched,
+     * so limit:0 is a usable "how many are there?" probe. */
+    uint64_t limit = CONFLICTS_DEFAULT_LIMIT;
+    jr_u64(req, "limit", &limit);
+    if (limit > CONFLICT_SET_MAX) {
+        limit = CONFLICT_SET_MAX;
+    }
+
+    ConflictPair *out = NULL;
+    size_t written = 0;
+    size_t total = 0;
+    int truncated = 0;
+    if (limit > 0) {
+        out = calloc((size_t)limit, sizeof(*out));
+        if (!out) {
+            return json_error_status(AEGIS_ERR_INTERNAL);
+        }
+    }
+    /* Copied out under the lock and rendered off it: cJSON allocation is not
+     * work to do while holding a lock the inference tick needs to publish its
+     * next pass. */
+    pthread_mutex_lock(&db->conflicts_lock);
+    written =
+        conflict_set_list(db->conflicts, target, out, (size_t)limit, &total);
+    truncated = conflict_set_truncated(db->conflicts);
+    pthread_mutex_unlock(&db->conflicts_lock);
+
+    cJSON *o = json_ok();
+    cJSON *arr = cJSON_AddArrayToObject(o, "conflicts");
+    if (!arr) {
+        free(out);
+        cJSON_Delete(o);
+        return json_error_status(AEGIS_ERR_INTERNAL);
+    }
+    for (size_t i = 0; i < written; i++) {
+        cJSON *e = cJSON_CreateObject();
+        if (!e) {
+            break;
+        }
+        cJSON_AddNumberToObject(e, "a", (double)out[i].a);
+        cJSON_AddNumberToObject(e, "b", (double)out[i].b);
+        /* Named even when the caller is namespaced and already knows it: an
+         * admin token reads every tenant's, and a pair with no namespace on it
+         * would be unattributable. */
+        if (out[i].ns[0]) {
+            cJSON_AddStringToObject(e, "namespace", out[i].ns);
+        }
+        cJSON_AddStringToObject(e, "predicate_a", out[i].predicate_a);
+        cJSON_AddStringToObject(e, "predicate_b", out[i].predicate_b);
+        cJSON_AddStringToObject(e, "reason", out[i].reason);
+        cJSON_AddItemToArray(arr, e);
+    }
+    free(out);
+    cJSON_AddNumberToObject(o, "total", (double)total);
+    /* Two different shortfalls, reported apart. `capped` means this response
+     * carries fewer than matched, which the caller fixes by asking again with a
+     * bigger limit. `truncated` means the *pass* found more than it retains, so
+     * asking again cannot help — the corpus holds more contradictions than the
+     * list is built to describe, and the gauge is the number to trust. */
+    if (written < total) {
+        cJSON_AddBoolToObject(o, "capped", 1);
+    }
+    if (truncated) {
+        cJSON_AddBoolToObject(o, "truncated", 1);
+    }
+    return o;
+}
+
 /* Constant-time string equality: no early exit on mismatch, and length
  * differences fold into the result so timing does not leak the secret. */
 /* Constant-time fixed-length byte compare (no early exit). */
@@ -1837,6 +1943,7 @@ static const OpDef OPS[] = {
     {"promote", handle_promote, OP_WRITE, MOP_PROMOTE},
     {"relate", handle_relate, OP_WRITE, MOP_RELATE},
     {"traverse", handle_traverse, 0, MOP_TRAVERSE},
+    {"conflicts", handle_conflicts, 0, MOP_OTHER},
 };
 
 static const OpDef *find_op(const char *op) {

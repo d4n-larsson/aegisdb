@@ -960,6 +960,84 @@ handful of bytes next to a record that already carries its payload.
 
 ---
 
+### `conflicts`
+
+The contradictions the inference job flagged and refused to settle
+(ROADMAP 5.4). `stats.metrics.conflicts` says *how many*; this says **which**,
+which is what anything meaning to act on one needs.
+
+Before this there was no way to reach the pairs. A `conflicts_with` edge is only
+walkable from an id you already hold, and the reverse edge index is keyed
+target → sources with no enumeration by kind — so finding them meant reading
+every live record. The list is not a new scan: the pass that counts the gauge
+fills it in the same loop, which is also why the two cannot disagree.
+
+**Request**:
+
+```json
+{ "operation": "conflicts", "limit": 50 }
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `limit` | integer | No | Page size; default `100`, capped at `1024`. An explicit `0` lists nothing and still reports `total`, which makes it a "how many are there?" probe. `0` is *not* read as unlimited |
+
+Scoped by the same rule `export` and `purge` use: **the token's namespace when
+it has one, otherwise the `agent_id` the request names.** A namespaced token is
+authoritative, so a spoofed `agent_id` changes nothing; a caller the server has
+not namespaced — auth off, or an admin token — can still say which tenant it
+means. Omitting both means every namespace, which is why each pair names its
+own. (Unlike `export`, a subjectless request is allowed: that would dump the
+whole database, while this returns a handful of id pairs and no payload.)
+
+**Response**:
+
+```json
+{
+  "ok": true,
+  "conflicts": [
+    {
+      "a": 42,
+      "b": 57,
+      "namespace": "acme",
+      "predicate_a": "defaults_to",
+      "predicate_b": "defaults_to",
+      "reason": "cardinality"
+    }
+  ],
+  "total": 1
+}
+```
+
+`a` and `b` are the two records that contradict each other, ordered by id so a
+pair has one identity regardless of which the scan reached first. `reason` is
+`cardinality` (two live values for a single-valued predicate) or `mutex_with`
+(two predicates the registry declares mutually exclusive).
+
+**Two different shortfalls, reported apart.** `"capped": true` means this
+response carries fewer than `total` — ask again with a bigger `limit`.
+`"truncated": true` means the *pass* found more contradictions than the list
+retains (1024), so a bigger limit cannot help; the gauge in `stats` is the
+number to trust there.
+
+**A gauge, not a log.** The list is replaced whole on every pass, so a
+contradiction resolved since the last one stops being reported. That is what
+makes it safe to work through: an accumulating list would hand back pairs whose
+records are already tombstoned. It follows that a server started **without**
+`--inference` answers `{"conflicts": [], "total": 0}` — nothing has scanned. It
+answers rather than erroring, so a client's adjudication loop does not need to
+know whether the feature is on.
+
+**Read-only, deliberately.** The inference job detects contradictions and
+refuses to resolve them, because choosing between two conflicting facts needs
+to know which is newer, which source is better, or what the world is like. This
+op does not resolve them either — it hands the pair to whoever can. A verdict
+comes back as an ordinary `relate` (`supersedes`) plus `delete`, on the record
+and in the log like every other write, which is what keeps an adjudicated
+contradiction auditable rather than a silent deletion.
+
+---
+
 ### `ping`
 
 Health check. Always exempt from authentication.

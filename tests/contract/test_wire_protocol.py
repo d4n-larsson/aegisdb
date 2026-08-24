@@ -1282,12 +1282,17 @@ def test_inference_job(binary, port):
               == 0, "and reports no deferred work")
 
 
-def _await_stat(srv, key, at_least, timeout=20.0):
-    """Poll one stats counter until it reaches `at_least`, and return it."""
+def _await_stat(srv, key, at_least, timeout=20.0, token=None):
+    """Poll one stats counter until it reaches `at_least`, and return it.
+
+    `stats` is admin-only, so a server with auth on needs the token passed."""
     deadline = time.time() + timeout
     n = 0
+    req = {"operation": "stats"}
+    if token:
+        req["token"] = token
     while time.time() < deadline:
-        n = srv.req({"operation": "stats"})["indexes"].get(key, 0)
+        n = srv.req(req)["indexes"].get(key, 0)
         if n >= at_least:
             return n
         time.sleep(0.25)
@@ -1505,6 +1510,269 @@ def test_contradiction_detection(binary, port):
         after = srv.req({"operation": "stats"})["indexes"]["conflicts"]
         check(after < steady,
               f"removing one side clears the contradiction ({after})")
+
+
+def test_conflicts_op(binary, port):
+    print("[conflicts: which pairs contradict, not just how many (ROADMAP 5.4)]")
+    d = tempfile.mkdtemp(prefix="aegis_conflicts_op_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({
+            "defaults_to": {"object": "string", "cardinality": "one"},
+            "part_of": {"object": "id", "transitive": True},
+        }, fh)
+
+    with Server(binary, port, phase=4,
+                token_lines=["admintok", "tok-a acme rw", "tok-b beta rw"],
+                extra_args=["--predicate-registry", reg, "--inference",
+                            "--inference-interval-sec", "1"]) as srv:
+        def ins(tok, data, fact=None):
+            p = {"operation": "insert", "type": "semantic", "data": data,
+                 "token": tok}
+            if fact:
+                p["fact"] = fact
+            return srv.req(p)["record"]["id"]
+
+        # Each tenant contradicts itself, so a leak shows up as a pair the
+        # other tenant can see rather than as a merged count.
+        a_subj = ins("tok-a", "the recall hook")
+        a1 = ins("tok-a", "defaults to none",
+                 {"s": a_subj, "p": "defaults_to", "o": "none"})
+        a2 = ins("tok-a", "defaults to local",
+                 {"s": a_subj, "p": "defaults_to", "o": "local"})
+        b_subj = ins("tok-b", "the capture hook")
+        b1 = ins("tok-b", "defaults to session",
+                 {"s": b_subj, "p": "defaults_to", "o": "session"})
+        b2 = ins("tok-b", "defaults to turn",
+                 {"s": b_subj, "p": "defaults_to", "o": "turn"})
+
+        _await_stat(srv, "conflicts", at_least=2, token="admintok")
+
+        # An admin token sees every tenant's, each attributed. Without the
+        # namespace on the pair an admin could not tell whose it is.
+        allc = srv.req({"operation": "conflicts", "token": "admintok"})
+        check(allc.get("ok") is True, "conflicts answers for an admin token")
+        pairs = {(c["a"], c["b"]): c for c in allc["conflicts"]}
+        check(len(pairs) == 2, f"both tenants' pairs are listed ({pairs})")
+        check(tuple(sorted((a1, a2))) in pairs and
+              tuple(sorted((b1, b2))) in pairs,
+              "and they are the pairs that actually contradict")
+        one = pairs[tuple(sorted((a1, a2)))]
+        check(one["namespace"] == "acme", "each pair names its namespace")
+        check(one["reason"] == "cardinality" and
+              one["predicate_a"] == "defaults_to",
+              f"and why it is a contradiction ({one})")
+
+        # THE isolation check. A namespaced token sees its own and nothing
+        # else — the fact indexes are server-wide, so this is the property a
+        # naive implementation gets wrong.
+        mine = srv.req({"operation": "conflicts", "token": "tok-a"})
+        check([(c["a"], c["b"]) for c in mine["conflicts"]]
+              == [tuple(sorted((a1, a2)))],
+              f"a namespaced caller sees only its own tenant ({mine})")
+        check(mine["total"] == 1, "and its total counts only its own")
+
+        # A namespaced token is authoritative, so a spoofed agent_id changes
+        # nothing — but only because the token *has* a namespace. See
+        # test_conflicts_scope_without_a_namespaced_token for the other half.
+        spoofed = srv.req({"operation": "conflicts", "token": "tok-a",
+                           "agent_id": "beta"})
+        check([(c["a"], c["b"]) for c in spoofed["conflicts"]]
+              == [tuple(sorted((a1, a2)))],
+              "naming another tenant in the request changes nothing")
+
+        # An admin token can name a tenant, which is what an unnamespaced
+        # caller needs to scope itself at all.
+        scoped = srv.req({"operation": "conflicts", "token": "admintok",
+                          "agent_id": "beta"})
+        check([(c["a"], c["b"]) for c in scoped["conflicts"]]
+              == [tuple(sorted((b1, b2)))],
+              f"an admin token scopes by agent_id ({scoped})")
+
+        # limit is a page size, and `total` is the count regardless — so
+        # limit:0 is a usable "how many are there?" probe rather than an
+        # all-clear.
+        probe = srv.req({"operation": "conflicts", "token": "admintok",
+                         "limit": 0})
+        check(probe["conflicts"] == [] and probe["total"] == 2
+              and probe.get("capped") is True,
+              f"limit 0 counts without listing ({probe})")
+        page = srv.req({"operation": "conflicts", "token": "admintok",
+                        "limit": 1})
+        check(len(page["conflicts"]) == 1 and page["total"] == 2
+              and page.get("capped") is True,
+              f"a short page says so ({page})")
+        check(allc.get("capped") is None,
+              "and a complete answer carries no capped flag")
+
+        # The list is a gauge like the count, not a log: it is replaced whole
+        # each pass, so a contradiction resolved by hand stops being reported.
+        # This is what makes it safe to work through — an accumulating list
+        # would hand back pairs whose records are already gone.
+        srv.req({"operation": "relate", "token": "tok-a", "from_id": a2,
+                 "to_id": a1, "kind": "supersedes"})
+        srv.req({"operation": "delete", "token": "tok-a", "id": a1})
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            left = srv.req({"operation": "conflicts", "token": "tok-a"})
+            if left["total"] == 0:
+                break
+            time.sleep(0.5)
+        check(left["total"] == 0,
+              f"resolving one clears it from the list ({left})")
+        check(srv.req({"operation": "conflicts", "token": "admintok"})["total"]
+              == 1, "and the other tenant's is untouched")
+
+        # The list and the gauge are filled by the same loop, so they cannot
+        # disagree. If they ever do, one of them is lying about the corpus.
+        gauge = srv.req({"operation": "stats",
+                         "token": "admintok"})["indexes"]["conflicts"]
+        listed = srv.req({"operation": "conflicts",
+                          "token": "admintok"})["total"]
+        check(gauge == listed,
+              f"the count and the list agree ({gauge} vs {listed})")
+
+
+def test_conflicts_scope_without_a_namespaced_token(binary, port):
+    print("[conflicts: an unnamespaced caller scopes by agent_id]")
+    d = tempfile.mkdtemp(prefix="aegis_conflicts_ns_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"defaults_to": {"object": "string", "cardinality": "one"}},
+                  fh)
+
+    # No auth at all — the Claude Code integration's default posture, where
+    # every request carries its own `agent_id` and the server namespaces
+    # nobody. Ignoring that field here handed a caller every tenant's pairs.
+    with Server(binary, port, phase=4,
+                extra_args=["--predicate-registry", reg, "--inference",
+                            "--inference-interval-sec", "1"]) as srv:
+        def ins(ns, data, fact=None):
+            p = {"operation": "insert", "type": "semantic", "data": data,
+                 "agent_id": ns}
+            if fact:
+                p["fact"] = fact
+            return srv.req(p)["record"]["id"]
+
+        a_s = ins("acme", "the recall hook")
+        a1 = ins("acme", "none", {"s": a_s, "p": "defaults_to", "o": "none"})
+        a2 = ins("acme", "local", {"s": a_s, "p": "defaults_to", "o": "local"})
+        b_s = ins("beta", "the capture hook")
+        ins("beta", "session", {"s": b_s, "p": "defaults_to", "o": "session"})
+        ins("beta", "turn", {"s": b_s, "p": "defaults_to", "o": "turn"})
+
+        _await_stat(srv, "conflicts", at_least=2)
+
+        mine = srv.req({"operation": "conflicts", "agent_id": "acme"})
+        check([(c["a"], c["b"]) for c in mine["conflicts"]]
+              == [tuple(sorted((a1, a2)))],
+              f"agent_id scopes an unnamespaced caller ({mine})")
+        check(mine["total"] == 1, "and its total counts only that tenant")
+
+        # Naming neither still means everything, which is what an operator
+        # looking at the whole server wants. Unlike `export`, this carries no
+        # payload — a handful of id pairs — so a subjectless read is allowed.
+        both = srv.req({"operation": "conflicts"})
+        check(both["total"] == 2,
+              f"and naming no tenant still means all of them ({both})")
+
+
+def test_conflicts_go_quiet_when_the_last_fact_goes(binary, port):
+    print("[conflicts: an empty fact set is an answer, not a stale one]")
+    d = tempfile.mkdtemp(prefix="aegis_conflicts_empty_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"defaults_to": {"object": "string", "cardinality": "one"}},
+                  fh)
+
+    with Server(binary, port, phase=4,
+                extra_args=["--predicate-registry", reg, "--inference",
+                            "--inference-interval-sec", "1"]) as srv:
+        subj = srv.req({"operation": "insert", "type": "semantic",
+                        "data": "the recall hook"})["record"]["id"]
+        ids = [srv.req({"operation": "insert", "type": "semantic",
+                        "data": v,
+                        "fact": {"s": subj, "p": "defaults_to", "o": v}}
+                       )["record"]["id"] for v in ("none", "local")]
+        _await_stat(srv, "conflicts", at_least=1)
+
+        # Remove BOTH sides, so the corpus holds no facts at all. A pass that
+        # bailed on an empty fact set without republishing left the previous
+        # answer standing forever — the list kept naming a pair whose records
+        # were both tombstoned, which is precisely the stale input an
+        # adjudicator must never be handed.
+        for rid in ids:
+            srv.req({"operation": "delete", "id": rid})
+
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            left = srv.req({"operation": "conflicts"})
+            if left["total"] == 0:
+                break
+            time.sleep(0.5)
+        check(left["total"] == 0,
+              f"the list empties with the fact set ({left})")
+        check(srv.req({"operation": "stats"})["indexes"]["conflicts"] == 0,
+              "and so does the gauge")
+
+
+def test_conflicts_gauge_matches_the_list_on_a_self_mutex(binary, port):
+    print("[conflicts: one pair counts once, however many rules find it]")
+    d = tempfile.mkdtemp(prefix="aegis_conflicts_dup_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        # A predicate naming *itself* mutually exclusive. The registry accepts
+        # this — unlike inverse_of, mutex_with does not require the declaration
+        # to be mutual — and the pair is then reached by both the cardinality
+        # scan and the mutex scan in one pass.
+        json.dump({"defaults_to": {"object": "string", "cardinality": "one",
+                                   "mutex_with": ["defaults_to"]}}, fh)
+
+    with Server(binary, port, phase=4,
+                extra_args=["--predicate-registry", reg, "--inference",
+                            "--inference-interval-sec", "1"]) as srv:
+        subj = srv.req({"operation": "insert", "type": "semantic",
+                        "data": "the recall hook"})["record"]["id"]
+        for v in ("none", "local"):
+            srv.req({"operation": "insert", "type": "semantic", "data": v,
+                     "fact": {"s": subj, "p": "defaults_to", "o": v}})
+        _await_stat(srv, "conflicts", at_least=1)
+        time.sleep(2)  # let a full pass settle
+
+        gauge = srv.req({"operation": "stats"})["indexes"]["conflicts"]
+        listed = srv.req({"operation": "conflicts"})["total"]
+        # The gauge counts contradictions, not rule firings. Counting both
+        # while the list kept one broke the invariant conflict_set.h, the wire
+        # docs and test_conflicts_op all assert.
+        check(gauge == listed == 1,
+              f"one pair, one contradiction (gauge {gauge}, listed {listed})")
+
+
+def test_conflicts_without_inference(binary, port):
+    print("[conflicts: nothing configured to reason with lists nothing]")
+    d = tempfile.mkdtemp(prefix="aegis_conflicts_off_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"defaults_to": {"object": "string", "cardinality": "one"}},
+                  fh)
+
+    # Same corpus, same registry, no --inference. The op must answer — it is a
+    # read like any other — and answer *empty*, because nothing has scanned.
+    # Failing here instead would make a client's adjudication loop error out on
+    # a server that simply has the feature off.
+    with Server(binary, port, phase=4,
+                extra_args=["--predicate-registry", reg]) as srv:
+        subj = srv.req({"operation": "insert", "type": "semantic",
+                        "data": "the recall hook"})["record"]["id"]
+        for val in ("none", "local"):
+            srv.req({"operation": "insert", "type": "semantic",
+                     "data": f"defaults to {val}",
+                     "fact": {"s": subj, "p": "defaults_to", "o": val}})
+        time.sleep(2)
+        res = srv.req({"operation": "conflicts"})
+        check(res.get("ok") is True, "conflicts answers with the job off")
+        check(res["conflicts"] == [] and res["total"] == 0,
+              f"and reports nothing, because nothing looked ({res})")
 
 
 def test_retraction(binary, port):
@@ -4369,6 +4637,11 @@ def main():
     test_inference_flag_validation(binary, 19575)
     test_retraction(binary, 19576)
     test_contradiction_detection(binary, 19582)
+    test_conflicts_op(binary, 19586)
+    test_conflicts_without_inference(binary, 19587)
+    test_conflicts_scope_without_a_namespaced_token(binary, 19588)
+    test_conflicts_go_quiet_when_the_last_fact_goes(binary, 19589)
+    test_conflicts_gauge_matches_the_list_on_a_self_mutex(binary, 19590)
     test_subsume_and_explain_derivation(binary, 19584)
     test_subsume_requires_inference(binary, 19585)
     test_retraction_survives_a_lost_queue(binary, 19577)
