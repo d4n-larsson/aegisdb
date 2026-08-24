@@ -207,8 +207,6 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(cfg.auth_token, "sekret")
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 class TestDistillationLag(unittest.TestCase):
     """The opt-in backlog metrics (ROADMAP 3.3).
@@ -333,3 +331,93 @@ class TestDistillationCache(unittest.TestCase):
 def _raise_scrape(cfg, now_ms):
     from aegis_exporter import ScrapeError
     raise ScrapeError("timed out")
+
+
+class TestDistillationQueries(unittest.TestCase):
+    """The *requests*, not the rendering.
+
+    These exist because the first version of this feature measured nothing and
+    every rendering test still passed: the backlog query omitted `start_time`,
+    and the server applies its time filter only when both bounds are present,
+    so a brand-new record counted against a seven-day threshold. A bug in a
+    request shape is invisible to a test that starts from a response.
+    """
+
+    def _capture(self, cfg=None, now_ms=1_000_000_000_000):
+        import aegis_exporter
+        sent = []
+        real = aegis_exporter._request
+        aegis_exporter._request = lambda c, payload: (
+            sent.append(payload) or {"ok": True, "count": 0, "records": []})
+        try:
+            aegis_exporter.fetch_distillation(
+                cfg or Config(env={"AEGIS_SUMMARY_MIN_AGE_MS": "1000"}), now_ms)
+        finally:
+            aegis_exporter._request = real
+        return sent
+
+    def test_both_time_bounds_are_sent(self):
+        """The server's `parse_filters` sets its time filter only when
+        start_time AND end_time parse (a short-circuit &&). Sending end_time
+        alone silently drops the age threshold *and* the oldest-first
+        ordering, which is only honoured on the timed path."""
+        for payload in self._capture():
+            self.assertIn("start_time", payload, payload["operation"])
+            self.assertIn("end_time", payload, payload["operation"])
+            self.assertEqual(payload["start_time"], 0)
+            self.assertEqual(payload["end_time"], 1_000_000_000_000 - 1000)
+
+    def test_the_oldest_query_does_not_disturb_what_it_measures(self):
+        """A search bumps the recall counters `forget` weighs, so measuring
+        the backlog would protect the very records it reports as overdue."""
+        search = [p for p in self._capture() if p["operation"] == "search"]
+        self.assertEqual(len(search), 1)
+        self.assertIs(search[0]["track_usage"], False)
+        self.assertEqual(search[0]["order"], "oldest")
+        self.assertEqual(search[0]["top_k"], 1)
+
+    def test_the_predicate_matches_the_distillers(self):
+        for payload in self._capture():
+            self.assertEqual(payload["type"], "episodic")
+            self.assertEqual(payload["max_importance"], 0.6)
+
+    def test_a_namespace_scopes_both_queries(self):
+        cfg = Config(env={"AEGIS_SUMMARY_NAMESPACE": "acme"})
+        for payload in self._capture(cfg):
+            self.assertEqual(payload["agent_id"], "acme")
+
+    def test_no_namespace_sends_no_agent_id(self):
+        """Empty means every namespace — right on a single-tenant server, and
+        sending an empty agent_id would mean something else entirely."""
+        for payload in self._capture():
+            self.assertNotIn("agent_id", payload)
+
+    def test_age_is_taken_from_created(self):
+        """The server filters and orders by `created`, so `updated` would
+        describe a different record than the one selected — a 100-day-old note
+        touched an hour ago would report an hour."""
+        import aegis_exporter
+        real = aegis_exporter._request
+        now = 1_000_000_000_000
+        aegis_exporter._request = lambda c, p: (
+            {"ok": True, "count": 1} if p["operation"] == "count" else
+            {"ok": True, "records": [{"created": now - 90_000,
+                                      "updated": now - 1_000}]})
+        try:
+            out = aegis_exporter.fetch_distillation(Config(env={}), now)
+        finally:
+            aegis_exporter._request = real
+        self.assertEqual(out["oldest_age_ms"], 90_000)
+
+
+class TestDistillationScopeMetric(unittest.TestCase):
+    def test_the_scope_is_exported_as_a_label(self):
+        out = render(SAMPLE, distillation={"backlog": 1, "capped": False,
+                                           "oldest_age_ms": 0},
+                     cfg=Config(env={"AEGIS_EXPORTER_DISTILLATION": "1",
+                                     "AEGIS_SUMMARY_NAMESPACE": "acme"}))
+        self.assertIn('aegisdb_distillation_scope{namespace="acme"} 1', out)
+
+
+if __name__ == "__main__":
+    unittest.main()

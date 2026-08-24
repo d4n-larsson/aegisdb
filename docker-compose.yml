@@ -174,8 +174,12 @@ services:
       # The two thresholds are the same variables the summarize sidecar reads,
       # so a single .env keeps the job and the metric describing the same rule.
       AEGIS_EXPORTER_DISTILLATION: "${AEGIS_EXPORTER_DISTILLATION:-}"
+      AEGIS_EXPORTER_DISTILLATION_INTERVAL_SEC: "${AEGIS_EXPORTER_DISTILLATION_INTERVAL_SEC:-60}"
       AEGIS_SUMMARY_MIN_AGE_MS: "${AEGIS_SUMMARY_MIN_AGE_MS:-604800000}"
       AEGIS_SUMMARY_MAX_IMPORTANCE: "${AEGIS_SUMMARY_MAX_IMPORTANCE:-0.6}"
+      # Same namespace the summarize sidecar works on, so the backlog
+      # describes the tenant the job actually distils rather than every one.
+      AEGIS_SUMMARY_NAMESPACE: "${AEGIS_SUMMARY_NAMESPACE:-}"
     restart: unless-stopped
 
   # Bundled Prometheus (opt-in): `docker compose --profile monitoring up`.

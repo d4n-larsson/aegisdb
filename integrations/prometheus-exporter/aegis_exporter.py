@@ -23,6 +23,7 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -64,6 +65,11 @@ class Config:
             env.get("AEGIS_SUMMARY_MIN_AGE_MS", "604800000"))
         self.summary_max_importance = float(
             env.get("AEGIS_SUMMARY_MAX_IMPORTANCE", "0.6"))
+        # The namespace the distiller runs against — the same variable the
+        # summarize sidecar reads. Empty means "every namespace", which is
+        # right for a single-tenant server and wrong for a shared one, so it is
+        # exported as a label rather than assumed.
+        self.summary_namespace = env.get("AEGIS_SUMMARY_NAMESPACE", "")
 
 
 class ScrapeError(Exception):
@@ -125,17 +131,35 @@ def fetch_distillation(cfg: Config, now_ms: int) -> dict:
     total is exactly the sort of quiet lie an alert gets built on.
     """
     cutoff = max(0, now_ms - cfg.summary_min_age_ms)
-    common = {"type": "episodic", "end_time": cutoff,
+    # `start_time` is not decoration. The server sets its time filter only when
+    # BOTH bounds parse (`parse_filters`, a short-circuit &&), so sending
+    # `end_time` alone silently drops the age threshold *and* the oldest-first
+    # ordering, which is only honoured on the timed path. Without it the
+    # backlog counted every episodic record whatever its age — the metric
+    # measured nothing. `aegisdb-summarize` sends both; so does this now.
+    common = {"type": "episodic", "start_time": 0, "end_time": cutoff,
               "max_importance": cfg.summary_max_importance}
+    if cfg.summary_namespace:
+        # Scoped to the namespace the distiller actually runs against. The
+        # exporter holds an admin token (`stats` requires one), so without this
+        # the backlog spans every tenant while the job works on one.
+        common["agent_id"] = cfg.summary_namespace
     counted = _request(cfg, {"operation": "count", **common})
     oldest = _request(cfg, {"operation": "search", "order": "oldest",
-                            "top_k": 1, **common})
+                            "top_k": 1,
+                            # Measuring must not change what it measures: a
+                            # search bumps the recall counters `forget` weighs,
+                            # so without this the exporter would protect the
+                            # very records it is reporting as overdue.
+                            "track_usage": False, **common})
     recs = oldest.get("records") or []
-    # Age from `updated`, not `created`: the distiller selects on the same
-    # field, so a record amended yesterday is not eligible however old it is.
+    # Age from `created`. The server filters on `created` and orders by it
+    # (`cmp_created_asc`), so `updated` would describe a different record than
+    # the one selected — a 100-day-old note touched an hour ago would report
+    # an hour, and the staleness alert would never fire.
     age_ms = 0
     if recs:
-        stamp = recs[0].get("updated") or recs[0].get("created") or now_ms
+        stamp = recs[0].get("created") or now_ms
         age_ms = max(0, now_ms - int(stamp))
     return {"backlog": int(counted.get("count") or 0),
             "capped": bool(counted.get("capped")),
@@ -364,6 +388,13 @@ def render(stats: dict, *, up: bool = True, scrape_seconds: float | None = None,
                 "Importance ceiling the backlog counts as eligible "
                 "(AEGIS_SUMMARY_MAX_IMPORTANCE).",
                 cfg.summary_max_importance)
+        # Which tenant the backlog describes. Empty means every namespace,
+        # which is right on a single-tenant server and misleading on a shared
+        # one — so it is stated rather than left to be assumed.
+        e.add("aegisdb_distillation_scope", "gauge",
+              "1, labelled with the namespace the backlog was computed for "
+              "(empty = every namespace).",
+              [({"namespace": cfg.summary_namespace}, 1)])
 
     # ---- per-tenant usage (only present when quotas are configured) ----
     tenants = stats.get("tenants") or []
@@ -403,6 +434,10 @@ def render(stats: dict, *, up: bool = True, scrape_seconds: float | None = None,
 # own cadence rather than Prometheus's. Module-level because one process serves
 # one server; a per-cfg cache would be ceremony for a case that does not exist.
 _distillation_cache: dict = {"at": None, "value": None}
+# The HTTP server is threaded, so two scrapes can overlap. Without this both
+# miss the cache and both run the scan, which is the one thing the interval
+# exists to prevent — and the expensive one.
+_distillation_lock = threading.Lock()
 
 
 def _distillation(cfg: Config, now_ms: int) -> dict | None:
@@ -414,20 +449,21 @@ def _distillation(cfg: Config, now_ms: int) -> dict | None:
     """
     if not cfg.distillation:
         return None
-    now = time.monotonic()
-    at = _distillation_cache["at"]
-    if at is not None and (now - at) < cfg.distillation_interval:
-        return _distillation_cache["value"]
-    try:
-        value = fetch_distillation(cfg, now_ms)
-    except ScrapeError:
-        # Stamp the attempt so a persistently failing query is retried on the
-        # interval rather than on every scrape.
+    with _distillation_lock:
+        now = time.monotonic()
+        at = _distillation_cache["at"]
+        if at is not None and (now - at) < cfg.distillation_interval:
+            return _distillation_cache["value"]
+        try:
+            value = fetch_distillation(cfg, now_ms)
+        except ScrapeError:
+            # Stamp the attempt so a persistently failing query is retried on
+            # the interval rather than on every scrape.
+            _distillation_cache["at"] = now
+            return _distillation_cache["value"]
         _distillation_cache["at"] = now
-        return _distillation_cache["value"]
-    _distillation_cache["at"] = now
-    _distillation_cache["value"] = value
-    return value
+        _distillation_cache["value"] = value
+        return value
 
 
 def scrape_text(cfg: Config) -> str:
