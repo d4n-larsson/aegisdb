@@ -1,0 +1,12 @@
+{
+  "is_a":         { "object": "id", "transitive": true },
+  "part_of":      { "object": "id", "transitive": true, "inverse_of": "contains" },
+  "contains":     { "object": "id", "inverse_of": "part_of" },
+  "depends_on":   { "object": "id", "transitive": true },
+  "defaults_to":  { "object": "string", "cardinality": "one" },
+  "guarded_by":   { "object": "string" },
+  "measured_by":  { "object": "string" },
+  "owned_by":     { "object": "string", "cardinality": "one" },
+  "deprecated_by":{ "object": "id", "cardinality": "one", "mutex_with": ["recommended_by"] },
+  "recommended_by": { "object": "id", "mutex_with": ["deprecated_by"] }
+}

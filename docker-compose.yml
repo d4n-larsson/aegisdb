@@ -26,6 +26,13 @@ services:
       # To enable auth, drop a token file beside the data and add
       # `--auth-token-file /data/tokens.txt` to AEGIS_EXTRA_ARGS:
       # - ./tokens.txt:/data/tokens.txt:ro
+      #
+      # Typed facts and inference (ROADMAP 5.2/5.3) need a predicate registry.
+      # Mount one and name it in AEGIS_EXTRA_ARGS:
+      #   AEGIS_EXTRA_ARGS=--predicate-registry /data/predicates.json --inference
+      # `predicates.example.json` is a starter vocabulary; tools/facts/ has a
+      # worked corpus that loads through it.
+      # - ./predicates.example.json:/data/predicates.json:ro
     restart: unless-stopped
     # Give the server time to flush the log and write its checkpoint on SIGTERM
     # (docker compose stop/down) before it is force-killed.

@@ -59,7 +59,7 @@ DEPS := $(CORE_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(CJSON_OBJ:.o=.d) \
 
 PYTHON ?= python3
 
-.PHONY: all clean test integration check eval eval-multihop eval-extraction eval-tasks sdk-test langgraph-test inspector inspector-test first-contact bench wire-bench fuzz fuzz-regress fuzz-corpus
+.PHONY: all clean test integration check eval eval-multihop eval-extraction eval-tasks sdk-test langgraph-test seed-facts inspector inspector-test first-contact bench wire-bench fuzz fuzz-regress fuzz-corpus
 all: $(BIN)
 
 $(BIN): $(CORE_OBJ) $(CJSON_OBJ) $(MAIN_OBJ)
@@ -139,6 +139,12 @@ sdk-test: $(BIN)
 # launches $(BIN) for the live half.
 langgraph-test: $(BIN)
 	cd integrations/langgraph && $(PYTHON) -m unittest discover -s tests -p 'test_*.py'
+
+# Load the worked typed-fact corpus (tools/facts/) into a running server. The
+# server must have been started with --predicate-registry; add --inference to
+# see the closures. `SEED_ARGS='--dry-run'` reports without writing.
+seed-facts:
+	$(PYTHON) tools/facts/seed.py $(SEED_ARGS)
 
 # A/B task benchmark: does memory lift task success? Teaches a fact, then answers
 # a fresh question with memory ON vs OFF and reports the lift (ROADMAP 1.1+).
