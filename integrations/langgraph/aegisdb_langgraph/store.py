@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
@@ -126,24 +127,56 @@ class AegisStore(BaseStore):
     `namespace` is the AegisDB namespace every item is written under — the
     server-enforced isolation boundary. The LangGraph namespace tuple lives
     *inside* it, so one AegisDB tenant holds one store's whole hierarchy.
+
+    **One store, one connection, one lock.** The client owns a socket and is
+    not thread-safe, so `batch` serialises. Concurrent nodes therefore queue
+    rather than race; for real parallelism build a store per worker. Across
+    *processes* nothing here can serialise a `put`, which is a
+    read-modify-write over a server with no upsert — two racing writers can
+    leave two records for one key. `_find` picks deterministically so reads
+    stay consistent afterwards.
     """
 
     supports_ttl = False  # consulted by BaseStore; see the module docstring
 
+    #: The server clamps `top_k` to this and says nothing, so asking for more
+    #: is not an error — it is a smaller answer than you think you asked for.
+    MAX_PAGE = 1000
+
     def __init__(self, client: AegisClient | None = None, *,
                  host: str = "127.0.0.1", port: int = 9470, token: str = "",
-                 namespace: str = "langgraph", search_scan_limit: int = 1000,
+                 namespace: str | None = None, search_scan_limit: int = 1000,
                  **client_kwargs: Any):
         super().__init__()
-        self.namespace = namespace
-        # A filtered search cannot be paged by the server, so this bounds how
-        # many candidates are pulled back to filter here. Raising it costs a
-        # bigger read; leaving it low silently truncates — which is why a
-        # truncated filtered search says so (see `_search`).
-        self.search_scan_limit = int(search_scan_limit)
-        self.client = client or AegisClient(
-            host=host, port=port, token=token, agent_id=namespace,
-            **client_kwargs)
+        if client is not None:
+            # The injected client's namespace is the one the server enforces,
+            # so it wins. Reporting a different one on `self.namespace` while
+            # writing into the client's would be a lie about where data went.
+            if namespace is not None and namespace != client.agent_id:
+                raise ValueError(
+                    f"namespace={namespace!r} disagrees with the client's "
+                    f"agent_id={client.agent_id!r}; isolation comes from the "
+                    f"client, so pass one or the other")
+            self.namespace = client.agent_id
+            self.client = client
+        else:
+            self.namespace = namespace or "langgraph"
+            self.client = AegisClient(host=host, port=port, token=token,
+                                      agent_id=self.namespace, **client_kwargs)
+        # A filtered search is paged here rather than by the server, so this
+        # bounds how many candidates are pulled back. Clamped to MAX_PAGE:
+        # above it the server silently returns fewer, so a larger value would
+        # read as "scans more" while changing nothing.
+        self.search_scan_limit = min(int(search_scan_limit), self.MAX_PAGE)
+        # One client is one socket, and the client documents itself as not
+        # thread-safe. `abatch` runs on a worker thread and LangGraph's sync
+        # runner executes a superstep's tasks on a pool, so two nodes touching
+        # the store concurrently would interleave `sendall`/`recv` on the same
+        # socket — and one would read the other's response. Serialised rather
+        # than given a client per thread: the ops are short and local, and one
+        # lock is far easier to be sure of than a pool of sockets. For real
+        # parallelism, use a store per worker.
+        self._lock = threading.Lock()
 
     # ---- lifecycle ------------------------------------------------------
     #
@@ -200,15 +233,28 @@ class AegisStore(BaseStore):
 
         An exact tag match on the hashed identity, so this is an index probe
         rather than a scan however large the store gets.
+
+        Two are fetched, not one, and the lowest id wins. `put` is a
+        read-modify-write and AegisDB has no upsert, so two writers racing on
+        one key — from separate processes, which no lock here can serialise —
+        can both insert. Picking deterministically means `get` at least keeps
+        answering the same way afterwards, instead of alternating between two
+        values depending on which the index happened to return first.
         """
         res = self.client.search(tags=[f"k-{_h((*ns, key))}", MARKER],
-                                 match="all", top_k=1)
+                                 match="all", top_k=2)
         recs = res.get("records") or []
-        return recs[0] if recs else None
+        if not recs:
+            return None
+        return min(recs, key=lambda r: r["id"])
 
     # ---- the one abstract method ---------------------------------------
 
     def batch(self, ops: Iterable[Op]) -> list[Result]:  # noqa: F821
+        with self._lock:
+            return self._batch_locked(ops)
+
+    def _batch_locked(self, ops: Iterable[Op]) -> list[Result]:  # noqa: F821
         out: list[Result] = []
         for op in ops:
             if isinstance(op, GetOp):
@@ -267,23 +313,44 @@ class AegisStore(BaseStore):
     def _search(self, op: SearchOp) -> list[SearchItem]:
         ns = tuple(op.namespace_prefix)
         tags = [MARKER, f"p-{_h(ns)}"]
-        # Without a filter the server can page directly. With one, matching
-        # happens here, so paging must happen here too — asking the server for
-        # `offset` would skip rows before they were filtered.
+        # Without a filter the server pages: `offset` goes to it, so a deep
+        # page is a small read. With one, matching happens here, so paging must
+        # too — a server-side offset would skip rows *before* they were
+        # filtered, and page 2 would silently omit matches.
+        #
+        # Caveat on the unfiltered path, and it is the server's rather than
+        # this adapter's: an unranked search is ordered by `created` alone,
+        # with a non-stable sort. Records written in the same millisecond —
+        # which is what a graph writing several items in one superstep looks
+        # like — have no defined order between them, so a page boundary
+        # falling inside such a group can skip one item and repeat another.
+        # Measured: 12 items across 3 distinct milliseconds, paged two at a
+        # time, returned 11 distinct. A filtered search does not have this
+        # problem: every page issues the identical query and slices it here.
         if op.filter:
             top_k, offset = self.search_scan_limit, 0
         else:
-            top_k, offset = op.limit + op.offset, 0
+            top_k, offset = min(op.limit, self.MAX_PAGE), op.offset
         try:
-            res = self.client.search(tags=tags, match="all", top_k=top_k,
-                                     offset=offset,
-                                     query=op.query or None)
+            res = self.client.search(
+                tags=tags, match="all", top_k=top_k, offset=offset,
+                query=op.query or None,
+                # The server returns a score only when asked to explain, so
+                # without this `SearchItem.score` was always None even for a
+                # ranked query.
+                explain=True if op.query else None)
         except NotReady as exc:
-            raise RuntimeError(
-                "search(query=...) needs the server's BM25 index, which this "
-                "server was started without (--no-lexical-index). Drop the "
-                "query, or restart the server with the index enabled."
-            ) from exc
+            if op.query:
+                raise RuntimeError(
+                    "search(query=...) needs the server's BM25 index, which "
+                    "this server was started without (--no-lexical-index). "
+                    "Drop the query, or restart the server with the index "
+                    "enabled.") from exc
+            # NOT_READY has other causes — phase gating, a disabled index the
+            # query did not ask for. Blaming --no-lexical-index for a search
+            # that carried no query sends the reader somewhere there is nothing
+            # to find, so the original is re-raised untouched.
+            raise
 
         items: list[SearchItem] = []
         for rec in res.get("records") or []:
@@ -298,7 +365,8 @@ class AegisStore(BaseStore):
                 continue
             if not _matches(value, op.filter):
                 continue
-            score = rec.get("explain", {}).get("score") if op.query else None
+            score = (rec.get("explain") or {}).get("score") if op.query \
+                else None
             items.append(SearchItem(
                 namespace=item_ns, key=key, value=value,
                 created_at=_to_datetime(rec.get("created")),
@@ -306,8 +374,7 @@ class AegisStore(BaseStore):
                 score=score))
         if op.filter:
             items = items[op.offset:op.offset + op.limit]
-        else:
-            items = items[op.offset:]
+        # The unfiltered path was already paged by the server.
         return items
 
     def _list_namespaces(self, op: ListNamespacesOp) -> list[tuple[str, ...]]:
@@ -315,8 +382,13 @@ class AegisStore(BaseStore):
 
         A scan of the store's own records, bounded by `search_scan_limit`:
         AegisDB indexes tags but cannot enumerate them, and the namespaces are
-        only readable from the payloads. Rare enough to be worth the read, and
-        bounded so it cannot become an accidental full-table scan.
+        only readable from the payloads.
+
+        **Past that bound the answer is short and does not say so.** The return
+        type is a plain list, so there is nowhere to put a flag; a store with
+        more than `search_scan_limit` items can therefore be missing
+        namespaces here. The same applies to a filtered `search`. Stated
+        because it cannot be signalled.
         """
         res = self.client.search(tags=[MARKER], match="all",
                                  top_k=self.search_scan_limit)
@@ -332,7 +404,11 @@ class AegisStore(BaseStore):
             if cond.match_type == "prefix":
                 out = [ns for ns in out if _path_matches(ns[:len(path)], path)]
             elif cond.match_type == "suffix":
-                out = [ns for ns in out if _path_matches(ns[-len(path):], path)]
+                # `ns[-0:]` is the WHOLE tuple, not an empty slice, so an empty
+                # suffix compared a full namespace against () and matched
+                # nothing — where InMemoryStore matches everything.
+                out = [ns for ns in out
+                       if not path or _path_matches(ns[-len(path):], path)]
             else:  # pragma: no cover - langgraph only defines the two
                 raise NotImplementedError(cond.match_type)
         if op.max_depth is not None:

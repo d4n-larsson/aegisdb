@@ -238,8 +238,14 @@ jobs:
       # The suite skips itself when a dependency is missing, which is right
       # locally and useless in CI — a green job that tested nothing. This makes
       # a missing dependency a hard failure before the suite gets to decide.
-      - name: Assert the dependencies are importable (no silent skip)
-        run: python -c "import aegisdb, langgraph.store.base, langgraph.graph"
+      # The suite skips on ANY ImportError, including the adapter's own — so a
+      # langgraph that moved `Result`/`SearchItem`/`Op` out of
+      # `langgraph.store.base`, which is exactly the drift the `<5` pin exists
+      # to catch, would skip every test and leave the job green.
+      - name: Assert the adapter and its dependencies import (no silent skip)
+        env:
+          PYTHONPATH: integrations/langgraph
+        run: python -c "import aegisdb, langgraph.graph, aegisdb_langgraph"
       - name: Run adapter tests
         run: make langgraph-test
 

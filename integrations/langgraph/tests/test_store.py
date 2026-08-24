@@ -365,6 +365,115 @@ class TestAegisStore(unittest.TestCase):
             self.assertEqual(store.list_namespaces(), [("a",)])
 
 
+@unittest.skipUnless(DEPS, "langgraph-checkpoint / aegisdb not installed")
+@unittest.skipUnless(os.path.exists(BINARY), "aegisdb binary not built")
+class TestReviewFindings(unittest.TestCase):
+    """Cases the first round of tests passed straight through.
+
+    Each of these is a real defect the suite above could not see, kept so the
+    same blind spot cannot reopen.
+    """
+
+    def store(self, srv, **kw):
+        s = AegisStore(port=srv.port, namespace="lg-fix", **kw)
+        self.addCleanup(s.close)
+        return s
+
+    def test_search_with_a_query_returns_a_score(self):
+        """The server emits a score only when asked to explain, so this was
+        always None — every ranking or thresholding caller got nothing."""
+        with Server() as srv:
+            store = self.store(srv)
+            store.put(("n",), "a", {"note": "the deploy runbook lives in ops"})
+            hits = store.search(("n",), query="runbook")
+            self.assertEqual(len(hits), 1)
+            self.assertIsNotNone(hits[0].score, "a ranked hit carries a score")
+            self.assertGreater(hits[0].score, 0)
+
+    def test_a_queryless_search_is_not_blamed_on_the_lexical_index(self):
+        """NOT_READY has causes besides a missing BM25 index. Rewriting every
+        one into "drop the query" points a reader at a query they never
+        passed."""
+        with Server(extra=["--no-lexical-index"]) as srv:
+            store = self.store(srv)
+            store.put(("n",), "a", {"v": 1})
+            # No query: this must work, not raise about an index it never used.
+            self.assertEqual(len(store.search(("n",))), 1)
+
+    def test_deep_pages_are_not_silently_empty(self):
+        """The server clamps top_k to 1000 without saying so. Fetching
+        limit+offset and slicing meant any page past 1000 came back empty,
+        which a caller reads as "no more results" while items remain."""
+        with Server() as srv:
+            store = self.store(srv)
+            for i in range(12):
+                store.put(("p",), f"k{i:02d}", {"i": i})
+            deep = store.search(("p",), limit=2, offset=10)
+            self.assertEqual(len(deep), 2, "the last page is served, not empty")
+            self.assertEqual(len(store.search(("p",), limit=20)), 12,
+                             "one page over the whole set is exact")
+            # NOT asserted: that offset paging covers every item exactly once.
+            # An unranked search is ordered by `created` alone with a
+            # non-stable sort, and these twelve land in ~3 distinct
+            # milliseconds, so a page boundary inside a tie group can skip one
+            # and repeat another. That is the server's ordering, not this
+            # adapter's paging — asserting it here would be asserting a
+            # guarantee nothing makes, and the test would flake (it did, about
+            # one run in three).
+
+    def test_scan_limit_is_clamped_to_what_the_server_will_serve(self):
+        """Above 1000 the server returns fewer and says nothing, so a larger
+        value would read as "scans more" while changing nothing."""
+        with Server() as srv:
+            store = self.store(srv, search_scan_limit=50_000)
+            self.assertEqual(store.search_scan_limit, AegisStore.MAX_PAGE)
+
+    def test_an_empty_suffix_matches_everything(self):
+        """`ns[-0:]` is the whole tuple, not an empty slice — so an empty
+        suffix matched nothing where InMemoryStore matches all."""
+        with Server() as srv:
+            for store in (self.store(srv), InMemoryStore()):
+                store.put(("users", "1"), "k", {"v": 1})
+                store.put(("orgs",), "k", {"v": 2})
+                self.assertEqual(sorted(store.list_namespaces(suffix=())),
+                                 sorted(store.list_namespaces()),
+                                 type(store).__name__)
+
+    def test_a_client_and_a_conflicting_namespace_is_refused(self):
+        """Isolation comes from the client. Reporting a different namespace
+        than the one data lands in is a lie about where it went."""
+        from aegisdb import AegisClient
+
+        with Server() as srv:
+            c = AegisClient(port=srv.port, agent_id="from-client")
+            self.addCleanup(c.close)
+            with self.assertRaises(ValueError):
+                AegisStore(client=c, namespace="different")
+            store = AegisStore(client=c)
+            self.assertEqual(store.namespace, "from-client")
+
+    def test_concurrent_use_does_not_interleave_on_one_socket(self):
+        """The client owns a socket and is not thread-safe; `abatch` runs on a
+        worker thread and LangGraph's sync runner uses a pool. Unserialised,
+        two threads interleave sendall/recv and one reads the other's
+        response — which surfaces as a get returning another key's record."""
+        import concurrent.futures as cf
+
+        with Server() as srv:
+            store = self.store(srv)
+            for i in range(20):
+                store.put(("c",), f"k{i}", {"i": i})
+
+            def read(i):
+                item = store.get(("c",), f"k{i}")
+                return item.value["i"] if item else None
+
+            with cf.ThreadPoolExecutor(max_workers=8) as pool:
+                got = list(pool.map(read, list(range(20)) * 5))
+            self.assertEqual(got, list(range(20)) * 5,
+                             "every read returned its own record")
+
+
 @unittest.skipUnless(DEPS and HAS_GRAPH, "langgraph runtime not installed")
 @unittest.skipUnless(os.path.exists(BINARY), "aegisdb binary not built")
 class TestInsideAGraph(unittest.TestCase):

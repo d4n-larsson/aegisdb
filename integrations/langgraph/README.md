@@ -67,10 +67,12 @@ and recency — and which the LangGraph API has no way to express.
 
 **No vector indexing.** `query=` runs the server's BM25 index: no embedding
 provider needed, and exact tokens (an error string, a flag, an identifier)
-match well. `index=` is accepted and ignored, because honouring it would mean
-this package owning an embeddings function. A server started with
-`--no-lexical-index` raises a `RuntimeError` naming that flag rather than
-returning unranked results.
+match well, with the server's relevance score carried through to
+`SearchItem.score`. `index=` is accepted and ignored, because honouring it
+would mean this package owning an embeddings function. A server started with
+`--no-lexical-index` raises a `RuntimeError` naming that flag when a query was
+actually passed — a queryless search keeps working, and any other `NOT_READY`
+is re-raised untouched rather than blamed on an index it never used.
 
 **`filter=` is applied client-side.** AegisDB cannot filter on arbitrary JSON
 fields, so candidates are pulled back and matched here — using *LangGraph's
@@ -81,9 +83,30 @@ is not, in both stores alike.
 
 Because filtering happens here, paging does too — asking the server for an
 `offset` would skip rows before they were filtered, so page 2 would silently
-omit matches. `search_scan_limit` (default 1000) bounds how many candidates a
-filtered search pulls back; `list_namespaces` is bounded the same way, since
-AegisDB indexes tags but cannot enumerate them.
+omit matches. An **unfiltered** search does page on the server, so a deep page
+stays a small read.
+
+`search_scan_limit` (default 1000) bounds how many candidates a filtered search
+pulls back; `list_namespaces` is bounded the same way, since AegisDB indexes
+tags but cannot enumerate them. It is **clamped to 1000**, because the server
+clamps `top_k` there and says nothing — a larger value would read as "scans
+more" while changing nothing.
+
+**Offset paging is approximate when items share a creation millisecond.** An
+unranked AegisDB search is ordered by `created` alone, with a non-stable sort,
+so records written in the same millisecond — a graph writing several items in
+one superstep — have no defined order between them. A page boundary falling
+inside such a group can skip one item and repeat another: measured at 11
+distinct items from 12, paged two at a time. This is the server's ordering
+rather than the adapter's paging, and it applies to any client that pages
+AegisDB. A single page over the whole set is exact; so is a filtered search,
+where every page issues the identical query and slices it here.
+
+**Past that bound the answer is short and cannot say so.** `search` and
+`list_namespaces` return plain lists, with nowhere to put a flag. A store
+holding more than `search_scan_limit` items can therefore be missing matches
+from a filtered search, or namespaces from a listing. Stated here because it
+cannot be signalled there.
 
 ## Isolation
 
@@ -91,6 +114,24 @@ AegisDB indexes tags but cannot enumerate them.
 different ones cannot see each other's items even though they share a server —
 so one AegisDB instance can back many agents, and the LangGraph hierarchy lives
 inside each.
+
+Passing your own `client=` makes *its* `agent_id` authoritative, since that is
+what the server enforces; giving both and disagreeing raises, rather than
+reporting one namespace while writing into another.
+
+## Concurrency
+
+**One store is one connection, and `batch` holds a lock.** The client owns a
+socket and is not thread-safe, while `abatch` runs on a worker thread and
+LangGraph's sync runner executes a superstep's tasks on a pool — so without
+serialising, two nodes touching the store interleave on the same socket and one
+reads the other's response. Concurrent nodes therefore queue; for real
+parallelism, build a store per worker.
+
+Across *processes* nothing here can help: `put` is a read-modify-write and
+AegisDB has no upsert, so two racing writers can leave two records for one key.
+Reads pick deterministically (lowest id) so the store keeps answering
+consistently if that happens.
 
 ## Tests
 
