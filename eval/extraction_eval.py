@@ -135,20 +135,26 @@ def canonical(triple, canon: dict, predicates: dict):
 def grounding_errors(mention_ids: dict, canon: dict):
     """Split the grounding record into conflation and fragmentation.
 
-    `mention_ids` is every mention grounding placed, across the whole run.
+    `mention_ids` maps each mention to *every* id it was placed at over the
+    whole run — a set, not one id. One spelling landing at two ids across two
+    transcripts is fragmentation as surely as two spellings landing apart, and
+    it is the commoner shape: it is what a resolution threshold that has
+    stopped resolving actually looks like.
+
     Mentions the dataset does not label are reported separately rather than
     scored: an unlabelled mention says the dataset is incomplete, which is not
     the same finding as grounding being wrong, and folding the two together
     would let a thin dataset look like a clean run.
     """
     by_gold, by_id, unlabelled = {}, {}, set()
-    for mention, rec_id in mention_ids.items():
+    for mention, rec_ids in mention_ids.items():
         gold = canon.get(normalize(mention))
         if gold is None:
             unlabelled.add(mention)
             continue
-        by_gold.setdefault(gold, set()).add(rec_id)
-        by_id.setdefault(rec_id, set()).add(gold)
+        for rec_id in rec_ids:
+            by_gold.setdefault(gold, set()).add(rec_id)
+            by_id.setdefault(rec_id, set()).add(gold)
     fragmented = {g: ids for g, ids in by_gold.items() if len(ids) > 1}
     conflated = {i: gs for i, gs in by_id.items() if len(gs) > 1}
     return conflated, fragmented, sorted(unlabelled)
@@ -162,6 +168,14 @@ def run(args) -> int:
 
     embed = FakeProvider(ds.get("embedding_dim", 64)) if args.embedder == "fake" \
         else LocalProvider()
+    # Checked before `dimension()`, which for the local provider loads the model
+    # and raises ImportError straight out of the harness. The extractor gets
+    # exactly this guard three statements down; grounding's similarity pass runs
+    # on the embedder, so it deserves the same.
+    if not embed.available():
+        print(f"embedder {args.embedder!r} is not available here "
+              f"(pip install sentence-transformers)", file=sys.stderr)
+        return 2
     dim = embed.dimension()
 
     fd, registry = tempfile.mkstemp(suffix=".json")
@@ -205,10 +219,15 @@ def run(args) -> int:
                 for k in totals:
                     totals[k] += getattr(res, k)
                 for mention, rec_id in res.entity_ids.items():
-                    # First placement wins. A later transcript resolving to the
-                    # same id is the system working; recording it twice would
-                    # make a stable mention look like it moved.
-                    mention_ids.setdefault(mention, rec_id)
+                    # EVERY placement, not the first. `by_gold` below is a set,
+                    # so a mention that keeps resolving to the same id costs
+                    # nothing to record twice — while first-wins dropped the
+                    # second, *different* id, which is the only thing
+                    # fragmentation ever is. That made this gate blind to the
+                    # exact regression it exists for: with resolution failing
+                    # outright and every mention re-minted per transcript, the
+                    # report came out byte-identical and still passed.
+                    mention_ids.setdefault(mention, set()).add(rec_id)
                 per_transcript.append({
                     "label": t.get("label"), "proposed": res.proposed,
                     "rejected": res.rejected, "stored": res.stored,
@@ -231,6 +250,14 @@ def run(args) -> int:
     conflated, fragmented, unlabelled = grounding_errors(mention_ids, canon)
     unstatable = sum(len(t.get("unstatable") or []) for t in ds["transcripts"])
 
+    # Surplus ids, not the number of entities affected. An entity splitting
+    # three ways and one splitting in two are both "1 fragmented entity", so
+    # the entity count barely moves while the graph gets steadily worse — and
+    # it is bounded above by how many entities the dataset happens to give more
+    # than one surface form, which made the old ceiling unreachable by
+    # construction. Surplus ids has no such ceiling.
+    surplus_ids = sum(len(v) for v in fragmented.values()) - len(fragmented)
+
     report = {
         "dataset": ds.get("name"), "extractor": args.extractor,
         "embedder": args.embedder, "counts": totals,
@@ -242,6 +269,7 @@ def run(args) -> int:
         "grounding": {
             "conflated": {str(k): sorted(v) for k, v in conflated.items()},
             "fragmented": {k: sorted(v) for k, v in fragmented.items()},
+            "surplus_ids": surplus_ids,
             "unlabelled_mentions": unlabelled,
         },
         "per_transcript": per_transcript,
@@ -276,7 +304,8 @@ def emit(r: dict, ds: dict) -> None:
         print(f"                     id {rec_id} ← {', '.join(golds)}")
     frag_ids = sum(len(v) for v in g["fragmented"].values())
     print(f"    fragmentation    {len(g['fragmented'])} entit(y/ies) → "
-          f"{frag_ids} ids   one thing split · consolidate can merge")
+          f"{frag_ids} ids ({g['surplus_ids']} surplus)   "
+          f"one thing split · consolidate can merge")
     for gold, ids in g["fragmented"].items():
         print(f"                     {gold} → {ids}")
     if g["unlabelled_mentions"]:
@@ -327,9 +356,9 @@ def gate(args, r: dict) -> int:
     # starts minting for every mention, which shows up here long before it
     # shows up as a graph nobody can reason over.
     if args.max_fragmentation is not None and \
-            len(r["grounding"]["fragmented"]) > args.max_fragmentation:
-        failed.append(f"fragmentation {len(r['grounding']['fragmented'])} > "
-                      f"{args.max_fragmentation}")
+            r["grounding"]["surplus_ids"] > args.max_fragmentation:
+        failed.append(f"fragmentation {r['grounding']['surplus_ids']} surplus "
+                      f"id(s) > {args.max_fragmentation}")
     if args.gate_gold_recall is not None and \
             r["gold"]["recall"] < args.gate_gold_recall:
         failed.append(f"gold recall {r['gold']['recall']:.1%} < "
@@ -360,7 +389,7 @@ def main() -> int:
     ap.add_argument("--max-conflation", type=int, default=0,
                     help="entity ids denoting more than one thing (0 = none)")
     ap.add_argument("--max-fragmentation", type=int, default=None,
-                    help="gold entities split across more than one id")
+                    help="surplus entity ids (ids beyond one per gold entity)")
     ap.add_argument("--gate-gold-recall", type=float, default=None,
                     help="fail below this share of the gold triples")
     return run(ap.parse_args())

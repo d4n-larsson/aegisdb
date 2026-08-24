@@ -119,10 +119,22 @@ Three numbers, and the second and third are deliberately **not summed**:
 - **Conflation** — distinct things sharing one entity id. Facts then describe
   the wrong entity, 5.3 derives more of them, and nothing in the system can
   notice. Unrecoverable, so it **gates at zero**.
-- **Fragmentation** — one thing split across ids. Nothing false is asserted and
-  `consolidate` can merge the records afterwards, so it gets a *ceiling* rather
-  than a floor of zero — the design prefers this error, and the gate exists to
-  catch a threshold change that starts minting for every mention.
+- **Fragmentation** — one thing split across ids, counted as **surplus ids**
+  (ids beyond one per gold entity) rather than as the number of entities
+  affected: an entity splitting three ways and one splitting in two are both
+  "1 entity", so the entity count barely moves while the graph gets steadily
+  worse. Nothing false is asserted and `consolidate` can merge the records
+  afterwards, so it gets a *ceiling* rather than a floor of zero — the design
+  prefers this error, and the gate exists to catch a threshold change that
+  starts minting for every mention.
+
+  The ceiling is set at the measured baseline (**2 surplus ids**), not loosely.
+  Grounding failing outright — `resolve` returning `None` for every mention, so
+  each one is re-minted per transcript — produces **5**, and the gate fails.
+  That scenario is the reason the gate exists, and an earlier version of it
+  reported numbers identical to a healthy run: mentions were recorded at their
+  *first* placement only, so the second, different id — which is the entirety
+  of what fragmentation is — was dropped before it could be counted.
 
 A single "grounding accuracy" would average an unrecoverable error against a
 recoverable one and hide exactly the asymmetry `docs/neuro-symbolic-design.md`
@@ -166,6 +178,11 @@ Mentions the dataset does not label are reported apart from both grounding
 errors. An unlabelled mention says the dataset is incomplete, which is not the
 same finding as grounding being wrong, and folding the two together would let a
 thin dataset look like a clean run.
+
+`EVAL_ARGS` is appended after the gate flags, so it does **not** relax them
+unless it re-passes the same ones. A `--extractor claude-code` run scoring 92%
+gold recall sits one missed triple above the 0.9 gate, so pass your own
+thresholds alongside it rather than inheriting the deterministic ones.
 
 Not in CI: like every other eval here it needs a built binary, and the real
 number needs a model. `make eval-extraction` is the gate to run before touching

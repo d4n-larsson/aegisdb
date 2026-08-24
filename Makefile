@@ -110,14 +110,22 @@ eval-multihop: $(BIN)
 # — plus grounding, whose two errors are gated apart: conflation at zero because
 # nothing downstream can detect it, fragmentation at a ceiling because the design
 # deliberately prefers it. Runs the deterministic `fake` backend, which reads the
-# dataset's cue block rather than English, so in CI it is a pipeline regression
-# gate; for the real number add EVAL_ARGS='--extractor anthropic' (or
-# claude-code/openai), which also overrides the gates below.
+# dataset's cue block rather than English, so this is a pipeline regression gate.
+#
+# The thresholds below are the measured `fake` baseline, set tight on purpose:
+# 2 surplus ids is what a healthy run produces, and grounding failing outright
+# produces 5. A looser ceiling is how the gate came to be unfailable in the
+# first place.
+#
+# For the real number add EVAL_ARGS='--extractor anthropic' (or
+# claude-code/openai). Note that EVAL_ARGS does NOT relax these gates unless it
+# re-passes the same flags — a model run scoring 92% gold recall is one missed
+# triple from a red build here, so pass your own thresholds with it.
 eval-extraction: $(BIN)
 	$(PYTHON) eval/extraction_eval.py $(BIN) \
 	    --dataset eval/datasets/extraction.json \
 	    --gate-in-vocabulary 0.8 --gate-gold-recall 0.9 \
-	    --max-conflation 0 --max-fragmentation 3 $(EVAL_ARGS)
+	    --max-conflation 0 --max-fragmentation 2 $(EVAL_ARGS)
 
 # A/B task benchmark: does memory lift task success? Teaches a fact, then answers
 # a fresh question with memory ON vs OFF and reports the lift (ROADMAP 1.1+).
