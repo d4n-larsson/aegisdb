@@ -558,6 +558,38 @@ does deterministically, at write time, for free.
   renders an `explain.derivation` that already exists and can be checked against
   the record, rather than an explanation generated alongside an answer — which
   is the arrangement that makes model reasoning unfalsifiable.
+- **Measured (`make eval-extraction`):** the "done when" above is a number, so
+  it is now one. `eval/extraction_eval.py` runs the real seam over transcripts
+  paired with the triples a careful reader would write, and reads the result
+  back *through the server* rather than trusting the writer's own return value.
+  One run of `--extractor claude-code`: **in-vocabulary 100%** (22 proposed, 0
+  rejected), **conflation 0**, **fragmentation 2 entities → 4 ids**, gold recall
+  92%. That is a spot reading of a non-deterministic model rather than a gate,
+  but it is the first evidence for the claim this item rests on — prompted
+  against the registry as a controlled vocabulary, a model does not invent
+  predicates, which is the standard failure mode of model-built knowledge
+  graphs. The gate itself runs the deterministic `fake` backend, whose
+  in-vocabulary rate is a property of the dataset (82.4% by construction, three
+  of seventeen cues naming predicates the registry deliberately lacks) — a
+  pipeline regression gate, and the harness says so on every fake run rather
+  than printing a number that looks like a model score.
+- **Held to the asymmetry:** the two grounding errors are gated *apart* and
+  never summed. Conflation gates at zero because nothing downstream can detect
+  it; fragmentation gets a ceiling rather than a floor, because the design
+  prefers that error and the gate is there to catch a threshold change that
+  starts minting for every mention. A single "grounding accuracy" would average
+  the unrecoverable error against the recoverable one and hide the argument.
+  Likewise `gold` is a floor, not an enumeration: ten triples the store held
+  were not on the list and are mostly true, so they are reported as *beyond
+  gold*, and the gate is on recall and never on precision — an extractor that
+  reads more of the transcript must not score worse for it.
+- **Remaining:** adjudication (§6 of the design) — hand a contradiction 5.3
+  flagged but refused to settle to the model, and write the verdict as a
+  `supersedes`. Blocked on a smaller decision the design left open: `conflicts`
+  is a gauge recomputed each tick and `conflicts_with` edges are only reachable
+  by `traverse` from an id you already hold, so **there is no way to enumerate
+  the flagged pairs**. The pass already computes them; keeping that set is the
+  cheap answer.
 
 ### Ground rules for the whole horizon
 

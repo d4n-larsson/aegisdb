@@ -20,7 +20,7 @@ Three properties the arrangement is built to keep:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .extract import validate_triples
 from .grounding import ground_mentions
@@ -37,6 +37,14 @@ class TripleStoreResult:
     failed: int = 0  # the server refused the write
     entities_resolved: int = 0
     entities_minted: int = 0
+    # Where each mention landed. Counts alone cannot separate the two grounding
+    # errors, and §4 of neuro-symbolic-design.md turns on their asymmetry:
+    # conflation writes facts about the wrong entity and nothing downstream can
+    # notice, while fragmentation only loses inferences. Telling them apart
+    # needs the mapping, and re-deriving it afterwards would answer a different
+    # question — how a mention resolves against the store as it stands now,
+    # rather than what grounding actually did during this extraction.
+    entity_ids: dict = field(default_factory=dict)
 
     @property
     def in_vocabulary_rate(self) -> float:
@@ -126,6 +134,7 @@ def store_triples(tools, text, vocab, config, extractor) -> TripleStoreResult:
         return res
     res.entities_resolved = grounded.resolved
     res.entities_minted = grounded.minted
+    res.entity_ids = dict(grounded.ids)
 
     # Clamped: the server validates confidence into [0, 1] and refuses the
     # whole insert outside it, which would surface as every triple `failed`

@@ -11,6 +11,8 @@ per-query breakdown — the scoreboard that every downstream memory-quality chan
 make eval                                   # report only
 make eval EVAL_ARGS='--gate-recall-at 5 --gate-threshold 0.8'   # fail on regression
 python3 eval/recall_eval.py ./build/aegisdb --json              # machine-readable
+make eval-multihop                          # the symbolic path (5.3)
+make eval-extraction                        # prose -> triples (5.4)
 ```
 
 ### Consolidation eval (ROADMAP 2.2)
@@ -95,6 +97,97 @@ flatter this mode — it makes the retrieval baseline *generous*, since a real
 dense model would do no better on a question whose answer shares no words with
 it.
 
+### Extraction eval (ROADMAP 5.4) — `extraction_eval.py`
+
+5.4's "done when" is a measurement, not a feature: *triples that snap to the
+registry — measured as an in-vocabulary rate, not asserted.* This is that
+scoreboard. It runs the real seam (extract → validate → ground → write) over
+transcripts paired with the triples a careful reader would write, and reads the
+result back **through the server** rather than trusting what the writer returned.
+
+```sh
+make eval-extraction                                        # deterministic, gated
+python3 eval/extraction_eval.py ./build/aegisdb --extractor claude-code
+python3 eval/extraction_eval.py ./build/aegisdb --json
+```
+
+Three numbers, and the second and third are deliberately **not summed**:
+
+- **In-vocabulary rate** — accepted over testable. A registry that rejects most
+  of what the model proposes and one that fits the corpus look identical from
+  the accepted count alone, which is why the ratio is the headline.
+- **Conflation** — distinct things sharing one entity id. Facts then describe
+  the wrong entity, 5.3 derives more of them, and nothing in the system can
+  notice. Unrecoverable, so it **gates at zero**.
+- **Fragmentation** — one thing split across ids, counted as **surplus ids**
+  (ids beyond one per gold entity) rather than as the number of entities
+  affected: an entity splitting three ways and one splitting in two are both
+  "1 entity", so the entity count barely moves while the graph gets steadily
+  worse. Nothing false is asserted and `consolidate` can merge the records
+  afterwards, so it gets a *ceiling* rather than a floor of zero — the design
+  prefers this error, and the gate exists to catch a threshold change that
+  starts minting for every mention.
+
+  The ceiling is set at the measured baseline (**2 surplus ids**), not loosely.
+  Grounding failing outright — `resolve` returning `None` for every mention, so
+  each one is re-minted per transcript — produces **5**, and the gate fails.
+  That scenario is the reason the gate exists, and an earlier version of it
+  reported numbers identical to a healthy run: mentions were recorded at their
+  *first* placement only, so the second, different id — which is the entirety
+  of what fragmentation is — was dropped before it could be counted.
+
+A single "grounding accuracy" would average an unrecoverable error against a
+recoverable one and hide exactly the asymmetry `docs/neuro-symbolic-design.md`
+§4 is built around.
+
+**Read the `fake` number with its caveat.** The deterministic backend parses a
+line format, not English, so every transcript carries a `cues` block for it.
+Under `--extractor fake` the in-vocabulary rate is a property of *the dataset* —
+**82.4%** by construction, since three of the seventeen cues name predicates the
+registry deliberately lacks. That makes the default run a pipeline regression
+gate, not a model score, and the harness prints the caveat on every fake run
+rather than trusting anyone to remember it. This is the same discipline as the
+retrieval-mode caveat above.
+
+**The number that means something** comes from a real backend. One run of
+`--extractor claude-code` over this dataset:
+
+```
+IN-VOCABULARY      100.0%     22 proposed, 0 rejected
+conflation         0 ids
+fragmentation      2 entities → 4 ids
+triples vs gold    recall 92.3% (13 expected, 22 held) · 10 beyond gold
+```
+
+That is a spot reading of a non-deterministic model, not a gate — but it is the
+first evidence for the claim 5.4 rests on: prompted against the registry as a
+controlled vocabulary, a model does **not** invent predicates, which is the
+standard failure mode of model-built knowledge graphs. The single gold miss is
+instructive rather than embarrassing: it wrote `lexical index guarded_by
+--no-lexical-index` where gold says `lexical_index.c`, a defensible reading of
+the transcript that grounding then kept as a separate entity.
+
+`gold` is a **floor**, not an exhaustive enumeration. Ten triples the store held
+were not on the list and are mostly true (`the neighbour-selection loop part_of
+hnsw.c`, `append-only log part_of the storage layer`), so they are reported as
+*beyond gold* rather than counted as errors — an extractor that reads more of
+the transcript must not score worse for it. The gate is on gold **recall** and
+never on precision.
+
+Mentions the dataset does not label are reported apart from both grounding
+errors. An unlabelled mention says the dataset is incomplete, which is not the
+same finding as grounding being wrong, and folding the two together would let a
+thin dataset look like a clean run.
+
+`EVAL_ARGS` is appended after the gate flags, so it does **not** relax them
+unless it re-passes the same ones. A `--extractor claude-code` run scoring 92%
+gold recall sits one missed triple above the 0.9 gate, so pass your own
+thresholds alongside it rather than inheriting the deterministic ones.
+
+Not in CI: like every other eval here it needs a built binary, and the real
+number needs a model. `make eval-extraction` is the gate to run before touching
+extraction, grounding, or the registry.
+
 ### Forgetting eval (ROADMAP 2.3)
 
 Measures decay/forgetting: seed the curated facts, flood the corpus with
@@ -154,6 +247,16 @@ owns embedding for both memories and queries. See `embedders.py`.
 
 `relevant` lists the memory labels that *should* surface for the query. Add
 scenarios by dropping in another JSON file and pointing `--dataset` at it.
+
+`datasets/multihop.json` and `datasets/extraction.json` carry a `predicates`
+block that becomes the server's `--predicate-registry` for the run. The
+extraction dataset adds `transcripts` — each with `text` (prose, what a real
+extractor reads), `cues` (the `S : p : O` lines the `fake` backend reads),
+`gold` (the floor of triples a careful reader would write), and `unstatable`
+(triples that reader would want and the registry cannot express, kept visible so
+"the registry is too small" stays a number rather than an argument) — plus
+`entities`, mapping each surface form to the one thing it denotes, which is what
+makes conflation and fragmentation separable.
 
 ## A/B task benchmark — does memory *help*? (`ab_tasks.py`)
 
