@@ -59,7 +59,7 @@ DEPS := $(CORE_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(CJSON_OBJ:.o=.d) \
 
 PYTHON ?= python3
 
-.PHONY: all clean test integration check eval eval-multihop eval-tasks inspector inspector-test first-contact bench wire-bench fuzz fuzz-regress fuzz-corpus
+.PHONY: all clean test integration check eval eval-multihop eval-extraction eval-tasks inspector inspector-test first-contact bench wire-bench fuzz fuzz-regress fuzz-corpus
 all: $(BIN)
 
 $(BIN): $(CORE_OBJ) $(CJSON_OBJ) $(MAIN_OBJ)
@@ -104,6 +104,20 @@ eval: $(BIN)
 eval-multihop: $(BIN)
 	$(PYTHON) eval/recall_eval.py $(BIN) --multihop \
 	    --dataset eval/datasets/multihop.json --gate-recall-at 5 $(EVAL_ARGS)
+
+# Extraction eval (ROADMAP 5.4): does prose become the triples a careful reader
+# would write? Gates the in-vocabulary rate — the number the horizon is judged on
+# — plus grounding, whose two errors are gated apart: conflation at zero because
+# nothing downstream can detect it, fragmentation at a ceiling because the design
+# deliberately prefers it. Runs the deterministic `fake` backend, which reads the
+# dataset's cue block rather than English, so in CI it is a pipeline regression
+# gate; for the real number add EVAL_ARGS='--extractor anthropic' (or
+# claude-code/openai), which also overrides the gates below.
+eval-extraction: $(BIN)
+	$(PYTHON) eval/extraction_eval.py $(BIN) \
+	    --dataset eval/datasets/extraction.json \
+	    --gate-in-vocabulary 0.8 --gate-gold-recall 0.9 \
+	    --max-conflation 0 --max-fragmentation 3 $(EVAL_ARGS)
 
 # A/B task benchmark: does memory lift task success? Teaches a fact, then answers
 # a fresh question with memory ON vs OFF and reports the lift (ROADMAP 1.1+).

@@ -1,0 +1,122 @@
+{
+  "name": "extraction",
+  "description": "Coding-agent transcripts paired with the triples a careful reader would write (ROADMAP 5.4). Three numbers come out of it: the in-vocabulary rate — the ratio 5.4 is judged on — and grounding accuracy split into conflation and fragmentation, which are counted apart because §4 of neuro-symbolic-design.md argues they are not equally bad. Each transcript carries prose (what a real extractor reads) and a `cues` block (what the deterministic `fake` backend reads, since it parses a line format rather than English). Under `fake` the in-vocabulary rate is therefore a property of THIS FILE, not of a model: it is a regression gate on the pipeline, and the real number needs --extractor claude-code|anthropic|openai. `gold` is a FLOOR, not an exhaustive enumeration: it lists the triples a careful reader would certainly write, so a triple the store holds and gold does not name is reported as \"beyond gold\" rather than counted wrong — several such are true, supported by the transcript, and simply not on the list. That is why the gate is on gold *recall* and never on precision. The out-of-vocabulary cues are deliberate — they are the triples a careful reader would want and the registry cannot express, so the rejection path is exercised and the 'registry too small to be useful' risk is visible as a number rather than an argument.",
+  "embedding_dim": 64,
+  "predicates": {
+    "part_of": { "object": "id", "transitive": true },
+    "depends_on": { "object": "id", "transitive": true },
+    "defaults_to": { "object": "string", "cardinality": "one" },
+    "guarded_by": { "object": "string" }
+  },
+  "entities": {
+    "hnsw.c": ["hnsw.c", "the HNSW graph implementation", "the HNSW graph"],
+    "the storage layer": ["the storage layer", "storage layer"],
+    "the query layer": ["the query layer", "query layer"],
+    "the semantic index": ["the semantic index", "semantic index"],
+    "the recall hook": ["the recall hook", "recall hook"],
+    "the claude code integration": ["the claude code integration", "claude code integration"],
+    "lexical_index.c": ["lexical_index.c"],
+    "edge_index.c": ["edge_index.c"],
+    "the inference job": ["the inference job", "inference job"],
+    "usage_index.c": ["usage_index.c"],
+    "the compaction pass": ["the compaction pass", "compaction pass"]
+  },
+  "transcripts": [
+    {
+      "label": "t_hnsw_hot_path",
+      "text": "user: recall got noticeably slower once this corpus went past 50k records. where is the time going?\nassistant: The exact-cosine path only runs while the set is small. Past the threshold the semantic index hands the query to the HNSW graph in hnsw.c, which lives under the storage layer, and the neighbour-selection loop there is the hot part.\nuser: does the graph survive a restart, or is it rebuilt every time?\nassistant: It is checkpointed. Recovery reloads the graph rather than rebuilding it, which is why a cold start is fast even on a large corpus.",
+      "cues": [
+        "hnsw.c : part_of : the storage layer",
+        "the semantic index : depends_on : hnsw.c",
+        "hnsw.c : rebuilt_by : recovery"
+      ],
+      "gold": [
+        { "s": "hnsw.c", "p": "part_of", "o": "the storage layer" },
+        { "s": "the semantic index", "p": "depends_on", "o": "hnsw.c" }
+      ],
+      "unstatable": [
+        { "s": "hnsw.c", "p": "rebuilt_by", "o": "recovery",
+          "note": "the registry has no predicate for 'what reconstructs this on restart'" }
+      ]
+    },
+    {
+      "label": "t_recall_hook_env",
+      "text": "user: semantic recall returns nothing in this repo, but the MCP tools work fine.\nassistant: The recall hook does not inherit the .mcp.json environment, so its embedding mode falls back to the default of none — it is running lexical-only. Set AEGIS_EMBEDDING_MODE in the hook's own environment in settings.json.\nuser: how many does it inject?\nassistant: Three, capped by AEGIS_RECALL_TOP_K. The hook is part of the Claude Code integration, not the server.",
+      "cues": [
+        "the recall hook : defaults_to : none",
+        "the recall hook : part_of : the claude code integration",
+        "the recall hook : capped_at : 3"
+      ],
+      "gold": [
+        { "s": "the recall hook", "p": "defaults_to", "o": "none" },
+        { "s": "the recall hook", "p": "part_of", "o": "the claude code integration" }
+      ],
+      "unstatable": [
+        { "s": "the recall hook", "p": "capped_at", "o": "3",
+          "note": "a numeric bound is not a declared predicate; adding one per setting is how a registry stops being a contract" }
+      ]
+    },
+    {
+      "label": "t_tokenizer",
+      "text": "user: why doesn't keyword search split --tenant-max-records into three useless terms?\nassistant: The tokenizer in lexical_index.c keeps `_ - . : / + #` inside a term, so the flag indexes whole and is findable by the exact string you remember. It also emits the parts, so `records` finds it too. That file sits in the query layer.\nuser: and if I don't want the index at all?\nassistant: --no-lexical-index turns it off; a `query` then answers NOT_READY rather than silently returning nothing.",
+      "cues": [
+        "lexical_index.c : part_of : the query layer",
+        "lexical_index.c : guarded_by : --no-lexical-index"
+      ],
+      "gold": [
+        { "s": "lexical_index.c", "p": "part_of", "o": "the query layer" },
+        { "s": "lexical_index.c", "p": "guarded_by", "o": "--no-lexical-index" }
+      ],
+      "unstatable": []
+    },
+    {
+      "label": "t_retraction",
+      "text": "user: when a premise is deleted, how does the inference job find the conclusions standing on it?\nassistant: Through the reverse adjacency in edge_index.c — the job depends on that index, because without it a backward walk over derived_from is a full scan of the corpus. edge_index.c is part of the query layer and is guarded by --no-edge-index.\nuser: how often does it run?\nassistant: On the maintenance tick, never on the write path, and never on a replica.",
+      "cues": [
+        "the inference job : depends_on : edge_index.c",
+        "edge_index.c : part_of : the query layer",
+        "edge_index.c : guarded_by : --no-edge-index",
+        "the inference job : runs_every : maintenance tick"
+      ],
+      "gold": [
+        { "s": "the inference job", "p": "depends_on", "o": "edge_index.c" },
+        { "s": "edge_index.c", "p": "part_of", "o": "the query layer" },
+        { "s": "edge_index.c", "p": "guarded_by", "o": "--no-edge-index" }
+      ],
+      "unstatable": [
+        { "s": "the inference job", "p": "runs_every", "o": "maintenance tick",
+          "note": "scheduling is not a fact about the corpus; the registry deliberately says nothing about it" }
+      ]
+    },
+    {
+      "label": "t_usage_counters",
+      "text": "user: we moved the hook onto the local embedder last week — did that land?\nassistant: Yes, the recall hook defaults to local now.\nuser: unrelated — why does usage_index.c write its own file?\nassistant: Because it is the one index the log cannot rebuild. Recall counts and last-recalled times are not in the append-only log, so they checkpoint to usage.db. It is part of the storage layer, and --no-usage-feedback opts out of the whole thing.",
+      "cues": [
+        "the recall hook : defaults_to : local",
+        "usage_index.c : part_of : the storage layer",
+        "usage_index.c : guarded_by : --no-usage-feedback"
+      ],
+      "gold": [
+        { "s": "the recall hook", "p": "defaults_to", "o": "local" },
+        { "s": "usage_index.c", "p": "part_of", "o": "the storage layer" },
+        { "s": "usage_index.c", "p": "guarded_by", "o": "--no-usage-feedback" }
+      ],
+      "unstatable": [],
+      "note": "`defaults_to` is single-valued and t_recall_hook_env already asserted `none`, so this transcript deliberately leaves the corpus holding a contradiction for 5.3 to flag. Extraction's job is to assert what the transcript says, not to adjudicate."
+    },
+    {
+      "label": "t_storage_survey",
+      "text": "user: give me the shape of storage — what actually lives under it?\nassistant: The append-only log, the HNSW graph implementation, the usage index, and the compaction pass that rewrites the log in place. Those are the pieces the storage layer owns.",
+      "cues": [
+        "the HNSW graph implementation : part_of : storage layer",
+        "the compaction pass : part_of : storage layer"
+      ],
+      "gold": [
+        { "s": "the HNSW graph implementation", "p": "part_of", "o": "storage layer" },
+        { "s": "the compaction pass", "p": "part_of", "o": "storage layer" }
+      ],
+      "unstatable": [],
+      "note": "Every mention here is an *alias* of an entity an earlier transcript already introduced by another name. This is the fragmentation probe: `the HNSW graph implementation` is `hnsw.c` and `storage layer` is `the storage layer`, and whether grounding sees that is the measurement, not an assumption."
+    }
+  ]
+}
