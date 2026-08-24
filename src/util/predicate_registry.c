@@ -55,6 +55,14 @@ static int spec_cmp(const void *a, const void *b) {
                   ((const PredicateSpec *)b)->name);
 }
 
+const PredicateSpec *predicate_registry_at(const PredicateRegistry *r,
+                                           size_t i) {
+    if (!r || i >= r->n) {
+        return NULL;
+    }
+    return &r->specs[i];
+}
+
 const PredicateSpec *predicate_registry_get(const PredicateRegistry *r,
                                             const char *predicate) {
     if (!r || !predicate) {

@@ -101,30 +101,36 @@ def build_tools(config=None) -> MemoryTools:
     return MemoryTools(config, client, provider)
 
 
-def _read_path(config):
+def _read_path(tools):
     """The vocabulary and extractor the read path needs, or (None, None).
 
-    Loaded once: the registry is the file the server was started with, and
-    re-reading it per query would buy nothing but a syscall. A broken registry
-    is said out loud and then disables the read path — never the whole server,
-    which would take ordinary search down with it over a feature that is
-    defined as strictly additive.
+    Resolved once at startup: the vocabulary is a file the server was started
+    with, or the server's own answer, and re-fetching it per query would buy
+    nothing. A broken registry is said out loud and then disables the read path
+    — never the whole server, which would take ordinary search down with it
+    over a feature that is defined as strictly additive.
+
+    Takes `tools` rather than a config because the vocabulary may come from the
+    server now, which needs a connection to ask.
     """
+    config = tools.config
     if not (getattr(config, "ask_pattern", False)
             or getattr(config, "ask_verbalize", False)):
         return None, None
-    from .extract import VocabularyError, load_vocabulary, make_extraction_provider
+    from .extract import (VocabularyError, make_extraction_provider,
+                          resolve_vocabulary)
     vocab = None
     if getattr(config, "ask_pattern", False):
         try:
-            vocab = load_vocabulary(getattr(config, "extract_registry", ""))
+            vocab = resolve_vocabulary(config, tools)
         except VocabularyError as e:
             print(f"[aegis-mcp] read path: {e}", file=sys.stderr)
             return None, None
         if vocab is None:
-            print("[aegis-mcp] AEGIS_ASK_PATTERN is set but no registry is "
-                  "configured (AEGIS_EXTRACT_REGISTRY); questions fall back to "
-                  "ordinary search", file=sys.stderr)
+            print("[aegis-mcp] AEGIS_ASK_PATTERN is set but no vocabulary is "
+                  "available — neither AEGIS_EXTRACT_REGISTRY nor a registry "
+                  "on the server; questions fall back to ordinary search",
+                  file=sys.stderr)
     provider = make_extraction_provider(config)
     if not provider.available():
         print("[aegis-mcp] read path: no extraction backend available; "
@@ -147,7 +153,7 @@ def main() -> int:
 
     tools = build_tools()
     mcp = _new_server(server_cls, "memory")
-    read_vocab, read_extractor = _read_path(tools.config)
+    read_vocab, read_extractor = _read_path(tools)
 
     @mcp.tool()
     def memory_save(text: str, tags: list[str] | None = None,

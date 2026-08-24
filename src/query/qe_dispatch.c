@@ -1657,6 +1657,95 @@ static cJSON *handle_conflicts(AegisDB *db, const cJSON *req,
     return o;
 }
 
+/* The declared typed-fact vocabulary (ROADMAP 5.2).
+ *
+ * `stats` says how many predicates are declared and never which, so the only
+ * way to learn the vocabulary was to read the server's `--predicate-registry`
+ * file off disk. That works for a process sitting beside the server and for
+ * nothing else: a client on another machine has no such file, and neither the
+ * Python client, the LangGraph adapter, nor the agent itself can ask what it
+ * is allowed to assert. They were left guessing at a contract `insert`
+ * enforces.
+ *
+ * Not folded into `stats`, which is OP_GLOBAL — admin-only. Putting the
+ * vocabulary there would hide it from exactly the namespaced clients that need
+ * it. This is readable with an ordinary token, because a vocabulary is server
+ * *configuration* rather than any tenant's data: it says what may be written,
+ * not what anyone wrote.
+ *
+ * The in-use counts are the exception and are admin-only. The fact indexes are
+ * server-wide, so a per-predicate count is a count across every tenant — a
+ * thin but real signal about other tenants' activity, and not one a namespaced
+ * caller should get for free. Absent rather than zero, so "you may not see
+ * this" cannot be mistaken for "nothing uses it".
+ */
+static cJSON *handle_predicates(AegisDB *db, const cJSON *req,
+                                const AuthCtx *ctx) {
+    (void)req;
+    /* NULL ns means unrestricted — auth off, or an admin token. Same test the
+     * other handlers use to decide what a caller may reach. */
+    int unrestricted = (ctx->ns == NULL);
+
+    cJSON *o = json_ok();
+    cJSON *arr = cJSON_AddArrayToObject(o, "predicates");
+    if (!arr) {
+        cJSON_Delete(o);
+        return json_error_status(AEGIS_ERR_INTERNAL);
+    }
+    size_t n = predicate_registry_count(db->predicates);
+    for (size_t i = 0; i < n; i++) {
+        const PredicateSpec *p = predicate_registry_at(db->predicates, i);
+        if (!p) {
+            break;
+        }
+        cJSON *e = cJSON_CreateObject();
+        if (!e) {
+            break;
+        }
+        cJSON_AddStringToObject(e, "name", p->name);
+        cJSON_AddStringToObject(e, "object",
+                                p->object == PRED_OBJ_ID ? "id" : "string");
+        /* Only the properties actually declared. Emitting `"symmetric": false`
+         * for every predicate would make a registry of ten read like a wall of
+         * defaults and bury the two or three declarations that matter. */
+        if (p->single_valued) {
+            cJSON_AddStringToObject(e, "cardinality", "one");
+        }
+        if (p->symmetric) {
+            cJSON_AddBoolToObject(e, "symmetric", 1);
+        }
+        if (p->transitive) {
+            cJSON_AddBoolToObject(e, "transitive", 1);
+        }
+        if (p->inverse_of) {
+            cJSON_AddStringToObject(e, "inverse_of", p->inverse_of);
+        }
+        if (p->mutex_with && p->mutex_count) {
+            cJSON *mx = cJSON_AddArrayToObject(e, "mutex_with");
+            for (size_t k = 0; mx && k < p->mutex_count; k++) {
+                cJSON_AddItemToArray(mx, cJSON_CreateString(p->mutex_with[k]));
+            }
+        }
+        if (unrestricted) {
+            pthread_rwlock_rdlock(&db->index_lock);
+            size_t used = fact_index_predicate_facts(db->facts, p->name);
+            pthread_rwlock_unlock(&db->index_lock);
+            /* Declared but never used is the number worth seeing: it is dead
+             * vocabulary, and a registry is supposed to be a contract rather
+             * than a wish list. */
+            cJSON_AddNumberToObject(e, "facts", (double)used);
+        }
+        cJSON_AddItemToArray(arr, e);
+    }
+    cJSON_AddNumberToObject(o, "total", (double)n);
+    /* Says which of the two states an empty list is in. With no registry the
+     * server accepts ANY predicate, which is the opposite of a vocabulary of
+     * none — and a client that could not tell them apart would either refuse
+     * to propose anything or propose anything at all. */
+    cJSON_AddBoolToObject(o, "enforced", db->predicates != NULL);
+    return o;
+}
+
 /* Constant-time string equality: no early exit on mismatch, and length
  * differences fold into the result so timing does not leak the secret. */
 /* Constant-time fixed-length byte compare (no early exit). */
@@ -1944,6 +2033,7 @@ static const OpDef OPS[] = {
     {"relate", handle_relate, OP_WRITE, MOP_RELATE},
     {"traverse", handle_traverse, 0, MOP_TRAVERSE},
     {"conflicts", handle_conflicts, 0, MOP_OTHER},
+    {"predicates", handle_predicates, 0, MOP_OTHER},
 };
 
 static const OpDef *find_op(const char *op) {

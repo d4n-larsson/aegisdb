@@ -57,6 +57,15 @@ void predicate_registry_free(PredicateRegistry *r);
 /* Declared predicates. 0 for a NULL registry. */
 size_t predicate_registry_count(const PredicateRegistry *r);
 
+/* The i-th declaration, or NULL past the end (or for a NULL registry).
+ *
+ * Specs are held sorted by name, so enumerating with this yields the
+ * vocabulary in a stable, alphabetical order — which is what makes the
+ * `predicates` op's output diffable between two servers.
+ */
+const PredicateSpec *predicate_registry_at(const PredicateRegistry *r,
+                                           size_t i);
+
 /* The declaration for `predicate`, or NULL if it is not declared (or the
  * registry is NULL). */
 const PredicateSpec *predicate_registry_get(const PredicateRegistry *r,

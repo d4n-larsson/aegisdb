@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from .adjudicate import adjudicate_conflicts
 from .client import AegisClient
 from .embeddings import EmbeddingProvider
-from .extract import (VocabularyError, load_vocabulary,
+from .extract import (VocabularyError, load_vocabulary, resolve_vocabulary,
                       make_extraction_provider)
 from .triples import store_triples
 from .tools import MemoryTools
@@ -247,7 +247,7 @@ def _store_triples(texts, config, tools, extractor) -> int:
     if not getattr(config, "extract_triples", False):
         return 0
     try:
-        vocab = load_vocabulary(getattr(config, "extract_registry", ""))
+        vocab = resolve_vocabulary(config, tools)
     except VocabularyError as e:
         # Said out loud. A configured-but-unreadable registry disables the
         # contract, and silence here is indistinguishable from a session with
@@ -256,8 +256,9 @@ def _store_triples(texts, config, tools, extractor) -> int:
         print(f"[aegis-mcp] triples disabled: {e}", file=sys.stderr)
         return 0
     if vocab is None:
-        print("[aegis-mcp] triples enabled but no registry configured "
-              "(AEGIS_EXTRACT_REGISTRY); the vocabulary is the contract, so "
+        print("[aegis-mcp] triples enabled but no vocabulary: neither "
+              "AEGIS_EXTRACT_REGISTRY nor a registry on the server "
+              "(--predicate-registry). The vocabulary is the contract, so "
               "nothing is proposed", file=sys.stderr)
         return 0
     blob = _transcript_blob(texts, config)
