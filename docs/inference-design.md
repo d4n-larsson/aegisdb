@@ -155,6 +155,23 @@ That also makes conclusions findable lexically, which costs nothing — BM25 is
 already indexing every payload — and gives the eval dataset a way to confirm
 that the *symbolic* path is what answered, not the words.
 
+**Shipped as** `hnsw.c part_of the storage layer (derived: transitive)`, with
+two deliberate differences from the sketch above. The premise ids are *not* in
+the prose: they are in `explain.derivation`, structured and checkable, and
+repeating them as `#88, #91` would put back exactly the unreadable ids this
+form exists to remove — while adding tokens BM25 would index for nothing.
+
+The first implementation missed this paragraph entirely and wrote `#4 part_of
+#1 (derived: transitive)` — ids on both sides. The cost was the sentence above
+about lexical findability: a conclusion about `hnsw.c` carried no `hnsw` token,
+so no keyword or embedding query could reach it, and derived records were
+reachable *only* by `pattern` — the reverse of the horizon's rule that recall is
+never gated on the symbolic path. Naming the entities needs a lookup per id,
+which a per-pass cache reduces to roughly one per distinct entity, since a
+closure names the same few things repeatedly. Each name is truncated on a UTF-8
+boundary: `data` is opaque bytes to the server but is emitted into a JSON
+response, and a name cut mid-codepoint makes that response undecodable.
+
 **`derivation` is server-only.** `insert` rejects a request carrying one with
 `INVALID_REQUEST`, the same way `update` rejects a `fact`. A client that could
 forge a derivation could manufacture provenance, which is worse than having none
