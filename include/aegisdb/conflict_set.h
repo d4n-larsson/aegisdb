@@ -62,9 +62,20 @@ void conflict_set_free(ConflictSet *cs);
 /* Empty it for a fresh pass. Tolerates NULL. */
 void conflict_set_clear(ConflictSet *cs);
 
-/* Record one contradiction. Returns 0 when stored, -1 when the set is full or
- * the arguments are unusable; a full set is marked truncated. Tolerates a NULL
- * set so the pass can call it unconditionally. */
+/* Record one contradiction.
+ *
+ * Returns 0 when stored, **1 when this pair was already recorded this pass**,
+ * and -1 when it could not be stored (the set is full, the arguments are
+ * unusable, or there is no set). A full set is marked truncated.
+ *
+ * The duplicate return is what lets the caller count contradictions rather than
+ * rule firings: one pair can be reached by two scans in a single pass, and a
+ * gauge that counted both while this kept one would contradict the list it is
+ * supposed to summarize. -1 is deliberately *not* a duplicate — a pair the cap
+ * rejected is still a contradiction, so the gauge stays exact past the cap, and
+ * so does a pass that could not allocate a set at all.
+ *
+ * Tolerates a NULL set so the pass can call it unconditionally. */
 int conflict_set_add(ConflictSet *cs, uint64_t a, uint64_t b, const char *ns,
                      const char *predicate_a, const char *predicate_b,
                      const char *reason);

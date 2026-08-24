@@ -1572,13 +1572,22 @@ def test_conflicts_op(binary, port):
               f"a namespaced caller sees only its own tenant ({mine})")
         check(mine["total"] == 1, "and its total counts only its own")
 
-        # A spoofed agent_id is ignored, exactly as export/purge ignore it:
-        # the token's namespace is the authority, not anything in the request.
+        # A namespaced token is authoritative, so a spoofed agent_id changes
+        # nothing — but only because the token *has* a namespace. See
+        # test_conflicts_scope_without_a_namespaced_token for the other half.
         spoofed = srv.req({"operation": "conflicts", "token": "tok-a",
                            "agent_id": "beta"})
         check([(c["a"], c["b"]) for c in spoofed["conflicts"]]
               == [tuple(sorted((a1, a2)))],
               "naming another tenant in the request changes nothing")
+
+        # An admin token can name a tenant, which is what an unnamespaced
+        # caller needs to scope itself at all.
+        scoped = srv.req({"operation": "conflicts", "token": "admintok",
+                          "agent_id": "beta"})
+        check([(c["a"], c["b"]) for c in scoped["conflicts"]]
+              == [tuple(sorted((b1, b2)))],
+              f"an admin token scopes by agent_id ({scoped})")
 
         # limit is a page size, and `total` is the count regardless — so
         # limit:0 is a usable "how many are there?" probe rather than an
@@ -1622,6 +1631,121 @@ def test_conflicts_op(binary, port):
                           "token": "admintok"})["total"]
         check(gauge == listed,
               f"the count and the list agree ({gauge} vs {listed})")
+
+
+def test_conflicts_scope_without_a_namespaced_token(binary, port):
+    print("[conflicts: an unnamespaced caller scopes by agent_id]")
+    d = tempfile.mkdtemp(prefix="aegis_conflicts_ns_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"defaults_to": {"object": "string", "cardinality": "one"}},
+                  fh)
+
+    # No auth at all — the Claude Code integration's default posture, where
+    # every request carries its own `agent_id` and the server namespaces
+    # nobody. Ignoring that field here handed a caller every tenant's pairs.
+    with Server(binary, port, phase=4,
+                extra_args=["--predicate-registry", reg, "--inference",
+                            "--inference-interval-sec", "1"]) as srv:
+        def ins(ns, data, fact=None):
+            p = {"operation": "insert", "type": "semantic", "data": data,
+                 "agent_id": ns}
+            if fact:
+                p["fact"] = fact
+            return srv.req(p)["record"]["id"]
+
+        a_s = ins("acme", "the recall hook")
+        a1 = ins("acme", "none", {"s": a_s, "p": "defaults_to", "o": "none"})
+        a2 = ins("acme", "local", {"s": a_s, "p": "defaults_to", "o": "local"})
+        b_s = ins("beta", "the capture hook")
+        ins("beta", "session", {"s": b_s, "p": "defaults_to", "o": "session"})
+        ins("beta", "turn", {"s": b_s, "p": "defaults_to", "o": "turn"})
+
+        _await_stat(srv, "conflicts", at_least=2)
+
+        mine = srv.req({"operation": "conflicts", "agent_id": "acme"})
+        check([(c["a"], c["b"]) for c in mine["conflicts"]]
+              == [tuple(sorted((a1, a2)))],
+              f"agent_id scopes an unnamespaced caller ({mine})")
+        check(mine["total"] == 1, "and its total counts only that tenant")
+
+        # Naming neither still means everything, which is what an operator
+        # looking at the whole server wants. Unlike `export`, this carries no
+        # payload — a handful of id pairs — so a subjectless read is allowed.
+        both = srv.req({"operation": "conflicts"})
+        check(both["total"] == 2,
+              f"and naming no tenant still means all of them ({both})")
+
+
+def test_conflicts_go_quiet_when_the_last_fact_goes(binary, port):
+    print("[conflicts: an empty fact set is an answer, not a stale one]")
+    d = tempfile.mkdtemp(prefix="aegis_conflicts_empty_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"defaults_to": {"object": "string", "cardinality": "one"}},
+                  fh)
+
+    with Server(binary, port, phase=4,
+                extra_args=["--predicate-registry", reg, "--inference",
+                            "--inference-interval-sec", "1"]) as srv:
+        subj = srv.req({"operation": "insert", "type": "semantic",
+                        "data": "the recall hook"})["record"]["id"]
+        ids = [srv.req({"operation": "insert", "type": "semantic",
+                        "data": v,
+                        "fact": {"s": subj, "p": "defaults_to", "o": v}}
+                       )["record"]["id"] for v in ("none", "local")]
+        _await_stat(srv, "conflicts", at_least=1)
+
+        # Remove BOTH sides, so the corpus holds no facts at all. A pass that
+        # bailed on an empty fact set without republishing left the previous
+        # answer standing forever — the list kept naming a pair whose records
+        # were both tombstoned, which is precisely the stale input an
+        # adjudicator must never be handed.
+        for rid in ids:
+            srv.req({"operation": "delete", "id": rid})
+
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            left = srv.req({"operation": "conflicts"})
+            if left["total"] == 0:
+                break
+            time.sleep(0.5)
+        check(left["total"] == 0,
+              f"the list empties with the fact set ({left})")
+        check(srv.req({"operation": "stats"})["indexes"]["conflicts"] == 0,
+              "and so does the gauge")
+
+
+def test_conflicts_gauge_matches_the_list_on_a_self_mutex(binary, port):
+    print("[conflicts: one pair counts once, however many rules find it]")
+    d = tempfile.mkdtemp(prefix="aegis_conflicts_dup_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        # A predicate naming *itself* mutually exclusive. The registry accepts
+        # this — unlike inverse_of, mutex_with does not require the declaration
+        # to be mutual — and the pair is then reached by both the cardinality
+        # scan and the mutex scan in one pass.
+        json.dump({"defaults_to": {"object": "string", "cardinality": "one",
+                                   "mutex_with": ["defaults_to"]}}, fh)
+
+    with Server(binary, port, phase=4,
+                extra_args=["--predicate-registry", reg, "--inference",
+                            "--inference-interval-sec", "1"]) as srv:
+        subj = srv.req({"operation": "insert", "type": "semantic",
+                        "data": "the recall hook"})["record"]["id"]
+        for v in ("none", "local"):
+            srv.req({"operation": "insert", "type": "semantic", "data": v,
+                     "fact": {"s": subj, "p": "defaults_to", "o": v}})
+        _await_stat(srv, "conflicts", at_least=1)
+        time.sleep(2)  # let a full pass settle
+
+        gauge = srv.req({"operation": "stats"})["indexes"]["conflicts"]
+        listed = srv.req({"operation": "conflicts"})["total"]
+        # The gauge counts contradictions, not rule firings. Counting both
+        # while the list kept one broke the invariant conflict_set.h, the wire
+        # docs and test_conflicts_op all assert.
+        check(gauge == listed == 1,
+              f"one pair, one contradiction (gauge {gauge}, listed {listed})")
 
 
 def test_conflicts_without_inference(binary, port):
@@ -4515,6 +4639,9 @@ def main():
     test_contradiction_detection(binary, 19582)
     test_conflicts_op(binary, 19586)
     test_conflicts_without_inference(binary, 19587)
+    test_conflicts_scope_without_a_namespaced_token(binary, 19588)
+    test_conflicts_go_quiet_when_the_last_fact_goes(binary, 19589)
+    test_conflicts_gauge_matches_the_list_on_a_self_mutex(binary, 19590)
     test_subsume_and_explain_derivation(binary, 19584)
     test_subsume_requires_inference(binary, 19585)
     test_retraction_survives_a_lost_queue(binary, 19577)

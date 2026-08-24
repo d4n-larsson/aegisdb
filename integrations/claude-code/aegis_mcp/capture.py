@@ -326,23 +326,37 @@ def run_capture(event: dict, config, provider: EmbeddingProvider,
     texts = load_transcript(event.get("transcript_path"))
 
     extractor = make_extraction_provider(config)
+    tools = None
+
+    def connect():
+        """One client and one MemoryTools per capture, built on first need.
+
+        A local helper rather than a line in each branch, because adjudication
+        below runs even when *nothing was stored* — so the connection can no
+        longer be a side effect of a branch that happened to store something.
+        """
+        nonlocal client, tools
+        if tools is None:
+            if client is None:
+                client = AegisClient.from_config(config)
+            tools = MemoryTools(config, client, provider)
+        return tools
+
+    stored = 0
     facts = extract_facts(texts, config, extractor)
     if facts is not None:  # extractor ran (even if it found nothing)
         # Not `if not facts: return 0`. A session can hold a groundable
         # relation while holding nothing worth keeping as prose, and returning
         # early there made the triple path depend on the *prose* extractor
         # finding something — which is not what "strictly additive" means.
-        if client is None:
-            client = AegisClient.from_config(config)
-        tools = MemoryTools(config, client, provider)
-        stored = 0
+        t = connect()
         for f in facts:
             # Contradiction -> supersession: find existing memories this fact
             # updates/replaces BEFORE inserting it (so candidates are prior facts),
             # then tombstone them with a `supersedes` provenance link.
-            superseded = _find_superseded_ids(f, tools, config, extractor)
-            res = tools.save(f.text, tags=f.tags, importance=f.importance,
-                             semantic=True, confidence=f.confidence)
+            superseded = _find_superseded_ids(f, t, config, extractor)
+            res = t.save(f.text, tags=f.tags, importance=f.importance,
+                         semantic=True, confidence=f.confidence)
             if not res.get("ok"):
                 continue
             stored += 1
@@ -350,29 +364,31 @@ def run_capture(event: dict, config, provider: EmbeddingProvider,
             for old_id in superseded:
                 if old_id == new_id:
                     continue
-                tools.relate(new_id, old_id, "supersedes")
-                tools.delete(old_id)
+                t.relate(new_id, old_id, "supersedes")
+                t.delete(old_id)
         # Typed triples (ROADMAP 5.4), strictly additive: the prose facts above
         # are stored either way, so a transcript yielding no usable triple
         # behaves exactly as it does with the feature off.
-        stored += _store_triples(texts, config, tools, extractor)
-        # Adjudication (ROADMAP 5.4 §6) runs last, over the corpus this capture
-        # just added to. It resolves contradictions rather than storing
-        # anything, so it contributes nothing to `stored` — the count means
-        # "memories kept", and a supersession is the opposite of one.
-        _adjudicate(config, tools, extractor)
-        return stored
+        stored += _store_triples(texts, config, t, extractor)
+    else:
+        # heuristic fallback (extraction disabled/unavailable)
+        survivors = filter_candidates(derive_candidates(texts, config), config)
+        if survivors:
+            t = connect()
+            for cand in survivors:
+                res = t.save(cand.text, tags=cand.tags,
+                             importance=cand.salience)
+                if res.get("ok"):
+                    stored += 1
 
-    # heuristic fallback (extraction disabled/unavailable)
-    survivors = filter_candidates(derive_candidates(texts, config), config)
-    if not survivors:
-        return 0
-    if client is None:
-        client = AegisClient.from_config(config)
-    tools = MemoryTools(config, client, provider)
-    stored = 0
-    for cand in survivors:
-        res = tools.save(cand.text, tags=cand.tags, importance=cand.salience)
-        if res.get("ok"):
-            stored += 1
+    # Adjudication (ROADMAP 5.4 §6) runs on *every* path, including the ones
+    # that stored nothing. What it acts on is whatever the corpus holds, not
+    # what this transcript produced — so gating it on extraction having run,
+    # as it was, left it silently inert under the default
+    # AEGIS_EXTRACT_MODE=none while the README said it needed only
+    # `--inference`. It resolves contradictions rather than storing anything,
+    # so it contributes nothing to `stored`: that count means "memories kept",
+    # and a supersession is the opposite of one.
+    if getattr(config, "adjudicate_conflicts", False):
+        _adjudicate(config, connect(), extractor)
     return stored

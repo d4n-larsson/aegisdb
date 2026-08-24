@@ -593,7 +593,9 @@ does deterministically, at write time, for free.
   gone all abstain. A verdict is written as a **supersession, never an edit**:
   the judgment becomes a record and neither fact is rewritten to agree with it.
   Off by default and capped per run, because this is the one place in 5.4 where
-  a model error becomes durable state.
+  a model error becomes durable state. It needs a backend as well as
+  `--inference`: with `extract_mode: none` there is nothing to ask, so the
+  provider abstains and the setting is inert rather than silently wrong.
 - **Found while building it:** the design assumed the adjudicator could be
   "handed that one pair", and there was no way to *get* the pair. `conflicts`
   was a gauge recomputed each tick, a `conflicts_with` edge is only walkable

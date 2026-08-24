@@ -85,7 +85,7 @@ int conflict_set_add(ConflictSet *cs, uint64_t a, uint64_t b, const char *ns,
      * CONFLICT_SET_MAX times per tick. */
     for (size_t i = 0; i < cs->count; i++) {
         if (cs->items[i].a == a && cs->items[i].b == b) {
-            return 0; /* already recorded this tick */
+            return 1; /* already recorded this tick */
         }
     }
     if (cs->count >= cs->cap) {

@@ -303,7 +303,16 @@ static int mutually_exclusive(const PredicateSpec *a, const PredicateSpec *b) {
  * note_conflict returns early once both edges already exist, so a contradiction
  * found on an earlier tick and still live would be counted and not listed — the
  * gauge and the list would drift apart the moment anything stayed unresolved,
- * which is precisely the case an adjudicator exists for. */
+ * which is precisely the case an adjudicator exists for.
+ *
+ * The add *gates* the count rather than following it, so the gauge counts
+ * contradictions and not rule firings. One pair can be reached twice in a
+ * single pass — a predicate naming itself in `mutex_with` is accepted by the
+ * registry (unlike `inverse_of`, mutual declaration is not required), and its
+ * pair is then found by both scans below. Counting both while the list kept one
+ * broke the "these two cannot disagree" invariant this module is built on. A
+ * duplicate returns 1; a full or absent set returns -1 and is still counted, so
+ * the gauge stays exact past the list's cap. */
 static size_t find_conflicts(AegisDB *db, const LoadedFact *facts, size_t n,
                              const char *ns, ConflictSet *cs) {
     const LoadedFact **by_sp = malloc(n * sizeof(*by_sp));
@@ -359,12 +368,12 @@ static size_t find_conflicts(AegisDB *db, const LoadedFact *facts, size_t n,
             if (spec && spec->single_valued) {
                 for (size_t y = j + 1; y < p_end; y++) {
                     if (objects_differ(&by_sp[j]->rec.fact,
-                                       &by_sp[y]->rec.fact)) {
-                        found++;
+                                       &by_sp[y]->rec.fact) &&
                         conflict_set_add(cs, by_sp[j]->rec.id, by_sp[y]->rec.id,
                                          ns, by_sp[j]->rec.fact.predicate,
                                          by_sp[y]->rec.fact.predicate,
-                                         "cardinality");
+                                         "cardinality") != 1) {
+                        found++;
                         note_conflict(db, by_sp[j], by_sp[y], ns,
                                       "cardinality: one");
                     }
@@ -389,12 +398,12 @@ static size_t find_conflicts(AegisDB *db, const LoadedFact *facts, size_t n,
             for (size_t y = x + 1; y < s_end; y++) {
                 const PredicateSpec *sy = predicate_registry_get(
                     db->predicates, by_sp[y]->rec.fact.predicate);
-                if (sy && mutually_exclusive(sx, sy)) {
-                    found++;
+                if (sy && mutually_exclusive(sx, sy) &&
                     conflict_set_add(cs, by_sp[x]->rec.id, by_sp[y]->rec.id, ns,
                                      by_sp[x]->rec.fact.predicate,
                                      by_sp[y]->rec.fact.predicate,
-                                     "mutex_with");
+                                     "mutex_with") != 1) {
+                    found++;
                     note_conflict(db, by_sp[x], by_sp[y], ns, "mutex_with");
                 }
             }
@@ -497,6 +506,14 @@ size_t db_inference_step(AegisDB *db) {
         goto done;
     }
     if (n == 0) {
+        /* The read succeeded and the corpus holds no facts, so zero
+         * contradictions is the *truth* — not the absence of an answer that
+         * the load-failure path above represents. Leaving `scanned` clear here
+         * meant the last non-empty pass's gauge and list stood forever: delete
+         * both sides of the only contradiction and `conflicts` kept returning
+         * the pair, with both ids tombstoned. That is exactly the stale input
+         * conflict_set.h says an adjudicator must never be given. */
+        scanned = 1;
         goto done;
     }
 
@@ -545,7 +562,17 @@ size_t db_inference_step(AegisDB *db) {
         LOG_WARN("inference: out of memory for the conflict list; "
                  "contradictions will be counted but not listable this pass");
     }
-    for (size_t g = 0; g < ngroups; g++) {
+    /* Visited from the same rotating offset the derive loop uses, and for the
+     * same reason. The *scan* is complete for every tenant either way, so the
+     * gauge does not depend on this — but the retained list is capped, and
+     * filling it in strcmp order let one noisy early-sorting tenant hide every
+     * later tenant's pairs behind `truncated` on every tick, permanently. */
+    size_t g0 = ngroups ? (size_t)atomic_load_explicit(&db->infer_ns_cursor,
+                                                       memory_order_relaxed) %
+                              ngroups
+                        : 0;
+    for (size_t k = 0; k < ngroups; k++) {
+        size_t g = (g0 + k) % ngroups;
         size_t lo = starts[g];
         size_t hi = (g + 1 < ngroups) ? starts[g + 1] : n;
         conflicts += find_conflicts(db, &facts[lo], hi - lo, facts[lo].ns, cs);
@@ -558,10 +585,6 @@ size_t db_inference_step(AegisDB *db) {
      * at the first would let one busy tenant consume the whole write budget
      * every tick and starve every tenant that sorts after it — the budget is
      * shared, and strcmp order is not a fairness policy. */
-    size_t g0 = ngroups ? (size_t)atomic_load_explicit(&db->infer_ns_cursor,
-                                                       memory_order_relaxed) %
-                              ngroups
-                        : 0;
     size_t advanced = 0;
     for (size_t k = 0; k < ngroups; k++) {
         size_t g = (g0 + k) % ngroups;

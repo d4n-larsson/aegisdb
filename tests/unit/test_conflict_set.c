@@ -46,8 +46,14 @@ static void test_add_then_list(void) {
  * two verdicts to tombstone one record — the second finding its loser gone. */
 static void test_a_pair_has_one_identity(void) {
     ConflictSet *cs = conflict_set_create();
-    conflict_set_add(cs, 7, 4, "ns", "p_hi", "p_lo", "mutex_with");
-    conflict_set_add(cs, 4, 7, "ns", "p_lo", "p_hi", "mutex_with");
+    TEST_ASSERT_EQUAL_INT(
+        0, conflict_set_add(cs, 7, 4, "ns", "p_hi", "p_lo", "mutex_with"));
+    /* 1, not 0: the caller counts contradictions rather than rule firings, and
+     * needs to tell "already recorded this pass" from "recorded". A pair the
+     * cap rejected returns -1 and IS still counted, so the gauge stays exact
+     * past the cap — the two cases must not collapse. */
+    TEST_ASSERT_EQUAL_INT(
+        1, conflict_set_add(cs, 4, 7, "ns", "p_lo", "p_hi", "mutex_with"));
     TEST_ASSERT_EQUAL_UINT(1, conflict_set_count(cs));
 
     ConflictPair out[2];

@@ -982,10 +982,13 @@ fills it in the same loop, which is also why the two cannot disagree.
 |-------|------|----------|-------|
 | `limit` | integer | No | Page size; default `100`, capped at `1024`. An explicit `0` lists nothing and still reports `total`, which makes it a "how many are there?" probe. `0` is *not* read as unlimited |
 
-`agent_id` is **ignored**, exactly as `export` and `purge` ignore it: the
-token's namespace is the authority, so a namespaced caller sees its own
-tenant's contradictions and nothing else. An admin (or unauthenticated) caller
-sees every namespace, which is why each pair names its own.
+Scoped by the same rule `export` and `purge` use: **the token's namespace when
+it has one, otherwise the `agent_id` the request names.** A namespaced token is
+authoritative, so a spoofed `agent_id` changes nothing; a caller the server has
+not namespaced — auth off, or an admin token — can still say which tenant it
+means. Omitting both means every namespace, which is why each pair names its
+own. (Unlike `export`, a subjectless request is allowed: that would dump the
+whole database, while this returns a handful of id pairs and no payload.)
 
 **Response**:
 

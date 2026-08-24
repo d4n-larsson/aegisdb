@@ -20,6 +20,8 @@ from harness import AegisServer, binary_available, make_config  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from aegis_mcp.adjudicate import adjudicate_conflicts  # noqa: E402
+from aegis_mcp import capture  # noqa: E402
+from aegis_mcp.capture import run_capture  # noqa: E402
 from aegis_mcp.client import AegisClient  # noqa: E402
 from aegis_mcp.embeddings import FakeProvider  # noqa: E402
 from aegis_mcp.extract import FakeExtractionProvider  # noqa: E402
@@ -184,6 +186,50 @@ class TestAdjudicateE2E(unittest.TestCase):
             self.assertEqual(res.considered + res.skipped, res.seen,
                              f"every pair is accounted for exactly once: {res}")
             self.assertGreaterEqual(res.resolved, 1, f"{res}")
+
+
+    def test_capture_adjudicates_on_the_heuristic_path(self):
+        """The wiring, not the verdict.
+
+        `run_capture` has two paths — the extractor's and the heuristic marker
+        fallback — and adjudication was reachable only from the first. The
+        fallback is taken whenever `extract_facts` returns None, which includes
+        a live backend whose extract call *raised*: one transient failure then
+        silently disabled adjudication too, for a corpus and a model that were
+        both perfectly able to resolve the contradiction.
+
+        Note this cannot be tested with `extract_mode=none`, and that is not a
+        gap in the test: with no backend there is nothing to adjudicate *with*,
+        so the provider abstains and the feature is legitimately inert. The
+        README says so.
+        """
+        class FlakyExtractor(FakeExtractionProvider):
+            """Available, adjudicates, and fails at prose extraction."""
+
+            def extract(self, text, max_facts):
+                raise RuntimeError("transient backend failure")
+
+        with self._server() as srv:
+            cfg, tools = self._wired(srv)
+            _, loser, winner = self._contradiction(tools, loser_suffix=STALE)
+
+            transcript = os.path.join(tempfile.mkdtemp(), "t.jsonl")
+            with open(transcript, "w") as fh:
+                fh.write(json.dumps({"type": "user",
+                                     "message": {"role": "user",
+                                                 "content": "ok"}}) + "\n")
+
+            real = capture.make_extraction_provider
+            capture.make_extraction_provider = lambda cfg_: FlakyExtractor()
+            try:
+                run_capture({"transcript_path": transcript}, cfg,
+                            FakeProvider(srv.dim), AegisClient.from_config(cfg))
+            finally:
+                capture.make_extraction_provider = real
+
+            self.assertFalse(tools.get(loser).get("ok"),
+                             "the contradiction is adjudicated on both paths")
+            self.assertTrue(tools.get(winner).get("ok"))
 
 
 if __name__ == "__main__":

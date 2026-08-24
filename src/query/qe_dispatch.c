@@ -1566,14 +1566,26 @@ static cJSON *handle_traverse(AegisDB *db, const cJSON *req,
  * verdict comes back through `relate` + `delete` as an ordinary supersession,
  * on the record and in the log like every other write.
  *
- * Scoped by the caller's token, not by anything in the request: `agent_id` is
- * ignored here exactly as `export` and `purge` ignore it, so a namespaced
- * caller sees its own tenant's contradictions and no one else's. */
+ * Scoped by the same rule `export` and `purge` use: the token's namespace when
+ * it has one, otherwise the `agent_id` the request names. A namespaced token is
+ * therefore authoritative and a spoofed `agent_id` changes nothing — but a
+ * caller the server has not namespaced (auth off, or an admin token) can still
+ * say which tenant it means, which is not a nicety. The Claude Code integration
+ * runs unauthenticated by default and scopes every request by `agent_id`
+ * (`tools.py`), so ignoring it here handed the adjudicator every tenant's
+ * contradictions: it filled its page with pairs whose records its own
+ * namespaced `get` then refused, and never reached its own.
+ *
+ * Unlike `export`, a subjectless request is *allowed* and means every
+ * namespace. Export refuses one because it would dump the whole database;
+ * this returns a handful of id pairs and no payload, which is the same posture
+ * `stats` takes for an unrestricted caller. */
 #define CONFLICTS_DEFAULT_LIMIT 100
 
 static cJSON *handle_conflicts(AegisDB *db, const cJSON *req,
                                const AuthCtx *ctx) {
     const char *ns = ctx->ns;
+    const char *target = ns ? ns : jr_str(req, "agent_id", NULL);
     /* Absent means the default; an explicit 0 means *none*, not "unbounded".
      * A caller that wants everything asks for the maximum — reading 0 as
      * unlimited is the sort of default that turns a typo into the largest
@@ -1599,7 +1611,8 @@ static cJSON *handle_conflicts(AegisDB *db, const cJSON *req,
      * work to do while holding a lock the inference tick needs to publish its
      * next pass. */
     pthread_mutex_lock(&db->conflicts_lock);
-    written = conflict_set_list(db->conflicts, ns, out, (size_t)limit, &total);
+    written =
+        conflict_set_list(db->conflicts, target, out, (size_t)limit, &total);
     truncated = conflict_set_truncated(db->conflicts);
     pthread_mutex_unlock(&db->conflicts_lock);
 
