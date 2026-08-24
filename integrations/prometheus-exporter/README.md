@@ -80,6 +80,7 @@ file.
 | `AEGIS_EXPORTER_DISTILLATION_INTERVAL_SEC` | `60` | Minimum seconds between backlog recomputations, independent of the scrape interval |
 | `AEGIS_SUMMARY_MIN_AGE_MS` | `604800000` | Minimum record age the backlog counts as eligible — the same variable `aegisdb-summarize` reads |
 | `AEGIS_SUMMARY_MAX_IMPORTANCE` | `0.6` | Importance ceiling the backlog counts as eligible — likewise |
+| `AEGIS_SUMMARY_NAMESPACE` | *(all)* | The namespace the backlog is computed for — likewise. Empty spans every namespace, which is right on a single-tenant server and misleading on a shared one |
 
 ### Auth note
 
@@ -113,6 +114,7 @@ plus an `aegisdb_scrape_error{error="…"}` sample, so you alert on
 | `aegisdb_distillation_oldest_age_seconds` | gauge | how long the eldest eligible record has waited; `0` when the backlog is empty |
 | `aegisdb_distillation_min_age_seconds` | gauge | the age threshold the backlog was computed with |
 | `aegisdb_distillation_max_importance` | gauge | the importance ceiling it was computed with |
+| `aegisdb_distillation_scope` | gauge | always `1`, labelled with the namespace the backlog covers (empty = all) |
 | `aegisdb_memories_merged_total` | counter | records merged away by `consolidate` (dedup) |
 | `aegisdb_memories_forgotten_total` | counter | records aged out by `forget` (decay) |
 | `aegisdb_memories_purged_total` | counter | records erased by `purge` (right-to-be-forgotten) |
@@ -174,6 +176,20 @@ variables the job reads and exports both as gauges
 so a dashboard shows what the backlog was computed with and a mismatch with the
 job's own config is something you can see rather than a number that quietly
 lies.
+
+**Age is `created`, not `updated`.** The server filters and orders the backlog
+by `created`, so taking the age from `updated` would describe a different
+record than the one selected — a hundred-day-old note touched an hour ago would
+report an hour, and the staleness alert would never fire.
+
+**Measuring disturbs what it measures, a little.** The oldest-eligible query
+passes `track_usage: false`, so it does not bump the recall counters `forget`
+weighs — without that the exporter would protect the very records it reports as
+overdue. What it *cannot* avoid is being a `search`: it lands in
+`aegisdb_requests_by_op_total{op="search"}` and in
+`aegisdb_recall_latency_seconds`, where a ~44 ms scan is a slow outlier against
+real recall traffic. At the default interval that is one extra search a minute;
+if your recall-latency tail looks worse after enabling this, that is why.
 
 **Two absences that mean opposite things.** When the feature is off the backlog
 series are absent entirely, not zero — a gauge reading `0` for "we did not
