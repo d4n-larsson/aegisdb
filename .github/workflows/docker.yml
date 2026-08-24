@@ -91,9 +91,17 @@ jobs:
       # The release body quotes these, so they are resolved here where the push
       # actually happened rather than reconstructed later from the tag rules.
       # The digest is the useful one: tags move, a digest does not.
+      #
+      # Version tags only, because that is the only ref that has a version
+      # image and the only one the `release` job below runs for. A push to main
+      # publishes `latest` and `sha-<short>` and nothing else: its "version" is
+      # the synthetic 0.0.0-dev+<sha> the binary is stamped with, which is not —
+      # and cannot be — an image tag, since `+` is not a legal character in one.
+      # Asserting that unpublishable reference had been published failed every
+      # main push, while the images themselves went out fine each time.
       - name: Record published image coordinates
         id: refs
-        if: github.event_name != 'pull_request'
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           VERSION: ${{ steps.ver.outputs.version }}
           DIGEST: ${{ steps.build.outputs.digest }}
