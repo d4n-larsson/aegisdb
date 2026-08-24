@@ -545,6 +545,7 @@ src/
 └── util/               # CRC32, SHA-256, config, health check, client, logging
 include/aegisdb/        # Public headers
 clients/python/         # `aegisdb` — the dependency-free client SDK
+integrations/           # claude-code (MCP), langgraph (store), prometheus-exporter
 tests/                  # unit/, integration/, contract/
 third_party/            # Vendored cJSON and Unity
 data/                   # Runtime data (gitignored)
@@ -633,6 +634,23 @@ must use the same `--embedding-dim`. The stream is authenticated by the token bu
 not encrypted — keep it on a trusted network / behind a TLS proxy, like the
 client protocol.
 
+## Use as a LangGraph store
+
+`pip install aegisdb-langgraph` makes AegisDB the long-term memory behind a
+LangGraph agent — `BaseStore`'s `get`/`put`/`search`/`delete`/`list_namespaces`,
+with the namespace hierarchy carried in tags so a prefix search stays an index
+lookup:
+
+```python
+from aegisdb_langgraph import AegisStore
+
+graph = builder.compile(store=AegisStore(namespace="my-agent"))
+```
+
+Three things it deliberately does not do — TTL, vector indexing, and
+server-side `filter` — are spelled out with their reasons in
+[`integrations/langgraph/README.md`](integrations/langgraph/README.md).
+
 ## Use as Claude Code memory
 
 AegisDB can act as the persistent long-term memory of [Claude Code](https://claude.com/claude-code)
@@ -660,3 +678,4 @@ that and the manual step-by-step.
   [`docs/neuro-symbolic-design.md`](docs/neuro-symbolic-design.md)
 - Recall-quality eval harness: [`eval/README.md`](eval/README.md)
 - Python client SDK: [`clients/python/README.md`](clients/python/README.md)
+- LangGraph store adapter: [`integrations/langgraph/README.md`](integrations/langgraph/README.md)

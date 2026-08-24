@@ -178,7 +178,7 @@ behind the provider seam.*
 
 ---
 
-## Horizon 3 — Later: enterprise trust & scale
+## Horizon 3 — Later: enterprise trust & scale  ✅ *complete*
 
 *Theme: the capabilities that turn "interesting" into "we can deploy this."*
 
@@ -284,8 +284,34 @@ behind the provider seam.*
   identical; and past `--query-scan-cap` the backlog is a *floor*, reported as
   its own `..._capped` gauge rather than folded in, because a floor presented
   as a total is what an alert gets wrongly built on.
-- **Remaining:** framework adapters beyond MCP (the SDK is the thing they were
-  waiting on) — the last item in this horizon.
+- **Shipped (framework adapter — `pip install aegisdb-langgraph`):** AegisDB as
+  a **LangGraph store**, which is where an agent's long-term memory lives in
+  that ecosystem. `BaseStore` funnels everything through one abstract
+  `batch(ops)`, so that is all the adapter implements and the concrete surface
+  cannot drift from it. Built on 3.3's client rather than a second wire
+  implementation.
+- **The mapping, and what it costs.** LangGraph addresses items by a
+  hierarchical `namespace` tuple and searches by *prefix*; AegisDB's `agent_id`
+  is a flat isolation boundary. So the hierarchy is carried in tags — one per
+  prefix, hashed, since a tag is capped at 64 bytes and 32 per record — which
+  keeps a prefix search an index lookup rather than a scan, at the cost of a
+  namespace-depth ceiling of 29 that is refused with a message naming it.
+- **Three gaps stated rather than approximated.** TTL is *refused*, not
+  ignored: AegisDB expires only working memory, so a TTL here would never fire,
+  and silently not expiring what a caller asked to expire is a retention
+  surprise — `forget` is the mechanism that applies. `index=` is accepted and
+  ignored, because honouring it would mean the adapter owning an embeddings
+  function; `query=` uses BM25, which needs no provider at all. And `filter=`
+  is applied client-side using **LangGraph's own comparator**, so the semantics
+  — including which operators exist — are identical to `InMemoryStore` rather
+  than a second implementation that drifts.
+- **Graded against the reference, not against a reading of the contract.**
+  Every behaviour meant to match runs the same case against `InMemoryStore` and
+  compares. The suite also compiles a real graph with `store=` and lets
+  LangGraph inject it, which is the half that would break if the class
+  satisfied the ABC but not the runtime's expectations of it.
+
+**Horizon 3 is complete**, and with it every horizon in this document.
 
 ---
 

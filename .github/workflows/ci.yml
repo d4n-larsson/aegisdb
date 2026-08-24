@@ -218,6 +218,37 @@ jobs:
           python -m pip install dist/*.whl
           cd /tmp && python -c "import aegisdb; print(aegisdb.AegisClient)"
 
+  langgraph:
+    name: LangGraph store adapter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Build server (the live half launches it)
+        run: make && test -x build/aegisdb
+      - name: Install the adapter's dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ./clients/python
+          # The runtime as well as langgraph-checkpoint: the end-to-end test
+          # compiles a real graph, and that half would otherwise skip.
+          python -m pip install langgraph
+      # The suite skips itself when a dependency is missing, which is right
+      # locally and useless in CI — a green job that tested nothing. This makes
+      # a missing dependency a hard failure before the suite gets to decide.
+      # The suite skips on ANY ImportError, including the adapter's own — so a
+      # langgraph that moved `Result`/`SearchItem`/`Op` out of
+      # `langgraph.store.base`, which is exactly the drift the `<5` pin exists
+      # to catch, would skip every test and leave the job green.
+      - name: Assert the adapter and its dependencies import (no silent skip)
+        env:
+          PYTHONPATH: integrations/langgraph
+        run: python -c "import aegisdb, langgraph.graph, aegisdb_langgraph"
+      - name: Run adapter tests
+        run: make langgraph-test
+
   claude-code:
     name: Claude Code integration (python ${{ matrix.python }})
     runs-on: ubuntu-latest
