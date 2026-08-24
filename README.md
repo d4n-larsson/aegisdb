@@ -8,6 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Container: ghcr.io](https://img.shields.io/badge/ghcr.io-aegisdb-2496ED?logo=docker&logoColor=white)](https://github.com/d4n-larsson/aegisdb/pkgs/container/aegisdb)
 [![PyPI: aegisdb-mcp](https://img.shields.io/pypi/v/aegisdb-mcp?label=aegisdb-mcp&logo=pypi&logoColor=white)](https://pypi.org/project/aegisdb-mcp/)
+[![PyPI: aegisdb](https://img.shields.io/pypi/v/aegisdb?label=aegisdb&logo=python&logoColor=white)](https://pypi.org/project/aegisdb/)
 
 AI agents forget everything between sessions. **AegisDB** gives them durable,
 searchable long-term memory — episodic history, semantic facts with vector
@@ -59,7 +60,9 @@ running): `uvx --from aegisdb-mcp aegisdb-init` — see
   — no SaaS, no per-token billing, no data-sharing. Encrypt it at rest with one
   flag.
 - **One binary, no dependencies.** Written in C; the only vendored code is cJSON
-  and the crypto. No JVM, no Python runtime, no external database to babysit.
+  and the crypto. No JVM, no Python runtime, no external database to babysit —
+  and the [Python client](clients/python/) keeps the promise, with an empty
+  dependency list of its own.
 - **Built for teams.** Multi-tenant auth (per-namespace, scoped tokens), per-tenant
   quotas + rate limits, online backups, read replicas, and turnkey
   Prometheus/Grafana observability.
@@ -496,7 +499,24 @@ id or query), `search` (time/tags/embedding/`query`/`pattern`), `count`,
 `conflicts`, `stats`, `snapshot`, and token administration
 (`token_list`/`token_add`/`token_revoke`).
 
-### Python client example
+### Python client
+
+`pip install aegisdb` — a dependency-free client with one method per operation
+and an exception per wire error code ([`clients/python/`](clients/python/)):
+
+```python
+from aegisdb import AegisClient, NotFound
+
+with AegisClient(host="127.0.0.1", port=9470) as db:
+    db.insert("prefers dark mode", type="semantic", tags=["user"])
+    print(db.search(query="dark mode", top_k=5)["records"])
+    try:
+        db.get(999)
+    except NotFound as exc:
+        print(exc.code, exc.message)
+```
+
+### Raw socket example
 
 ```python
 import socket, json
@@ -524,6 +544,7 @@ src/
 ├── memory/             # MemoryRecord encode/decode, working buffer
 └── util/               # CRC32, SHA-256, config, health check, client, logging
 include/aegisdb/        # Public headers
+clients/python/         # `aegisdb` — the dependency-free client SDK
 tests/                  # unit/, integration/, contract/
 third_party/            # Vendored cJSON and Unity
 data/                   # Runtime data (gitignored)
@@ -638,3 +659,4 @@ that and the manual step-by-step.
   [`docs/inference-design.md`](docs/inference-design.md),
   [`docs/neuro-symbolic-design.md`](docs/neuro-symbolic-design.md)
 - Recall-quality eval harness: [`eval/README.md`](eval/README.md)
+- Python client SDK: [`clients/python/README.md`](clients/python/README.md)

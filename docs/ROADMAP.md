@@ -241,8 +241,28 @@ behind the provider seam.*
   `aegisdb client stats`. Prompted by 4.1: v0.6.0 added a whole new index to the
   recall path and told operators to watch its cost, without giving them an
   instrument to see it.
-- **Remaining:** a standalone, pip-installable client SDK and framework adapters
-  beyond MCP; distillation-lag metrics.
+- **Shipped (client SDK — `pip install aegisdb`):** `clients/python/`, a
+  dependency-free client for the wire protocol with one method per operation.
+  Errors arrive as exceptions, one class per wire code, under an
+  `AegisRequestError` that carries the code verbatim so a code the client
+  predates is still catchable — and `AegisUnavailable` sits deliberately
+  outside that tree, because a refusal means the server did not act while an
+  unanswered request says nothing either way. One connection, reused, with a
+  single retry when a *reused* one failed before any response arrived: the
+  server reaps connections idle past `--idle-timeout-sec`, and that is what a
+  pause between calls looks like. Published from the same tag as the server and
+  `aegisdb-mcp`, so all three carry one version.
+- **The method surface is taken from the dispatcher, not from prose**, and every
+  method is exercised against a real server by `make sdk-test`. That is not
+  belt-and-braces: the server ignores request fields it does not recognise, so a
+  misspelled field name would otherwise succeed and quietly do nothing. It paid
+  for itself immediately — `token_revoke` was coercing a string fingerprint to
+  an `int`, which raised on every real id, and `promote` carried a client-side
+  copy of a server default that had drifted from it.
+- **Remaining:** framework adapters beyond MCP (the SDK is the thing they were
+  waiting on); distillation-lag metrics — the summarizer runs as an
+  operator-scheduled job, so "how far behind is it?" needs a decision about who
+  computes the backlog before it needs code.
 
 ---
 

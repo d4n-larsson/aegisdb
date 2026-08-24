@@ -1,11 +1,20 @@
-name: Publish aegisdb-mcp to PyPI
+name: Publish to PyPI
 
-# Builds and publishes the Claude Code integration package (integrations/
-# claude-code) to PyPI on every `v*` tag, so teammates can run it with no clone
-# via `uvx aegisdb-mcp`. Uses PyPI Trusted Publishing (OIDC) — no API token.
+# Builds and publishes the two Python packages on every `v*` tag:
 #
-# One-time setup on PyPI: add a Trusted Publisher for project `aegisdb-mcp` with
-#   owner=d4n-larsson, repo=aegisdb, workflow=pypi.yml, environment=pypi.
+#   aegisdb-mcp  (integrations/claude-code) — the Claude Code integration, so
+#                teammates can run it with no clone via `uvx aegisdb-mcp`
+#   aegisdb      (clients/python)           — the client SDK, dependency-free
+#
+# Both take their version from the tag, so the server binary, the integration
+# and the client always carry the same one. Uses PyPI Trusted Publishing
+# (OIDC) — no API token.
+#
+# One-time setup on PyPI: add a Trusted Publisher for EACH project
+# (`aegisdb-mcp` and `aegisdb`) with owner=d4n-larsson, repo=aegisdb,
+# workflow=pypi.yml, environment=pypi. Until the `aegisdb` publisher exists,
+# that job fails and the other still publishes — the jobs are independent on
+# purpose, so one missing trusted-publisher entry cannot hold back a release.
 on:
   push:
     tags: ['v*']
@@ -44,3 +53,50 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: integrations/claude-code/dist
+
+  client:
+    name: aegisdb (client SDK)
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # OIDC token for Trusted Publishing
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Resolve version from tag (strip leading v)
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # The package sits in a subdirectory and setuptools-scm is pointed at the
+      # repo root, so PRETEND_VERSION is what keeps the artifact version tied to
+      # the tag rather than to whatever the clone depth makes scm infer.
+      - name: Build sdist + wheel
+        working-directory: clients/python
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      # The package promises no dependencies. Checked here as well as in CI,
+      # because this is the artifact people actually install.
+      - name: Assert the built wheel declares no runtime dependencies
+        working-directory: clients/python
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install dist/*.whl
+          python - <<'EOF'
+          import importlib.metadata as md
+          reqs = md.distribution("aegisdb").requires or []
+          runtime = [r for r in reqs if "extra ==" not in r]
+          assert not runtime, f"aegisdb gained a runtime dependency: {runtime}"
+          print("no runtime dependencies")
+          EOF
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: clients/python/dist

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aegisdb"
+# Derived from the git tag by setuptools-scm, exactly as aegisdb-mcp is, so the
+# server, the integration and this client all carry the same version from one
+# `git tag vX.Y.Z`. CI sets SETUPTOOLS_SCM_PRETEND_VERSION from the tag.
+dynamic = ["version"]
+description = "Python client for AegisDB — persistent memory for AI agents"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["aegisdb", "agent-memory", "vector-search", "llm", "memory"]
+# Deliberately empty, and worth keeping that way. The server is a single
+# dependency-free binary and its protocol is one JSON line over TCP; a client
+# that pulled in a dependency tree would be the heaviest thing in the
+# deployment. `requires-python` is one minor lower than aegisdb-mcp's for the
+# same reason — nothing here needs 3.10.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/d4n-larsson/aegisdb"
+Repository = "https://github.com/d4n-larsson/aegisdb"
+Issues = "https://github.com/d4n-larsson/aegisdb/issues"
+Documentation = "https://github.com/d4n-larsson/aegisdb/blob/main/docs/wire-protocol.md"
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools]
+packages = ["aegisdb"]
+
+[tool.setuptools_scm]
+# The package lives in a subdirectory of the repo, so point scm at the root.
+root = "../.."
