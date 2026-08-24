@@ -1652,6 +1652,111 @@ def test_a_long_multibyte_entity_name_stays_decodable(binary, port):
         check("part_of" in text, f"it is still a readable conclusion: {text[:60]!r}")
 
 
+def test_predicates_op(binary, port):
+    print("[predicates: the vocabulary is readable over the wire]")
+    d = tempfile.mkdtemp(prefix="aegis_predicates_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({
+            "part_of": {"object": "id", "transitive": True,
+                        "inverse_of": "contains"},
+            "contains": {"object": "id", "inverse_of": "part_of"},
+            "defaults_to": {"object": "string", "cardinality": "one"},
+            "deprecated_by": {"object": "id",
+                              "mutex_with": ["recommended_by"]},
+            "recommended_by": {"object": "id",
+                               "mutex_with": ["deprecated_by"]},
+        }, fh)
+
+    with Server(binary, port, phase=4,
+                extra_args=["--predicate-registry", reg]) as srv:
+        res = srv.req({"operation": "predicates"})
+        check(res.get("ok") is True, f"predicates answers ({res})")
+        check(res["total"] == 5, f"every declared predicate is listed ({res})")
+        check(res.get("enforced") is True, "and says the vocabulary is enforced")
+
+        by_name = {p["name"]: p for p in res["predicates"]}
+        check(list(by_name) == sorted(by_name),
+              f"ordered by name, so two servers diff cleanly ({list(by_name)})")
+
+        # Declared properties are reported, and only the declared ones.
+        p = by_name["part_of"]
+        check(p["object"] == "id" and p["transitive"] is True
+              and p["inverse_of"] == "contains",
+              f"part_of carries its declaration ({p})")
+        check("symmetric" not in p and "cardinality" not in p,
+              f"and not the ones it does not declare ({p})")
+        check(by_name["defaults_to"]["cardinality"] == "one",
+              "cardinality is reported")
+        check(by_name["deprecated_by"]["mutex_with"] == ["recommended_by"],
+              "so is mutex_with")
+
+        # THE number: declared but unused is dead vocabulary.
+        check(all(p["facts"] == 0 for p in res["predicates"]),
+              "nothing is in use yet")
+        a = srv.req({"operation": "insert", "type": "semantic",
+                     "data": "storage"})["record"]["id"]
+        b = srv.req({"operation": "insert", "type": "semantic",
+                     "data": "server"})["record"]["id"]
+        srv.req({"operation": "insert", "type": "semantic", "data": "s in s",
+                 "fact": {"s": a, "p": "part_of", "o": {"id": b}}})
+        again = {p["name"]: p for p in
+                 srv.req({"operation": "predicates"})["predicates"]}
+        check(again["part_of"]["facts"] == 1, "a used predicate counts")
+        check(again["contains"]["facts"] == 0,
+              "an unused one still reads zero — it is dead vocabulary")
+
+
+def test_predicates_without_a_registry(binary, port):
+    print("[predicates: 'no vocabulary' and 'any predicate' are different]")
+    # With no registry the server accepts ANY predicate. An empty list alone
+    # cannot say that, and a client that read it as "a vocabulary of none"
+    # would refuse to propose anything.
+    with Server(binary, port, phase=4) as srv:
+        res = srv.req({"operation": "predicates"})
+        check(res.get("ok") is True, "it answers rather than erroring")
+        check(res["predicates"] == [] and res["total"] == 0,
+              f"nothing is declared ({res})")
+        check(res.get("enforced") is False,
+              "and `enforced` says any predicate is accepted")
+        # Prove the claim: an undeclared predicate really is accepted here.
+        a = srv.req({"operation": "insert", "type": "semantic",
+                     "data": "x"})["record"]["id"]
+        got = srv.req({"operation": "insert", "type": "semantic", "data": "y",
+                       "fact": {"s": a, "p": "anything_at_all", "o": "z"}})
+        check(got.get("ok") is True,
+              f"an undeclared predicate is accepted with no registry ({got})")
+
+
+def test_predicates_counts_are_admin_only(binary, port):
+    print("[predicates: a namespaced caller sees the contract, not the counts]")
+    d = tempfile.mkdtemp(prefix="aegis_predicates_auth_")
+    reg = os.path.join(d, "predicates.json")
+    with open(reg, "w") as fh:
+        json.dump({"part_of": {"object": "id", "transitive": True}}, fh)
+
+    with Server(binary, port, phase=4,
+                token_lines=["admintok", "tok-a acme rw"],
+                extra_args=["--predicate-registry", reg]) as srv:
+        mine = srv.req({"operation": "predicates", "token": "tok-a"})
+        check(mine.get("ok") is True, "a namespaced token may read it")
+        check(mine["total"] == 1 and mine["predicates"][0]["name"] == "part_of",
+              f"and gets the declaration ({mine})")
+        # The fact indexes are server-wide, so a count spans every tenant.
+        # Absent rather than zero: "you may not see this" must not read as
+        # "nothing uses it".
+        check("facts" not in mine["predicates"][0],
+              f"but not the cross-tenant count ({mine['predicates'][0]})")
+
+        adm = srv.req({"operation": "predicates", "token": "admintok"})
+        check("facts" in adm["predicates"][0],
+              f"an admin token does get it ({adm['predicates'][0]})")
+
+        nobody = srv.req({"operation": "predicates"})
+        check(nobody.get("ok") is False,
+              "and auth still applies — this is not a public endpoint")
+
+
 def test_conflicts_op(binary, port):
     print("[conflicts: which pairs contradict, not just how many (ROADMAP 5.4)]")
     d = tempfile.mkdtemp(prefix="aegis_conflicts_op_")
@@ -4780,6 +4885,9 @@ def main():
     test_derived_records_name_what_they_are_about(binary, 19591)
     test_a_conclusion_survives_a_tombstoned_entity(binary, 19592)
     test_a_long_multibyte_entity_name_stays_decodable(binary, 19593)
+    test_predicates_op(binary, 19594)
+    test_predicates_without_a_registry(binary, 19595)
+    test_predicates_counts_are_admin_only(binary, 19596)
     test_conflicts_op(binary, 19586)
     test_conflicts_without_inference(binary, 19587)
     test_conflicts_scope_without_a_namespaced_token(binary, 19588)

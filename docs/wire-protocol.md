@@ -1038,6 +1038,66 @@ contradiction auditable rather than a silent deletion.
 
 ---
 
+### `predicates`
+
+The typed-fact vocabulary this server declares (ROADMAP 5.2) — what a `fact`
+may be written in, and therefore what `insert` will accept.
+
+`stats` reports how many predicates are declared and never which, so the only
+way to learn the vocabulary was to read the server's `--predicate-registry`
+file off disk. That works for a process sitting beside the server and for
+nothing else: a client on another machine has no such file, and neither a
+client library nor an agent could ask what it is allowed to assert.
+
+**Request**:
+
+```json
+{ "operation": "predicates" }
+```
+
+Takes no fields.
+
+**Response**:
+
+```json
+{
+  "ok": true,
+  "predicates": [
+    { "name": "contains", "object": "id", "inverse_of": "part_of" },
+    { "name": "defaults_to", "object": "string", "cardinality": "one" },
+    { "name": "part_of", "object": "id", "transitive": true,
+      "inverse_of": "contains", "facts": 11 }
+  ],
+  "total": 3,
+  "enforced": true
+}
+```
+
+Ordered by name, so two servers' vocabularies diff cleanly. Only the properties
+actually declared appear — a registry of ten would otherwise read as a wall of
+`false`, burying the two or three declarations that matter.
+
+**`enforced` distinguishes two states an empty list cannot.** With no
+`--predicate-registry` the server accepts **any** predicate, which is the
+opposite of a vocabulary of none. A client that could not tell them apart would
+either refuse to propose anything or propose anything at all.
+
+**`facts` is admin-only.** The per-predicate count — how many records actually
+use it, and so whether a declared predicate is live or dead vocabulary — is
+present only for an unrestricted caller (auth off, or an admin token). The fact
+indexes are server-wide, so that count spans every tenant; it is a thin but
+real signal about other tenants' activity. It is **absent** rather than zero for
+a namespaced caller, so "you may not see this" is not mistaken for "nothing
+uses it".
+
+The declarations themselves are readable with an ordinary token, because a
+vocabulary is server *configuration* rather than any tenant's data: it says
+what may be written, not what anyone wrote. (Deliberately not folded into
+`stats`, which is admin-only — that would hide it from exactly the namespaced
+clients that need it.)
+
+---
+
 ### `ping`
 
 Health check. Always exempt from authentication.

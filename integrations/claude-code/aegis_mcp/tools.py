@@ -325,6 +325,28 @@ class MemoryTools:
             return err
         return results.ok(memory=record_to_memory(resp.get("record", {})))
 
+    def predicates(self) -> dict:
+        """The typed-fact vocabulary the server declares (ROADMAP 5.2).
+
+        What makes `AEGIS_EXTRACT_REGISTRY` optional: the server is the thing
+        that enforces the vocabulary, so asking it removes the second copy of
+        the registry file this integration used to need — and the drift that
+        copy invited, which surfaced as the server refusing triples and looked
+        like a bad model rather than a misconfiguration.
+
+        `enforced` is not the same as a non-empty list: a server with no
+        registry accepts *any* predicate, which is the opposite of declaring
+        none. An older server has no such operation and answers
+        INVALID_REQUEST, which arrives as `{"ok": false}` — read as "no
+        vocabulary", the same degradation as every other capability check here.
+        """
+        resp, err = self._send({"operation": "predicates"})
+        if err:
+            return err
+        return results.ok(predicates=resp.get("predicates") or [],
+                          total=resp.get("total", 0),
+                          enforced=bool(resp.get("enforced")))
+
     def conflicts(self, limit: int | None = None) -> dict:
         """Contradictions the inference job flagged and refused to settle.
 

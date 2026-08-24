@@ -62,6 +62,62 @@ class TestTriplesE2E(unittest.TestCase):
                             FakeProvider(srv.dim))
         return cfg, tools
 
+    def test_the_vocabulary_can_come_from_the_server(self):
+        """No AEGIS_EXTRACT_REGISTRY: the server is asked instead.
+
+        This is the whole point of the `predicates` op — a client on another
+        machine has no registry file to point at, and a second copy of one is
+        exactly the drift the config docs warn about. Without a test that
+        leaves the path unset, the resolver could fail silently into its
+        fallback and every existing test would still pass, because they all
+        configure the file.
+        """
+        from aegis_mcp.extract import resolve_vocabulary
+
+        with AegisServer(extra_args=["--predicate-registry",
+                                     self.registry]) as srv:
+            cfg, tools = self._wired(srv, extract_registry="")
+            vocab = resolve_vocabulary(cfg, tools)
+            self.assertIsNotNone(vocab, "the server's vocabulary was read")
+            self.assertEqual({p.name for p in vocab}, set(REGISTRY))
+
+            # And it is usable end to end: triples validate against it.
+            res = store_triples(
+                tools,
+                "hnsw.c : part_of : the storage layer\n"
+                "hnsw.c : invented_predicate : whatever\n",
+                vocab, cfg, FakeExtractionProvider())
+            self.assertEqual(res.stored, 1, f"{res}")
+            self.assertEqual(res.rejected, 1, "the undeclared one is refused")
+
+    def test_no_registry_anywhere_means_no_vocabulary(self):
+        """A server with no registry accepts any predicate, and proposing
+        triples against nothing to check them by is the symbol soup 5.2 exists
+        to prevent — so that reads as "off", exactly as an unset file does."""
+        from aegis_mcp.extract import resolve_vocabulary
+
+        with AegisServer() as srv:  # no --predicate-registry
+            cfg, tools = self._wired(srv, extract_registry="")
+            self.assertIsNone(resolve_vocabulary(cfg, tools))
+
+    def test_a_configured_file_wins_over_the_server(self):
+        """An operator who set the path is relying on it. Quietly consulting a
+        different source would be the opposite of what configuring it asks."""
+        from aegis_mcp.extract import resolve_vocabulary
+
+        other = tempfile.mkstemp(suffix=".json")[1]
+        with open(other, "w") as fh:
+            json.dump({"only_this": {"object": "string"}}, fh)
+        try:
+            with AegisServer(extra_args=["--predicate-registry",
+                                         self.registry]) as srv:
+                cfg, tools = self._wired(srv, extract_registry=other)
+                vocab = resolve_vocabulary(cfg, tools)
+                self.assertEqual({p.name for p in vocab}, {"only_this"},
+                                 "the file was used, not the server")
+        finally:
+            os.unlink(other)
+
     def test_a_transcript_becomes_facts_the_server_accepts(self):
         with AegisServer(extra_args=["--predicate-registry", self.registry]) as srv:
             cfg, tools = self._wired(srv)

@@ -496,7 +496,7 @@ batch, optionally carrying a `fact`), `get`, `update` (semantic), `delete` (by
 id or query), `search` (time/tags/embedding/`query`/`pattern`), `count`,
 `consolidate`, `forget`, `export`, `purge`, `history` (+ point-in-time `get` via
 `as_of`), `promote`, `relate`, `traverse` (with `kinds`/`direction`),
-`conflicts`, `stats`, `snapshot`, and token administration
+`conflicts`, `predicates`, `stats`, `snapshot`, and token administration
 (`token_list`/`token_add`/`token_revoke`).
 
 ### Python client

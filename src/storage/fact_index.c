@@ -638,6 +638,14 @@ int fact_index_by_object(const FactIndex *f, FactKind okind, uint64_t object_id,
     return collect(tbl_find(&f->obj, okey, ostr), pred, out, out_n);
 }
 
+size_t fact_index_predicate_facts(const FactIndex *f, const char *predicate) {
+    if (!f || !predicate) {
+        return 0;
+    }
+    uint16_t pred = pred_lookup(f, predicate);
+    return pred == PRED_NONE ? 0 : f->pred_n[pred - 1];
+}
+
 int fact_index_by_predicate(const FactIndex *f, const char *predicate,
                             uint64_t **out, size_t *out_n) {
     *out = NULL;

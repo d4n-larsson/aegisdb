@@ -147,6 +147,56 @@ def load_vocabulary(path: str):
     return out
 
 
+def vocabulary_from_server(tools) -> list | None:
+    """The vocabulary the *server* declares, over the wire.
+
+    Returns a list of PredicateSpec, or None when the server enforces no
+    vocabulary at all — which is not the same as declaring none. With no
+    `--predicate-registry` a server accepts any predicate, and proposing
+    triples against nothing to check them by is the symbol soup 5.2 exists to
+    prevent, so that reads as "off" here exactly as an unset registry does.
+
+    This is what makes `AEGIS_EXTRACT_REGISTRY` optional. Pointing a second
+    copy of the file at the client was always a hazard — this module's own
+    config notes that a copy would drift and the drift would surface as the
+    server refusing triples, which looks like a bad model rather than a
+    misconfiguration. Asking the server removes the second copy instead of
+    warning about it, and is the only option at all for a client that is not
+    on the same machine as the server.
+
+    Never raises: an older server has no such operation and answers
+    INVALID_REQUEST, which reads as "no vocabulary" — the same degradation as
+    every other capability check here.
+    """
+    try:
+        res = tools.predicates()
+    except Exception:
+        return None
+    if not res.get("ok") or not res.get("enforced"):
+        return None
+    out = []
+    for p in res.get("predicates") or []:
+        name, kind = p.get("name"), p.get("object")
+        if name and kind in ("id", "string"):
+            out.append(PredicateSpec(name=name, object=kind))
+    return out or None
+
+
+def resolve_vocabulary(config, tools):
+    """The vocabulary to validate against: the configured file, or the server.
+
+    The file wins when one is configured, because an operator who set it is
+    relying on it and quietly consulting a different source would be the
+    opposite of what configuring it asks for. A bad path still raises
+    VocabularyError rather than falling back — silently degrading to the
+    server's copy would hide the typo the error exists to surface.
+    """
+    path = getattr(config, "extract_registry", "")
+    if path:
+        return load_vocabulary(path)
+    return vocabulary_from_server(tools)
+
+
 def validate_triples(candidates: list, vocab) -> TripleResult:
     """Keep the candidates the registry declares; count and name the rest.
 

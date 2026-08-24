@@ -361,7 +361,7 @@ explicit overrides.
 | `AEGIS_EXTRACT_MAX_FACTS` | `12` | cap facts stored per session |
 | `AEGIS_EXTRACT_MAX_INPUT_CHARS` | `24000` | cap transcript chars sent to the model (keeps the most recent) |
 | `AEGIS_EXTRACT_TRIPLES` | `false` | propose typed `{s, p, o}` triples alongside prose facts (ROADMAP 5.4). Works with every extraction backend: `fake` reads explicit `SUBJECT : predicate : OBJECT` lines, while `claude-code`/`anthropic`/`openai` are prompted with the registry as a closed list and asked for JSON. Needs `AEGIS_EXTRACT_REGISTRY`: the vocabulary is a contract, so proposing triples with nothing to check them against is not a smaller version of the feature. A predicate the registry does not declare is **dropped and counted, never coerced** onto the nearest one — the prose is still captured, so a rejection degrades to today's behaviour rather than losing anything |
-| `AEGIS_EXTRACT_REGISTRY` | — | path to the **same** `--predicate-registry` file the server was started with. A second copy would drift, and extraction would then propose triples the server refuses — which looks like a bad model rather than a misconfiguration. A path that is set but unreadable, or a malformed entry, is an **error**, not a fallback to accepting everything: the server refuses to *start* on a bad registry for the same reason, and silently degrading would be the opposite of what configuring a vocabulary asks for |
+| `AEGIS_EXTRACT_REGISTRY` | *(ask the server)* | **Optional.** Leave it unset and the vocabulary is read from the server over the wire (the `predicates` op) — the only option when the client is not on the same machine, and it removes the second copy of the registry file this used to need. A copy drifts, and the drift surfaces as the server refusing triples, which looks like a bad model rather than a misconfiguration. Set it to pin a specific file: a configured path **wins** over the server, because an operator who set it is relying on it. A path that is set but unreadable, or a malformed entry, is an **error** — not a fallback to the server, nor to accepting everything: the server refuses to *start* on a bad registry for the same reason, and silently degrading would be the opposite of what configuring a vocabulary asks for |
 | `AEGIS_EXTRACT_MAX_TRIPLES` | `16` | cap candidates proposed per transcript |
 | `AEGIS_GROUNDING_MIN_SCORE` | `0.85` | cosine floor for reusing an existing entity record rather than minting a new one (ROADMAP 5.4). **High on purpose.** Conflating two entities writes facts about the wrong thing and inference then compounds them undetectably; splitting one entity in two only loses inferences, and `consolidate` can merge them later. One error is recoverable and the other is not, so a near-miss mints. Deliberately *not* shared with `AEGIS_EXTRACT_SUPERSEDE_MIN_SCORE`: consolidation's errors are symmetric, so it can sit near the middle where this cannot |
 | `AEGIS_GROUNDING_TOP_K` | `5` | entity candidates considered per mention |
@@ -514,6 +514,38 @@ make integration     # launches ../../build/aegisdb automatically
 Integration/contract tests launch the `aegisdb` binary from `../../build` and
 skip automatically if it is not built. They use a deterministic `fake` embedding
 provider, so no API key or network is needed.
+
+
+## What Claude sees about typed facts
+
+When the server declares a predicate vocabulary — its own
+`--predicate-registry`, or `AEGIS_EXTRACT_REGISTRY` here — the `memory_search`
+tool description **names the predicates**:
+
+> This store keeps typed facts, and a question that maps onto its vocabulary is
+> answered from the fact graph rather than by text similarity. The declared
+> predicates are: defaults_to, part_of. Phrasing a question in those terms —
+> "what does X default to?", "what is part of Y?" — is what lets it be answered
+> structurally; anything else still works and falls back to ordinary search.
+
+The point is not that the model calls a different tool. It is that a question
+can be answered from the fact graph only when it maps onto a declared
+predicate, and the model is what chooses the phrasing — so without this it is
+guessing at a contract the server enforces. The same gap the `predicates` op
+closed for programs, closed for the model.
+
+Three things worth knowing:
+
+- **A server without a vocabulary pays nothing.** The description is then
+  byte-for-byte what it has always been. This is not a feature to opt out of;
+  it appears only when there is something to say.
+- **It is fixed at startup.** MCP clients read the tool list once, when they
+  connect, so changing the registry needs this server restarted before the
+  model sees the change.
+- **Long registries are summarised, not dumped.** At most 24 predicates are
+  named and the rest counted. A tool description is prompt text on *every*
+  request, and a registry of hundreds would quietly become the largest thing in
+  the context.
 
 ## Layout
 

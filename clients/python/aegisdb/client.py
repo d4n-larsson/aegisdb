@@ -193,6 +193,28 @@ class AegisClient:
         except Exception:
             return False
 
+    def predicates(self) -> dict:
+        """The typed-fact vocabulary this server declares (ROADMAP 5.2).
+
+        What a `fact` may be written in, and therefore what `insert` will
+        accept. Readable with an ordinary token, because a vocabulary is server
+        *configuration* rather than any tenant's data.
+
+        `enforced` distinguishes two states an empty list cannot: with no
+        `--predicate-registry` the server accepts **any** predicate, which is
+        the opposite of a vocabulary of none. Check it before deciding that
+        proposing a fact is pointless.
+
+        Each entry carries only the properties actually declared, plus a
+        per-predicate `facts` count for an unrestricted caller — absent for a
+        namespaced one, since the fact indexes are server-wide and that count
+        would span every tenant.
+        """
+        resp = self.request({"operation": "predicates"})
+        return {"ok": True, "predicates": resp.get("predicates") or [],
+                "total": resp.get("total", 0),
+                "enforced": bool(resp.get("enforced"))}
+
     def stats(self) -> dict:
         """Operational snapshot: counts, index bytes, metrics. Admin-only when
         auth is enabled."""

@@ -235,6 +235,30 @@ class TestLiveSurface(unittest.TestCase):
             self.assertEqual([r["id"] for r in back], [b, a], back)
             self.assertEqual(back[1]["traversal"]["via_direction"], "in")
 
+    def test_predicates_reports_the_vocabulary(self):
+        reg = _registry()
+        try:
+            with Server(extra=["--predicate-registry", reg]) as srv, \
+                    AegisClient(port=srv.port) as db:
+                got = db.predicates()
+                self.assertTrue(got["enforced"], got)
+                names = {p["name"] for p in got["predicates"]}
+                self.assertEqual(names, set(REGISTRY), got)
+                by = {p["name"]: p for p in got["predicates"]}
+                self.assertTrue(by["part_of"]["transitive"])
+                self.assertEqual(by["defaults_to"]["cardinality"], "one")
+        finally:
+            os.unlink(reg)
+
+    def test_predicates_says_when_nothing_is_enforced(self):
+        """An empty list means "no vocabulary declared" — and with no registry
+        the server accepts ANY predicate, which is the opposite of a vocabulary
+        of none. `enforced` is what tells the two apart."""
+        with Server() as srv, AegisClient(port=srv.port) as db:
+            got = db.predicates()
+            self.assertEqual(got["predicates"], [])
+            self.assertFalse(got["enforced"], got)
+
     def test_typed_facts_pattern_and_conflicts(self):
         reg = _registry()
         try:

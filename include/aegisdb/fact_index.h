@@ -86,6 +86,11 @@ int fact_index_by_object(const FactIndex *f, FactKind okind, uint64_t object_id,
 int fact_index_by_predicate(const FactIndex *f, const char *predicate,
                             uint64_t **out, size_t *out_n);
 
+/* How many records use this predicate. The postings length, so this costs a
+ * lookup rather than the copy `fact_index_by_predicate` makes — which matters
+ * when the caller wants counts for the whole vocabulary and none of the ids. */
+size_t fact_index_predicate_facts(const FactIndex *f, const char *predicate);
+
 /* Every record carrying a fact, whatever it says (ROADMAP 5.3). This is what
  * lets the inference job read the fact set without a corpus scan: a record
  * holds exactly one fact, so the per-predicate postings partition the set and
