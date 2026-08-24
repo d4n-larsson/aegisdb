@@ -92,16 +92,6 @@ tags but cannot enumerate them. It is **clamped to 1000**, because the server
 clamps `top_k` there and says nothing — a larger value would read as "scans
 more" while changing nothing.
 
-**Offset paging is approximate when items share a creation millisecond.** An
-unranked AegisDB search is ordered by `created` alone, with a non-stable sort,
-so records written in the same millisecond — a graph writing several items in
-one superstep — have no defined order between them. A page boundary falling
-inside such a group can skip one item and repeat another: measured at 11
-distinct items from 12, paged two at a time. This is the server's ordering
-rather than the adapter's paging, and it applies to any client that pages
-AegisDB. A single page over the whole set is exact; so is a filtered search,
-where every page issues the identical query and slices it here.
-
 **Past that bound the answer is short and cannot say so.** `search` and
 `list_namespaces` return plain lists, with nowhere to put a flag. A store
 holding more than `search_scan_limit` items can therefore be missing matches

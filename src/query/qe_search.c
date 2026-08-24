@@ -250,7 +250,21 @@ static int cmp_created_asc(const void *a, const void *b) {
     if (x > y) {
         return 1;
     }
-    return 0;
+    /* Equal timestamps break on ascending id, for exactly the reason
+     * cmp_score_desc does — and this comparator was missed when that one got
+     * it. `created` is milliseconds, so a loop of inserts routinely puts a
+     * dozen records in three or four distinct values, and ties are the common
+     * case rather than the edge one.
+     *
+     * Without a total order, paging is not merely arbitrary but *inconsistent
+     * between pages*: select_top is asked for the `offset + top_k` best, so
+     * every page runs a different selection over the same tied candidates and
+     * resolves the ties differently. Measured before this line existed: twelve
+     * records paged two at a time returned eleven distinct, one of them twice,
+     * in eight of twelve trials. */
+    uint64_t i = ((const Cand *)a)->rec.id;
+    uint64_t j = ((const Cand *)b)->rec.id;
+    return (i > j) - (i < j);
 }
 
 /* Bounded selection over candidate *indices*: a size-k heap whose root is the

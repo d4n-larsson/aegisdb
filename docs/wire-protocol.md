@@ -618,7 +618,7 @@ when **both** `start_time` and `end_time` are present.
 | `type` | string | Filter by memory type |
 | `agent_id` | string | Namespace filter |
 | `top_k` | integer | Max results; default 10 |
-| `offset` | integer | Skip this many top-ranked results (pagination); default 0 |
+| `offset` | integer | Skip this many top-ranked results (pagination); default 0. **Pages compose**: the order is total, so walking `offset` over a stable corpus yields each record exactly once and in the same sequence a single large `top_k` returns |
 | `min_score` | number | Semantic only: drop matches below this cosine similarity ([-1, 1]) |
 | `half_life_ms` | integer | Semantic only: recency half-life — multiply each score by `0.5^(age/half_life)`, age measured from `updated`; 0/absent = no decay |
 | `max_importance` | number | Keep only records with `importance` ≤ this value (candidate selection) |
@@ -664,6 +664,15 @@ Two behaviours differ in hybrid mode, both deliberate:
   fused query therefore ranks on the fusion alone and reports `weight` and
   `recency_factor` as `1.0`. Use a single-source query when that shaping is what
   you want.
+
+**Result order is total.** A ranked search orders by score, an unranked one by
+`created`, and both break ties on ascending record id. That last part is what
+makes `offset` usable: without it, paging asks for the `offset + top_k` best
+each time, so every page runs a different selection over the same tied
+candidates and resolves the ties differently — losing some records and
+repeating others. `created` is milliseconds, so ties are the common case rather
+than an edge one, and a loop of inserts routinely puts a dozen records into
+three or four distinct values.
 
 **Pattern filter (`pattern`)**: matches on the machine-readable `fact` a record
 carries (see `insert`), rather than on its words. Bind any non-empty subset of
