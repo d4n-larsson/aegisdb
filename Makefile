@@ -59,7 +59,7 @@ DEPS := $(CORE_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(CJSON_OBJ:.o=.d) \
 
 PYTHON ?= python3
 
-.PHONY: all clean test integration check eval eval-multihop eval-extraction eval-tasks inspector inspector-test first-contact bench wire-bench fuzz fuzz-regress fuzz-corpus
+.PHONY: all clean test integration check eval eval-multihop eval-extraction eval-tasks sdk-test inspector inspector-test first-contact bench wire-bench fuzz fuzz-regress fuzz-corpus
 all: $(BIN)
 
 $(BIN): $(CORE_OBJ) $(CJSON_OBJ) $(MAIN_OBJ)
@@ -126,6 +126,13 @@ eval-extraction: $(BIN)
 	    --dataset eval/datasets/extraction.json \
 	    --gate-in-vocabulary 0.8 --gate-gold-recall 0.9 \
 	    --max-conflation 0 --max-fragmentation 2 $(EVAL_ARGS)
+
+# Python client SDK tests (ROADMAP 3.3). The protocol suite needs nothing; the
+# live suite exercises every method against $(BIN) and skips without it — which
+# is the point, since the server ignores request fields it does not recognise,
+# so a misspelled field name is invisible to anything but a real round trip.
+sdk-test: $(BIN)
+	cd clients/python && $(PYTHON) -m unittest discover -s tests -p 'test_*.py'
 
 # A/B task benchmark: does memory lift task success? Teaches a fact, then answers
 # a fresh question with memory ON vs OFF and reports the lift (ROADMAP 1.1+).
