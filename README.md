@@ -16,6 +16,13 @@ protocol, with a first-class [Claude Code](#use-as-claude-code-memory)
 integration. It's a single dependency-free binary you run yourself: your data,
 your box, no third party in the loop.
 
+A memory can also carry a machine-readable **fact** (`{s, p, o}`) beside its
+prose. Declare the vocabulary and the server draws the conclusions those facts
+entail, links each one to the premises it rests on, and withdraws it when a
+premise goes away — so it can answer questions whose answer lives in *no single
+record*, and show its working. All opt-in, off by default, and never on the
+recall path.
+
 ![The bundled Grafana dashboard for AegisDB — live records, request/op rates, index memory, and more](docs/img/dashboard.png)
 
 ## Quickstart
@@ -130,8 +137,34 @@ tells you whether recall quality is holding.
 - **Semantic scale** — exact cosine while small; past `--ann-threshold` an HNSW
   graph for sublinear approximate top-K, built off the write path and sharded so
   the build parallelizes (`--ann-shard-target`), optionally int8-quantized
-- **Relationships** — directed edges between records, graph traversal, and
-  agent-namespace isolation
+- **Relationships** — directed, *typed* edges between records and a graph walk
+  that follows only the kinds you name, forwards or backwards (`traverse` with
+  `kinds` / `direction`), so "what supersedes this?" and "what depends on this?"
+  are one call each rather than a scan. Every hit reports the hop that reached
+  it, so a walk reads as a path. Agent-namespace isolation throughout
+- **Typed facts** — `insert` takes an optional `fact: {s, p, o}` alongside the
+  prose, and `search`/`count` take a `pattern` (`{"s": 42, "p": "prefers",
+  "o": "*"}`) answered from a purpose-built index. `--predicate-registry`
+  declares the vocabulary and a fact naming an undeclared predicate is refused
+  at insert. A record with no fact encodes exactly as before, on disk and on
+  the wire
+- **Deterministic inference** — `--inference` materializes the transitive,
+  symmetric and inverse-of closures the registry declares, on a background tick
+  and per namespace, never on the write path. Every conclusion carries a
+  `derivation` (rule, depth, premise ids) that `explain` returns, written
+  server-side so a client cannot manufacture one — and it is withdrawn once
+  *every* justification has lost a premise. Two live values for a single-valued
+  predicate raise a `conflicts_with` edge: reported, never silently resolved.
+  Graded by `make eval-multihop`, where the symbolic path answers **100%** at
+  recall@5 on questions semantic, keyword and fused retrieval all score 0% on
+- **Prose in, symbols out (Claude Code)** — capture can distil a transcript into
+  triples prompted against the registry as a controlled vocabulary, grounding
+  each mention to an existing entity by cosine + BM25 before minting a new one;
+  a triple that doesn't fit is dropped and counted, never bent onto the nearest
+  predicate. A question can become a `pattern`, and a derivation can be read
+  back in English — the model reads the proof, it never produces it. Measured by
+  `make eval-extraction` (in-vocabulary rate, with conflation and fragmentation
+  counted apart)
 - **Memory that curates itself** — `consolidate` collapses near-duplicate
   semantic facts (recording a `supersedes` provenance link, not silent loss);
   `forget` ages out low-value records so a long-running corpus and its RAM
@@ -151,7 +184,9 @@ tells you whether recall quality is holding.
   each hit ranked, and edit or delete them (`docker compose --profile inspector up`)
 - **Measurable recall** — `make eval` scores retrieval quality (recall@k / MRR)
   against a labelled corpus, with modes for the dedup and decay policies, so
-  memory-quality changes are gated on numbers, not vibes
+  memory-quality changes are gated on numbers, not vibes; `make eval-multihop`
+  and `make eval-extraction` do the same for the symbolic path and for
+  prose→triple extraction
 - **Smarter capture (Claude Code)** — the MCP integration can distil sessions
   into durable facts with an LLM (`extract_mode`), deduping and superseding
   contradictions on write — behind a provider seam (`claude-code`/`anthropic`/`openai`)
@@ -324,6 +359,21 @@ token: 9f3c…              # give to the client (AEGIS_TOKEN); not recoverable
 | `--replicate-from <h:p>` | — | Follow this primary's replication port as a read-only replica (implies `--read-only`) |
 | `--read-only` | off | Refuse client writes (`READ_ONLY`) |
 | `--working-capacity <n>` | `256` | Working-memory ring buffer size |
+| `--query-scan-cap <n>` | `100000` | Records a broad/filterless `search`/`count` will load, bounding the cost of an unselective query |
+| `--max-connections <n>` | `0` | Hard cap on concurrent client connections (`0` = unlimited) |
+| `--idle-timeout-sec <n>` | `60` | Reap a connection making no byte progress for this long (`0` disables) |
+| `--no-lexical-index` | off (index on) | Disable the BM25 keyword index; a `query` then returns `NOT_READY` |
+| `--no-edge-index` | off (index on) | Disable the reverse edge index; a backward `traverse` then returns `NOT_READY` |
+| `--no-fact-index` | off (indexes on) | Disable the typed-fact indexes; a `pattern` then returns `NOT_READY` |
+| `--no-usage-feedback` | off (tracking on) | Stop tracking recall counts, so `forget` scores on write-time importance alone |
+| `--predicate-registry <path>` | — | Declare the typed-fact vocabulary (cardinality, symmetry, transitivity, `inverse_of`, `mutex_with`). A `fact` naming an undeclared predicate is refused; a malformed registry refuses to start |
+| `--inference` | off | Materialize the declared closures on a background tick, per namespace, and flag contradictions. Off by default because it grows the log rather than RAM |
+| `--inference-interval-sec <n>` | `30` | Cadence of the inference pass |
+| `--inference-max-depth <n>` | `4` | Longest derivation chain a conclusion may rest on |
+| `--inference-max-derived <n>` | `1000` | Conclusions written per pass (shared across tenants, visited round-robin) |
+| `--inference-max-candidates <n>` | `1000000` | Conclusions *considered* per pass |
+| `--inference-max-subsume <n>` | `256` | Descendants a `subsume` expansion may walk before it reports truncation |
+| `--inference-confidence-floor <f>` | `0.1` | Floor for confidence propagated as a product along a derivation chain |
 | `--restore <dir>` | — | One-shot: install the snapshot at `<dir>` into an empty `--data-dir`, then exit |
 | `--log-level <level>` | `info` | `error`, `warn`, `info`, or `debug` (also `$AEGISDB_LOG_LEVEL`) |
 | `--auth-token <token>` | — | Accept this global **admin** token (repeatable) |
@@ -426,13 +476,24 @@ echo '{"operation":"search","start_time":0,"end_time":9999999999999,"top_k":10}'
 
 # Tag search
 echo '{"operation":"search","tags":["user"],"match":"all","top_k":10}' | nc -q1 localhost 9470
+
+# Keyword search — finds the exact spelling embeddings average away
+echo '{"operation":"search","query":"--tenant-max-records","top_k":5}' | nc -q1 localhost 9470
+
+# A memory that also asserts a typed fact. `s` and `o` are the record ids of the
+# two things being related; needs --predicate-registry declaring `part_of`
+echo '{"operation":"insert","type":"semantic","data":"hnsw.c is part of the storage layer","fact":{"s":1,"p":"part_of","o":{"id":2}}}' | nc -q1 localhost 9470
+
+# ...and finding it by the fact rather than the words
+echo '{"operation":"search","pattern":{"s":1,"p":"part_of"},"explain":true}' | nc -q1 localhost 9470
 ```
 
 Supported operations: `ping`, `insert` (episodic/semantic/working, single or
-batch), `get`, `update` (semantic), `delete` (by id or query), `search`
-(time/tags/embedding), `count`, `consolidate`, `forget`, `export`, `purge`,
-`history` (+ point-in-time `get` via `as_of`), `promote`, `relate`, `traverse`,
-`stats`, `snapshot`, and token administration
+batch, optionally carrying a `fact`), `get`, `update` (semantic), `delete` (by
+id or query), `search` (time/tags/embedding/`query`/`pattern`), `count`,
+`consolidate`, `forget`, `export`, `purge`, `history` (+ point-in-time `get` via
+`as_of`), `promote`, `relate`, `traverse` (with `kinds`/`direction`),
+`conflicts`, `stats`, `snapshot`, and token administration
 (`token_list`/`token_add`/`token_revoke`).
 
 ### Python client example
@@ -458,8 +519,8 @@ src/
 ├── server/             # TCP NDJSON server, sharded poll() event loops
 ├── protocol/           # JSON request parsing / response building
 ├── query/              # Operation router / query engine
-├── storage/            # Append-only log, hash/time/tag/semantic indexes,
-│                       #   compaction, recovery
+├── storage/            # Append-only log, hash/time/tag/semantic/lexical/
+│                       #   edge/fact/usage indexes, compaction, recovery
 ├── memory/             # MemoryRecord encode/decode, working buffer
 └── util/               # CRC32, SHA-256, config, health check, client, logging
 include/aegisdb/        # Public headers
@@ -570,3 +631,10 @@ that and the manual step-by-step.
 - Quickstart (solo / local): [`docs/quickstart.md`](docs/quickstart.md)
 - Architecture: [`docs/architecture.md`](docs/architecture.md)
 - Read-replica design & promotion runbook: [`docs/read-replica-design.md`](docs/read-replica-design.md)
+- Roadmap (where the leverage is, and what shipped): [`docs/ROADMAP.md`](docs/ROADMAP.md)
+- The symbolic layer — typed facts, inference, and the model seam:
+  [`docs/symbolic-layer-design.md`](docs/symbolic-layer-design.md),
+  [`docs/typed-facts-design.md`](docs/typed-facts-design.md),
+  [`docs/inference-design.md`](docs/inference-design.md),
+  [`docs/neuro-symbolic-design.md`](docs/neuro-symbolic-design.md)
+- Recall-quality eval harness: [`eval/README.md`](eval/README.md)
