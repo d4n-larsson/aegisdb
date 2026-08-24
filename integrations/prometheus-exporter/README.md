@@ -76,6 +76,11 @@ file.
 | `AEGIS_EXPORTER_PORT` | `9471` | Port `/metrics` is served on |
 | `AEGIS_CONNECT_TIMEOUT_MS` | `500` | Connect timeout per scrape |
 | `AEGIS_READ_TIMEOUT_MS` | `2000` | Read timeout per scrape |
+| `AEGIS_EXPORTER_DISTILLATION` | *(off)* | `1` to export the distillation backlog. **Off by default because it costs a scan**, not a counter read — see below |
+| `AEGIS_EXPORTER_DISTILLATION_INTERVAL_SEC` | `60` | Minimum seconds between backlog recomputations, independent of the scrape interval |
+| `AEGIS_SUMMARY_MIN_AGE_MS` | `604800000` | Minimum record age the backlog counts as eligible — the same variable `aegisdb-summarize` reads |
+| `AEGIS_SUMMARY_MAX_IMPORTANCE` | `0.6` | Importance ceiling the backlog counts as eligible — likewise |
+| `AEGIS_SUMMARY_NAMESPACE` | *(all)* | The namespace the backlog is computed for — likewise. Empty spans every namespace, which is right on a single-tenant server and misleading on a shared one |
 
 ### Auth note
 
@@ -104,6 +109,12 @@ plus an `aegisdb_scrape_error{error="…"}` sample, so you alert on
 | `aegisdb_dispatch_seconds_total` | counter | cumulative in-dispatch time |
 | `aegisdb_requests_by_op_total{op}` | counter | per operation |
 | `aegisdb_recall_latency_seconds` | histogram | distribution of `search` (recall) latency; `_bucket{le}` / `_sum` / `_count`. Absent until the server has served a search |
+| `aegisdb_distillation_backlog` | gauge | records eligible for distillation but not yet summarized (opt-in) |
+| `aegisdb_distillation_backlog_capped` | gauge | `1` when that count hit the server's `--query-scan-cap` and is a **floor**, not a total |
+| `aegisdb_distillation_oldest_age_seconds` | gauge | how long the eldest eligible record has waited; `0` when the backlog is empty |
+| `aegisdb_distillation_min_age_seconds` | gauge | the age threshold the backlog was computed with |
+| `aegisdb_distillation_max_importance` | gauge | the importance ceiling it was computed with |
+| `aegisdb_distillation_scope` | gauge | always `1`, labelled with the namespace the backlog covers (empty = all) |
 | `aegisdb_memories_merged_total` | counter | records merged away by `consolidate` (dedup) |
 | `aegisdb_memories_forgotten_total` | counter | records aged out by `forget` (decay) |
 | `aegisdb_memories_purged_total` | counter | records erased by `purge` (right-to-be-forgotten) |
@@ -123,6 +134,69 @@ histogram_quantile(0.99, sum(rate(aegisdb_recall_latency_seconds_bucket[5m])) by
 rate(aegisdb_recall_latency_seconds_sum[5m]) / rate(aegisdb_recall_latency_seconds_count[5m])
 aegisdb_replication_lag_bytes > 1e7                        # replica falling behind
 ```
+
+
+## Distillation lag (opt-in)
+
+`aegisdb-summarize` is an operator-scheduled job, so the question an operator
+actually has is *is it keeping up?* Two numbers answer it, and either alone
+misleads: **backlog** is how much work is waiting, **oldest** is how long the
+eldest piece has waited — which is what separates a steady trickle from a job
+that stopped running a month ago.
+
+```bash
+AEGIS_EXPORTER_DISTILLATION=1 \
+AEGIS_SUMMARY_MIN_AGE_MS=604800000 \
+AEGIS_SUMMARY_MAX_IMPORTANCE=0.6 \
+  python3 aegis_exporter.py
+```
+
+**Off by default, because it is not free.** Every other metric here is a read
+of counters the server already holds; the backlog is a filtered scan. Measured
+on a 50,000-record corpus:
+
+| query | cost |
+|---|---|
+| `ping` | 0.1 ms |
+| `stats` (every other metric on this page) | 3.4 ms |
+| backlog `count` | 44.5 ms |
+| oldest-eligible `search` | 44.4 ms |
+
+So enabling it makes a scrape roughly 26x more expensive, and the cost grows
+with the corpus. That is why it is opt-in and why the result is cached for
+`AEGIS_EXPORTER_DISTILLATION_INTERVAL_SEC` (default 60) regardless of how often
+Prometheus scrapes — a 5-second scrape interval must not turn a scan into a
+busy loop.
+
+**The thresholds are duplicated, deliberately and visibly.** The server does
+not know the distiller's eligibility rules, so the backlog cannot be computed
+without them. Rather than hide that, the exporter reads the *same* environment
+variables the job reads and exports both as gauges
+(`aegisdb_distillation_min_age_seconds`, `aegisdb_distillation_max_importance`),
+so a dashboard shows what the backlog was computed with and a mismatch with the
+job's own config is something you can see rather than a number that quietly
+lies.
+
+**Age is `created`, not `updated`.** The server filters and orders the backlog
+by `created`, so taking the age from `updated` would describe a different
+record than the one selected — a hundred-day-old note touched an hour ago would
+report an hour, and the staleness alert would never fire.
+
+**Measuring disturbs what it measures, a little.** The oldest-eligible query
+passes `track_usage: false`, so it does not bump the recall counters `forget`
+weighs — without that the exporter would protect the very records it reports as
+overdue. What it *cannot* avoid is being a `search`: it lands in
+`aegisdb_requests_by_op_total{op="search"}` and in
+`aegisdb_recall_latency_seconds`, where a ~44 ms scan is a slow outlier against
+real recall traffic. At the default interval that is one extra search a minute;
+if your recall-latency tail looks worse after enabling this, that is why.
+
+**Two absences that mean opposite things.** When the feature is off the backlog
+series are absent entirely, not zero — a gauge reading `0` for "we did not
+look" would make the healthy state and the unmeasured state identical. And when
+the count hits `--query-scan-cap`, `aegisdb_distillation_backlog_capped` goes
+to `1`: the backlog is then a floor, and an alert built on it is wrong by an
+unknown amount.
 
 ## Tests
 

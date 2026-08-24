@@ -23,6 +23,7 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -41,15 +42,43 @@ class Config:
         self.exporter_port = int(env.get("AEGIS_EXPORTER_PORT", "9471"))
         self.connect_timeout = int(env.get("AEGIS_CONNECT_TIMEOUT_MS", "500")) / 1000.0
         self.read_timeout = int(env.get("AEGIS_READ_TIMEOUT_MS", "2000")) / 1000.0
+        # Distillation lag (ROADMAP 3.3). Off by default, and deliberately so:
+        # unlike `stats`, which is a cheap read of counters the server already
+        # holds, the backlog is a filtered scan. Measured on a 50k-record
+        # corpus: stats 3.4 ms, the two backlog queries 44 ms each — a 26x
+        # scrape, growing with the corpus. An operator who does not run the
+        # distiller should not pay that every 15 seconds.
+        self.distillation = env.get("AEGIS_EXPORTER_DISTILLATION",
+                                    "").lower() in ("1", "true", "yes", "on")
+        # Recomputed at most this often regardless of scrape interval, so a
+        # tight Prometheus interval cannot turn a scan into a busy loop.
+        self.distillation_interval = float(
+            env.get("AEGIS_EXPORTER_DISTILLATION_INTERVAL_SEC", "60"))
+        # The distiller's own eligibility thresholds, read from the *same*
+        # environment variables `aegisdb-summarize` reads. They are duplicated
+        # here — the server does not know them, so the backlog cannot be
+        # computed without them — and that duplication is made visible rather
+        # than hidden: both are exported as gauges, so a dashboard shows what
+        # the backlog was computed with and a mismatch with the job's config is
+        # something an operator can see instead of a number that quietly lies.
+        self.summary_min_age_ms = int(
+            env.get("AEGIS_SUMMARY_MIN_AGE_MS", "604800000"))
+        self.summary_max_importance = float(
+            env.get("AEGIS_SUMMARY_MAX_IMPORTANCE", "0.6"))
+        # The namespace the distiller runs against — the same variable the
+        # summarize sidecar reads. Empty means "every namespace", which is
+        # right for a single-tenant server and wrong for a shared one, so it is
+        # exported as a label rather than assumed.
+        self.summary_namespace = env.get("AEGIS_SUMMARY_NAMESPACE", "")
 
 
 class ScrapeError(Exception):
     """The server could not be scraped (unreachable, timeout, auth, malformed)."""
 
 
-def fetch_stats(cfg: Config) -> dict:
-    """One ``stats`` round trip. Raises ScrapeError on any failure."""
-    payload = {"operation": "stats"}
+def _request(cfg: Config, payload: dict) -> dict:
+    """One round trip. Raises ScrapeError on any failure."""
+    payload = dict(payload)
     if cfg.auth_token:
         payload["token"] = cfg.auth_token
     line = (json.dumps(payload) + "\n").encode("utf-8")
@@ -74,8 +103,67 @@ def fetch_stats(cfg: Config) -> dict:
         raise ScrapeError(f"malformed response: {exc}") from exc
     if not resp.get("ok"):
         err = resp.get("error") or {}
-        raise ScrapeError(err.get("code") or "stats request rejected")
+        raise ScrapeError(err.get("code") or "request rejected")
     return resp
+
+
+def fetch_stats(cfg: Config) -> dict:
+    """One ``stats`` round trip."""
+    return _request(cfg, {"operation": "stats"})
+
+
+def fetch_distillation(cfg: Config, now_ms: int) -> dict:
+    """How far behind the distiller is, in records and in time.
+
+    Two questions, because either alone misleads. *Backlog* says how much work
+    is waiting; *oldest* says how long the eldest piece of it has been waiting,
+    which is the number that distinguishes "a steady trickle" from "the job
+    stopped running a month ago".
+
+    Neither is derivable from `stats`: the server does not know the distiller's
+    thresholds, so eligibility has to be expressed as a query. It is the same
+    predicate `aegisdb-summarize` selects on — episodic, older than the minimum
+    age, at or below the importance ceiling.
+
+    `capped` matters. Past `--query-scan-cap` the server counts over a bounded
+    view, which makes the backlog a *floor* rather than the number. Reported as
+    its own gauge instead of being folded in, because a floor presented as a
+    total is exactly the sort of quiet lie an alert gets built on.
+    """
+    cutoff = max(0, now_ms - cfg.summary_min_age_ms)
+    # `start_time` is not decoration. The server sets its time filter only when
+    # BOTH bounds parse (`parse_filters`, a short-circuit &&), so sending
+    # `end_time` alone silently drops the age threshold *and* the oldest-first
+    # ordering, which is only honoured on the timed path. Without it the
+    # backlog counted every episodic record whatever its age — the metric
+    # measured nothing. `aegisdb-summarize` sends both; so does this now.
+    common = {"type": "episodic", "start_time": 0, "end_time": cutoff,
+              "max_importance": cfg.summary_max_importance}
+    if cfg.summary_namespace:
+        # Scoped to the namespace the distiller actually runs against. The
+        # exporter holds an admin token (`stats` requires one), so without this
+        # the backlog spans every tenant while the job works on one.
+        common["agent_id"] = cfg.summary_namespace
+    counted = _request(cfg, {"operation": "count", **common})
+    oldest = _request(cfg, {"operation": "search", "order": "oldest",
+                            "top_k": 1,
+                            # Measuring must not change what it measures: a
+                            # search bumps the recall counters `forget` weighs,
+                            # so without this the exporter would protect the
+                            # very records it is reporting as overdue.
+                            "track_usage": False, **common})
+    recs = oldest.get("records") or []
+    # Age from `created`. The server filters on `created` and orders by it
+    # (`cmp_created_asc`), so `updated` would describe a different record than
+    # the one selected — a 100-day-old note touched an hour ago would report
+    # an hour, and the staleness alert would never fire.
+    age_ms = 0
+    if recs:
+        stamp = recs[0].get("created") or now_ms
+        age_ms = max(0, now_ms - int(stamp))
+    return {"backlog": int(counted.get("count") or 0),
+            "capped": bool(counted.get("capped")),
+            "oldest_age_ms": age_ms}
 
 
 # --------------------------------------------------------------------------- #
@@ -157,10 +245,14 @@ class Exposition:
 
 
 def render(stats: dict, *, up: bool = True, scrape_seconds: float | None = None,
-           error: str | None = None) -> str:
+           error: str | None = None, distillation: dict | None = None,
+           cfg: Config | None = None) -> str:
     """Translate a ``stats`` response into exposition text. When ``up`` is
     False, ``stats`` is ignored and only the liveness/self metrics are emitted
-    (with an ``aegisdb_scrape_error`` info metric carrying the reason)."""
+    (with an ``aegisdb_scrape_error`` info metric carrying the reason).
+
+    ``distillation`` is the extra block from `fetch_distillation`, present only
+    when that feature is enabled and the last computation succeeded."""
     e = Exposition()
     e.gauge("aegisdb_up",
             "1 if the last stats scrape succeeded, 0 otherwise.", up)
@@ -266,6 +358,44 @@ def render(stats: dict, *, up: bool = True, scrape_seconds: float | None = None,
                   "Records erased by purge (right-to-be-forgotten).",
                   m.get("memories_purged"))
 
+    # ---- distillation lag (opt-in; ROADMAP 3.3) ----
+    # Absent entirely unless enabled, so a dashboard panel showing nothing is
+    # distinguishable from a backlog of zero — the two mean opposite things and
+    # emitting 0 for "not measured" would make the healthy state and the
+    # unmeasured state look identical.
+    if distillation is not None:
+        e.gauge("aegisdb_distillation_backlog",
+                "Records eligible for distillation but not yet summarized.",
+                distillation.get("backlog", 0))
+        e.gauge("aegisdb_distillation_backlog_capped",
+                "1 when the backlog count hit the server's scan cap and is "
+                "therefore a floor, not a total.",
+                1 if distillation.get("capped") else 0)
+        e.gauge("aegisdb_distillation_oldest_age_seconds",
+                "Age of the oldest record still awaiting distillation; 0 when "
+                "the backlog is empty.",
+                distillation.get("oldest_age_ms", 0) / 1000.0)
+    if cfg is not None and cfg.distillation:
+        # The thresholds the backlog above was computed with. The server does
+        # not know them, so they are the exporter's copy of the distiller's
+        # config — exported so a mismatch between the two is visible on the
+        # dashboard rather than silently wrong in the number.
+        e.gauge("aegisdb_distillation_min_age_seconds",
+                "Minimum record age the backlog counts as eligible "
+                "(AEGIS_SUMMARY_MIN_AGE_MS).",
+                cfg.summary_min_age_ms / 1000.0)
+        e.gauge("aegisdb_distillation_max_importance",
+                "Importance ceiling the backlog counts as eligible "
+                "(AEGIS_SUMMARY_MAX_IMPORTANCE).",
+                cfg.summary_max_importance)
+        # Which tenant the backlog describes. Empty means every namespace,
+        # which is right on a single-tenant server and misleading on a shared
+        # one — so it is stated rather than left to be assumed.
+        e.add("aegisdb_distillation_scope", "gauge",
+              "1, labelled with the namespace the backlog was computed for "
+              "(empty = every namespace).",
+              [({"namespace": cfg.summary_namespace}, 1)])
+
     # ---- per-tenant usage (only present when quotas are configured) ----
     tenants = stats.get("tenants") or []
     e.add("aegisdb_tenant_records", "gauge",
@@ -300,6 +430,42 @@ def render(stats: dict, *, up: bool = True, scrape_seconds: float | None = None,
     return e.render()
 
 
+# Last distillation result and when it was computed, so the scan runs on its
+# own cadence rather than Prometheus's. Module-level because one process serves
+# one server; a per-cfg cache would be ceremony for a case that does not exist.
+_distillation_cache: dict = {"at": None, "value": None}
+# The HTTP server is threaded, so two scrapes can overlap. Without this both
+# miss the cache and both run the scan, which is the one thing the interval
+# exists to prevent — and the expensive one.
+_distillation_lock = threading.Lock()
+
+
+def _distillation(cfg: Config, now_ms: int) -> dict | None:
+    """The cached backlog, recomputed at most every `distillation_interval`.
+
+    A failure keeps the previous value rather than clearing it: the backlog is
+    a slow-moving number, and dropping it to nothing on one timed-out scan
+    would look exactly like the distiller having caught up.
+    """
+    if not cfg.distillation:
+        return None
+    with _distillation_lock:
+        now = time.monotonic()
+        at = _distillation_cache["at"]
+        if at is not None and (now - at) < cfg.distillation_interval:
+            return _distillation_cache["value"]
+        try:
+            value = fetch_distillation(cfg, now_ms)
+        except ScrapeError:
+            # Stamp the attempt so a persistently failing query is retried on
+            # the interval rather than on every scrape.
+            _distillation_cache["at"] = now
+            return _distillation_cache["value"]
+        _distillation_cache["at"] = now
+        _distillation_cache["value"] = value
+        return value
+
+
 def scrape_text(cfg: Config) -> str:
     """Fetch + render one scrape, converting failures into aegisdb_up 0."""
     start = time.monotonic()
@@ -307,8 +473,13 @@ def scrape_text(cfg: Config) -> str:
         stats = fetch_stats(cfg)
     except ScrapeError as exc:
         return render({}, up=False,
-                      scrape_seconds=time.monotonic() - start, error=str(exc))
-    return render(stats, up=True, scrape_seconds=time.monotonic() - start)
+                      scrape_seconds=time.monotonic() - start, error=str(exc),
+                      cfg=cfg)
+    # After `stats`, so a server that is up but slow still reports liveness and
+    # counters even if the backlog query times out.
+    lag = _distillation(cfg, int(time.time() * 1000))
+    return render(stats, up=True, scrape_seconds=time.monotonic() - start,
+                  distillation=lag, cfg=cfg)
 
 
 # --------------------------------------------------------------------------- #
