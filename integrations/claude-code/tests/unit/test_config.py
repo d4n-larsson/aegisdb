@@ -204,6 +204,29 @@ class TestProjectDirDiscovery(unittest.TestCase):
         with self.assertRaises(ConfigError):
             load_config(env={}, cwd=d)
 
+    def test_a_named_file_that_is_missing_is_an_error(self):
+        """AEGIS_CONFIG is a claim the file is there; silence would revert the
+        whole integration to defaults with nothing said. The live case: with
+        `.aegisdb/` on one branch and AEGIS_CONFIG pointing into the working
+        tree, every other checkout silently reconfigures it."""
+        d = self._project()
+        gone = os.path.join(d, "nope.json")
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(env={"AEGIS_CONFIG": gone}, cwd=d)
+        self.assertIn(gone, str(ctx.exception))
+        self.assertIn("AEGIS_CONFIG", str(ctx.exception))
+
+    def test_a_named_directory_is_an_error_too(self):
+        d = self._project()
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(env={"AEGIS_CONFIG": d}, cwd=d)
+        self.assertIn("not a file", str(ctx.exception))
+
+    def test_a_discovered_file_that_is_missing_is_still_normal(self):
+        """The distinction the error rests on: nobody named this path."""
+        cfg = load_config(env={}, cwd=self._project())
+        self.assertEqual(cfg.aegis_port, 9470)
+
 
 class TestFileIsASourceNotADefault(unittest.TestCase):
     """A setting chosen in the file must not be overridden by an inferred one."""

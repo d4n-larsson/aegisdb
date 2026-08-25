@@ -31,7 +31,11 @@ LOCAL_SUBDIR = "local"
 
 
 class ConfigError(RuntimeError):
-    """A config file exists but could not be read.
+    """A config file was named or found, and could not be used.
+
+    Two cases: a file that exists but cannot be read, and a path named by
+    ``AEGIS_CONFIG`` that is not there at all. A *discovered* file that is
+    absent is neither — that is the ordinary "this project has no config" case.
 
     Raised rather than ignored: a discovered file that silently does nothing is
     the failure mode the predicate registry already refuses (a broken registry
@@ -335,7 +339,21 @@ def load_config(env=None, cwd: str | None = None, overrides: dict | None = None)
     #    integration silently ignored is worse than a complaint.
     path = config_path(env, cwd)
     from_file: set[str] = set()
-    if os.path.isfile(path):
+    if not os.path.isfile(path):
+        # ...with one exception: a path named by AEGIS_CONFIG is a claim that
+        # the file is there, so its absence is a misconfiguration and not the
+        # ordinary "this project has no config" case. Silence here is the
+        # nastiest version of the failure this module exists to prevent: the
+        # settings revert to built-in defaults, embedding_mode goes back to
+        # `none`, and recall keeps working while quietly retrieving worse.
+        #
+        # It bites for real when `.aegisdb/` lives on one branch and
+        # AEGIS_CONFIG points into the working tree: every checkout of a branch
+        # without the directory silently reconfigures the integration.
+        if env.get("AEGIS_CONFIG"):
+            what = "is not a file" if os.path.exists(path) else "does not exist"
+            raise ConfigError(f"AEGIS_CONFIG names {path}, which {what}")
+    else:
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 doc = json.load(fh) or {}

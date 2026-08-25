@@ -32,7 +32,8 @@ import sys
 
 from . import config as config_mod
 from .client import AegisClient, AegisUnavailable
-from .config import env_for_explicit_root, load_config, project_root
+from .config import (ConfigError, env_for_explicit_root, load_config,
+                     project_root)
 
 ENTITY_TAG = "entity"
 FACT_TAG = "fact"
@@ -233,7 +234,11 @@ def main(argv: list[str] | None = None) -> int:
         proj, env = project_root(), os.environ
     else:
         proj, env = os.path.abspath(args.dir), env_for_explicit_root()
-    cfg = load_config(env=env, cwd=proj)
+    try:
+        cfg = load_config(env=env, cwd=proj)
+    except ConfigError as e:
+        print(f"aegisdb-seed: {e}", file=sys.stderr)
+        return 1
     namespace = args.namespace if args.namespace is not None else cfg.namespace
     corpora = args.facts or discover_corpora(env=env, cwd=proj)
     if not corpora:

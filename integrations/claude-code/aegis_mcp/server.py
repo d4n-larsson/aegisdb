@@ -13,7 +13,7 @@ import sys
 
 from .ask import ask, verbalize_all
 from .client import AegisClient, check_startup
-from .config import load_config
+from .config import ConfigError, load_config
 from .embeddings import make_provider
 from .tools import MemoryTools
 
@@ -176,19 +176,99 @@ def _read_path(tools, vocab, vocab_ok):
     if getattr(config, "ask_pattern", False):
         if not vocab_ok:
             return None, None  # a configured registry that could not be read
-        if vocab is None:
-            print("[aegis-mcp] AEGIS_ASK_PATTERN is set but no vocabulary is "
-                  "available — neither AEGIS_EXTRACT_REGISTRY nor a registry "
-                  "on the server; questions fall back to ordinary search",
-                  file=sys.stderr)
+        # A missing vocabulary is not reported here: `read_path_note` says it
+        # once at startup and again on every question it affects, and two
+        # wordings for one condition is how a log stops being read.
     else:
         vocab = None  # verbalization needs no vocabulary
     provider = make_extraction_provider(config)
     if not provider.available():
-        print("[aegis-mcp] read path: no extraction backend available; "
-              "questions fall back to ordinary search", file=sys.stderr)
+        # Named in full, because this is the one prerequisite that is not
+        # implied by the setting the operator turned on. `ask_pattern` reads
+        # like a switch over the store, but expressing a question as a pattern
+        # is a model call, so it runs on the *extraction* backend — and with
+        # `extract_mode` at its default the feature is on in the config and
+        # inert at runtime, which is indistinguishable from "the corpus had no
+        # answer" in every result it returns.
+        print(f"[aegis-mcp] read path: {read_path_note(config, vocab, None)}",
+              file=sys.stderr)
         return None, None
     return vocab, provider
+
+
+def _read_setting(config) -> str:
+    """Which read-path setting is on, as a clause naming what to fix."""
+    on = [name for name, flag in (("AEGIS_ASK_PATTERN", "ask_pattern"),
+                                  ("AEGIS_ASK_VERBALIZE", "ask_verbalize"))
+          if getattr(config, flag, False)]
+    if not on:
+        return "the read path is on"
+    return " and ".join(on) + (" are set" if len(on) > 1 else " is set")
+
+
+def read_path_note(config, vocab, extractor) -> str | None:
+    """Why a configured read path cannot answer symbolically — or None.
+
+    Attached to the search result, not only logged. `"symbolic": false` is what
+    a question the corpus cannot answer and a read path that never ran look
+    like alike, and stderr belongs to whoever launched the server rather than
+    whoever is asking — so from the caller's side the two are indistinguishable
+    and the misconfiguration reads as an empty corpus. That is exactly how it
+    was reported.
+
+    None whenever nothing is wrong, including when the feature is simply off,
+    so a store that does not use it carries no extra key.
+    """
+    if not (getattr(config, "ask_pattern", False)
+            or getattr(config, "ask_verbalize", False)):
+        return None
+    if extractor is None:
+        mode = (getattr(config, "extract_mode", "none") or "none").lower()
+        why = ("AEGIS_EXTRACT_MODE is 'none'" if mode == "none"
+               else f"the {mode!r} extraction backend is unavailable "
+                    "(missing CLI, SDK or API key)")
+        return (f"{_read_setting(config)} but {why} — a question is "
+                "turned into a pattern by the extraction backend, so set "
+                "AEGIS_EXTRACT_MODE to claude-code, anthropic or openai; until "
+                "then every question falls back to ordinary search and answers "
+                'with "symbolic": false')
+    if getattr(config, "ask_pattern", False) and not vocab:
+        return ("AEGIS_ASK_PATTERN is set but no predicate vocabulary is "
+                "available — neither AEGIS_EXTRACT_REGISTRY nor a registry on "
+                "the server, so there is nothing to express a question against "
+                "and every question falls back to ordinary search")
+    return None
+
+
+def search_or_ask(tools, read_vocab, read_extractor, read_note,
+                  query=None, tags=None, match="any", start_time=None,
+                  end_time=None, top_k=5) -> dict:
+    """What `memory_search` does: the read path when it applies, else search.
+
+    A module function rather than the body of the registered closure, so the
+    routing can be tested without an MCP SDK and a live server between the
+    caller and the decision.
+    """
+    # The read path takes the question only when the question is the whole
+    # request. A pattern lookup carries no tags and no time range, so answering
+    # a filtered search symbolically would drop the filters and return
+    # something that looks like an answer to what was asked.
+    unfiltered = bool(query) and not tags and start_time is None \
+        and end_time is None
+    if unfiltered and read_extractor is not None:
+        res = ask(tools, query, read_vocab, tools.config, read_extractor,
+                  top_k=top_k)
+        res = verbalize_all(tools, res, tools.config, read_extractor)
+    else:
+        res = tools.search(query=query, tags=tags, match=match,
+                           start_time=start_time, end_time=end_time,
+                           top_k=top_k, lexical=True)
+    # Only ever present when the read path is configured and cannot run, and
+    # only on a question it would have taken — so a correctly wired store and a
+    # filtered search are byte-identical to what they were.
+    if unfiltered and read_note and isinstance(res, dict):
+        res.setdefault("read_path", read_note)
+    return res
 
 
 def main() -> int:
@@ -203,7 +283,13 @@ def main() -> int:
         print(_sdk_error(), file=sys.stderr)
         return 1
 
-    tools = build_tools()
+    try:
+        tools = build_tools()
+    except ConfigError as e:
+        # A traceback here is the wrong shape of message: the operator wrote a
+        # path or a value, and what they need is that sentence, not a stack.
+        print(f"[aegis-mcp] config: {e}", file=sys.stderr)
+        return 1
     mcp = _new_server(server_cls, "memory")
     vocab, vocab_ok = _vocabulary(tools)
     read_vocab, read_extractor = _read_path(tools, vocab, vocab_ok)
@@ -211,6 +297,21 @@ def main() -> int:
     if hint:
         print(f"[aegis-mcp] vocabulary: {len(vocab)} predicate(s) named in the "
               f"memory_search description", file=sys.stderr)
+    read_note = read_path_note(tools.config, read_vocab, read_extractor)
+    if read_note:
+        # `_read_path` already printed the no-backend case on its way out; this
+        # covers the rest, so every reason a configured read path sits inert is
+        # said at startup as well as on each question that hits it.
+        if read_extractor is not None:
+            print(f"[aegis-mcp] read path: {read_note}", file=sys.stderr)
+    elif read_extractor is not None:
+        # Said out loud when it is *on*, not only when it fails. Until now the
+        # log told a working read path from a silently disabled one by the
+        # absence of a complaint, which is no way to answer "why is `symbolic`
+        # always false?" — the question this line exists to close.
+        print(f"[aegis-mcp] read path: on via {tools.config.extract_mode}"
+              f" ({len(read_vocab) if read_vocab else 0} predicate(s))",
+              file=sys.stderr)
 
     @mcp.tool()
     def memory_save(text: str, tags: list[str] | None = None,
@@ -231,19 +332,10 @@ def main() -> int:
         recency. `query` matches both semantically and literally, so searching an
         exact identifier — a flag like `--tenant-max-records`, a `file.c:line`
         reference, an error code — finds the memory containing that token."""
-        # The read path takes the question only when the question is the whole
-        # request. A pattern lookup carries no tags and no time range, so
-        # answering a filtered search symbolically would drop the filters and
-        # return something that looks like an answer to what was asked.
-        unfiltered = bool(query) and not tags and start_time is None \
-            and end_time is None
-        if unfiltered and read_extractor is not None:
-            res = ask(tools, query, read_vocab, tools.config, read_extractor,
-                      top_k=top_k)
-            return verbalize_all(tools, res, tools.config, read_extractor)
-        return tools.search(query=query, tags=tags, match=match,
-                           start_time=start_time, end_time=end_time,
-                           top_k=top_k, lexical=True)
+        return search_or_ask(tools, read_vocab, read_extractor, read_note,
+                             query=query, tags=tags, match=match,
+                             start_time=start_time, end_time=end_time,
+                             top_k=top_k)
 
     memory_search.__doc__ = (memory_search.__doc__ or "") + hint
     mcp.tool()(memory_search)
