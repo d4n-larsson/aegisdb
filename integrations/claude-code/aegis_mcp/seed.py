@@ -32,7 +32,7 @@ import sys
 
 from . import config as config_mod
 from .client import AegisClient, AegisUnavailable
-from .config import load_config
+from .config import env_for_explicit_root, load_config, project_root
 
 ENTITY_TAG = "entity"
 FACT_TAG = "fact"
@@ -60,19 +60,43 @@ def discover_corpora(env=None, cwd: str | None = None) -> list[str]:
     return sorted(glob.glob(os.path.join(facts_dir(env, cwd), "*.json")))
 
 
-def load_registry(path: str) -> dict:
-    """The vocabulary, as the server reads it.
+def load_registry(path: str, *, explicit: bool = False) -> tuple[dict, str]:
+    """The vocabulary, as the server reads it. Returns (registry, path used).
 
-    Falls back to the bundled starter vocabulary when the project has none, so
-    `aegisdb-seed` works before anyone has authored one — but note the *server*
-    still has to be started with `--predicate-registry`, and if it was started
-    with a different file than this one, it is the server's copy that decides
-    what is accepted. Same file, both places.
+    Falls back to the bundled starter vocabulary when the *project* has none, so
+    `aegisdb-seed` works before anyone has authored one — but a path the caller
+    **named** is never quietly swapped for the fallback: seeding a typo'd
+    `--registry` against the wrong vocabulary would refuse the project's own
+    predicates and look like a corpus problem. Same rule the config file
+    follows: absent-by-default is fine, named-but-unreadable is an error.
+
+    Note the *server* still has to be started with `--predicate-registry`, and
+    if it was started with a different file than this one, it is the server's
+    copy that decides what is accepted. Same file, both places.
     """
     if not os.path.isfile(path):
+        if explicit:
+            raise SystemExit(f"aegisdb-seed: no registry at {path}")
         path = DEFAULT_PREDICATES
     with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+        return json.load(fh), path
+
+
+def _ok(resp: dict, what: str) -> dict:
+    """Insist a probe actually ran.
+
+    An error response carries no `records`, which reads as "not present" — so a
+    server without the lexical index (NOT_READY on a text query) would silently
+    re-mint every entity and re-insert every fact on every run, turning the
+    documented idempotency into duplication. A probe that cannot run is a
+    failure, not an absence.
+    """
+    if not resp.get("ok"):
+        err = resp.get("error") or {}
+        raise SystemExit(
+            f"aegisdb-seed: {what} failed: {err.get('code', '?')} "
+            f"{err.get('message', '')}".rstrip())
+    return resp
 
 
 def _entity_id(db: AegisClient, prose: str, namespace: str) -> int | None:
@@ -82,10 +106,11 @@ def _entity_id(db: AegisClient, prose: str, namespace: str) -> int | None:
     the identity — that is what lets two corpora written months apart land on
     one record instead of minting a second.
     """
-    resp = db.request({"operation": "search", "query": prose,
-                       "tags": [ENTITY_TAG], "match": "any", "top_k": 10,
-                       "agent_id": namespace or None,
-                       "include_embeddings": False})
+    resp = _ok(db.request({"operation": "search", "query": prose,
+                           "tags": [ENTITY_TAG], "match": "any", "top_k": 10,
+                           "agent_id": namespace or None,
+                           "include_embeddings": False}),
+               "entity lookup")
     for rec in resp.get("records") or []:
         if (rec.get("data") or "").strip() == prose.strip():
             return rec["id"]
@@ -126,7 +151,14 @@ def seed_corpus(db: AegisClient, corpus: dict, registry: dict, *,
             ids[label] = -1
             report["entities_created"] += 1
         else:
-            ids[label] = _insert(db, prose, [ENTITY_TAG], namespace)["id"]
+            try:
+                ids[label] = _insert(db, prose, [ENTITY_TAG], namespace)["id"]
+            except (RuntimeError, AegisUnavailable) as exc:
+                # Its facts then refuse as "unknown entity", which is the honest
+                # outcome — better than aborting mid-corpus with a traceback and
+                # no report of what landed.
+                report["refused"].append((label, f"entity insert failed: {exc}"))
+                continue
             report["entities_created"] += 1
 
     for row in corpus.get("facts") or []:
@@ -156,9 +188,10 @@ def seed_corpus(db: AegisClient, corpus: dict, registry: dict, *,
         probeable = ids[subject] > 0 and (
             spec.get("object") != "id" or ids[obj] > 0)
         if probeable:
-            hit = db.request({"operation": "search", "pattern": fact, "top_k": 1,
-                              "agent_id": namespace or None,
-                              "include_embeddings": False})
+            hit = _ok(db.request({"operation": "search", "pattern": fact,
+                                  "top_k": 1, "agent_id": namespace or None,
+                                  "include_embeddings": False}),
+                      "fact lookup")
             if hit.get("records"):
                 report["facts_present"] += 1
                 continue
@@ -168,7 +201,7 @@ def seed_corpus(db: AegisClient, corpus: dict, registry: dict, *,
         try:
             _insert(db, prose, [FACT_TAG], namespace, fact=fact)
             report["facts_written"] += 1
-        except RuntimeError as exc:
+        except (RuntimeError, AegisUnavailable) as exc:
             report["refused"].append((predicate, str(exc)))
     return report
 
@@ -178,7 +211,10 @@ def main(argv: list[str] | None = None) -> int:
         prog="aegisdb-seed",
         description="Load .aegisdb/facts/*.json into this project's AegisDB, "
                     "using .aegisdb/predicates.json as the vocabulary.")
-    ap.add_argument("--dir", default=".", help="project directory (default: cwd)")
+    ap.add_argument("--dir", default=None,
+                    help="project directory. Default: CLAUDE_PROJECT_DIR if set, "
+                         "else the cwd. Naming one here overrides the session's "
+                         "project entirely.")
     ap.add_argument("--facts", action="append", default=None,
                     help="corpus file (repeatable); default: every "
                          "*.json in .aegisdb/facts/")
@@ -191,20 +227,28 @@ def main(argv: list[str] | None = None) -> int:
                     help="report what would be written, and write nothing")
     args = ap.parse_args(argv)
 
-    proj = os.path.abspath(args.dir)
-    cfg = load_config(cwd=proj)
+    # An explicit --dir must beat CLAUDE_PROJECT_DIR, or `--dir other/` run
+    # inside a session seeds this project's corpora into this project.
+    if args.dir is None:
+        proj, env = project_root(), os.environ
+    else:
+        proj, env = os.path.abspath(args.dir), env_for_explicit_root()
+    cfg = load_config(env=env, cwd=proj)
     namespace = args.namespace if args.namespace is not None else cfg.namespace
-    corpora = args.facts or discover_corpora(cwd=proj)
+    corpora = args.facts or discover_corpora(env=env, cwd=proj)
     if not corpora:
-        print(f"aegisdb-seed: no corpora in {facts_dir(cwd=proj)} — add a "
+        print(f"aegisdb-seed: no corpora in {facts_dir(env=env, cwd=proj)} — add a "
               f"*.json corpus there, or pass --facts", file=sys.stderr)
         return 1
 
-    reg_path = args.registry or registry_path(cwd=proj)
-    registry = load_registry(reg_path)
-    using = reg_path if os.path.isfile(reg_path) else DEFAULT_PREDICATES
+    reg_path = args.registry or registry_path(env=env, cwd=proj)
+    registry, using = load_registry(reg_path, explicit=args.registry is not None)
 
-    db = AegisClient.from_config(cfg)
+    # Bulk writes over one connection: the recall-path defaults (500 ms connect,
+    # 1000 ms read) exist to keep a hook from stalling a turn, and would abort a
+    # corpus on the first slow insert. tools/facts/seed.py uses 30 s for the
+    # same reason.
+    db = AegisClient.from_config(cfg, read_timeout_ms=30000)
     try:
         if not db.available():
             print(f"aegisdb-seed: no aegisdb at {cfg.aegis_host}:{cfg.aegis_port}",

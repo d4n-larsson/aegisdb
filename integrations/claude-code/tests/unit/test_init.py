@@ -177,9 +177,11 @@ class TestProjectConfig(unittest.TestCase):
         doc = build_project_config(namespace="n", host="h", port=1)
         self.assertNotIn("auth_token", doc)
 
-    def test_embedding_omitted_when_off(self):
+    def test_mode_is_always_stated_so_none_is_expressible(self):
         doc = build_project_config(namespace="n", host="h", port=1)
-        self.assertEqual(doc, {"namespace": "n", "aegis_host": "h", "aegis_port": 1})
+        self.assertEqual(doc, {"namespace": "n", "aegis_host": "h",
+                               "aegis_port": 1, "embedding_mode": "none"})
+        self.assertNotIn("embedding_dimensions", doc)
 
     def test_embedding_written_when_on(self):
         doc = build_project_config(namespace="n", host="h", port=1,
@@ -273,3 +275,84 @@ class TestMainPinsNamespace(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(main(["--dir", d, "--yes", "--no-verify", "--print"]), 0)
             self.assertFalse(os.path.exists(os.path.join(d, PROJECT_DIR)))
+
+
+class TestExplicitDirBeatsTheSessionProject(unittest.TestCase):
+    """The high-severity bug this suite missed the first time.
+
+    `project_root` prefers CLAUDE_PROJECT_DIR over the cwd it is passed — right
+    for a hook, wrong for a CLI that was handed a directory. Pinning is what
+    made it permanent: the wrong namespace was written into the other project's
+    config, so it read and wrote the session project's memories from then on.
+    """
+
+    def setUp(self):
+        self._saved = os.environ.get("CLAUDE_PROJECT_DIR")
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        else:
+            os.environ["CLAUDE_PROJECT_DIR"] = self._saved
+
+    def _pinned(self, d):
+        return json.load(open(os.path.join(d, PROJECT_DIR, CONFIG_BASENAME)))["namespace"]
+
+    def test_dir_wins_over_claude_project_dir(self):
+        with tempfile.TemporaryDirectory() as session, \
+             tempfile.TemporaryDirectory() as other:
+            os.environ["CLAUDE_PROJECT_DIR"] = session
+            main(["--dir", other, "--host", "h", "--port", "9470", "--yes",
+                  "--no-verify"])
+            self.assertEqual(self._pinned(other),
+                             derive_namespace(env={}, cwd=other))
+            self.assertNotEqual(self._pinned(other),
+                                derive_namespace(env={}, cwd=session))
+
+    def test_no_dir_uses_the_session_project_not_the_cwd(self):
+        # A hook-shaped default: run from anywhere, scaffold the project root.
+        with tempfile.TemporaryDirectory() as session:
+            os.environ["CLAUDE_PROJECT_DIR"] = session
+            main(["--host", "h", "--port", "9470", "--yes", "--no-verify"])
+            self.assertTrue(os.path.isfile(
+                os.path.join(session, PROJECT_DIR, CONFIG_BASENAME)))
+            self.assertEqual(self._pinned(session),
+                             derive_namespace(env={}, cwd=session))
+
+
+class TestOwnedKeysAreRemovable(unittest.TestCase):
+    def test_turning_embeddings_off_clears_the_stale_mode(self):
+        out, changed = merge_project_config(
+            {"embedding_mode": "local", "embedding_dimensions": 384,
+             "recall_top_k": 9},
+            build_project_config(namespace="n", host="h", port=1))
+        self.assertEqual(out["embedding_mode"], "none")
+        self.assertNotIn("embedding_dimensions", out)   # removed, not left stale
+        self.assertEqual(out["recall_top_k"], 9)        # not ours, untouched
+        self.assertTrue(changed)
+
+    def test_init_can_actually_turn_embeddings_off(self):
+        with tempfile.TemporaryDirectory() as d:
+            argv = ["--dir", d, "--host", "h", "--port", "9470", "--yes",
+                    "--no-verify"]
+            main(argv + ["--embedding-mode", "local", "--embedding-dim", "384"])
+            main(argv + ["--embedding-mode", "none", "--force"])
+            cfg = load_config(env={}, cwd=d)
+            self.assertEqual(cfg.embedding_mode, "none")
+
+
+class TestGitDetection(unittest.TestCase):
+    def test_a_worktree_dot_git_file_counts(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, ".git"), "w") as fh:
+                fh.write("gitdir: /elsewhere/.git/worktrees/w\n")
+            self.assertEqual(ensure_gitignore(d), "added")
+
+    def test_a_subdirectory_of_a_checkout_counts(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, ".git"))
+            sub = os.path.join(d, "services", "api")
+            os.makedirs(sub)
+            self.assertEqual(ensure_gitignore(sub), "added")
+            # written beside the project, so the relative pattern still matches
+            self.assertTrue(os.path.isfile(os.path.join(sub, ".gitignore")))

@@ -242,9 +242,32 @@ def _apply(cfg: Config, name: str, value) -> None:
 
 
 def project_root(env=None, cwd: str | None = None) -> str:
-    """The consumer project's root: CLAUDE_PROJECT_DIR, else cwd."""
+    """The consumer project's root: CLAUDE_PROJECT_DIR, else cwd.
+
+    The env var outranks `cwd` on purpose — a hook is invoked with whatever
+    working directory the session happens to have, which may be a subdirectory,
+    while `CLAUDE_PROJECT_DIR` always names the project. A **CLI that was given
+    an explicit directory** must not go through this: see `env_for_explicit_root`.
+    """
     env = os.environ if env is None else env
     return os.path.abspath(env.get("CLAUDE_PROJECT_DIR") or cwd or os.getcwd())
+
+
+def env_for_explicit_root(env=None) -> dict:
+    """`env` minus `CLAUDE_PROJECT_DIR`, for a CLI given an explicit directory.
+
+    Naming a directory has to mean that directory. Without this, running
+    `aegisdb-init --dir other/` from inside a Claude Code session resolves the
+    project root to the *session's* project and writes its namespace into
+    `other/.aegisdb/config.json` — after which `other` reads and writes another
+    project's memories. Pinning is what makes that permanent rather than
+    self-correcting, so the guard belongs wherever a pin is written.
+
+    Everything else in the environment (the `AEGIS_*` settings) still applies:
+    the point is which *directory* is meant, not which settings are in force.
+    """
+    env = os.environ if env is None else env
+    return {k: v for k, v in env.items() if k != "CLAUDE_PROJECT_DIR"}
 
 
 def project_dir(env=None, cwd: str | None = None) -> str:
@@ -311,6 +334,7 @@ def load_config(env=None, cwd: str | None = None, overrides: dict | None = None)
     #    but unreadable is an error, because a file someone wrote and the
     #    integration silently ignored is worse than a complaint.
     path = config_path(env, cwd)
+    from_file: set[str] = set()
     if os.path.isfile(path):
         try:
             with open(path, "r", encoding="utf-8") as fh:
@@ -320,8 +344,16 @@ def load_config(env=None, cwd: str | None = None, overrides: dict | None = None)
         if not isinstance(doc, dict):
             raise ConfigError(f"{path}: expected a JSON object")
         for k, v in doc.items():
-            if k in valid:
+            if k not in valid:
+                continue
+            # Coercion inside the guard, so a bad *value* names the file too.
+            # `{"aegis_port": "abc"}` escaping as a bare ValueError leaves the
+            # MCP server dying on a message that identifies nothing.
+            try:
                 _apply(cfg, k, v)
+            except (TypeError, ValueError) as exc:
+                raise ConfigError(f"{path}: bad value for {k!r}: {exc}") from exc
+            from_file.add(k)
 
     # 2) environment variables
     for name, var in _ENV.items():
@@ -333,8 +365,14 @@ def load_config(env=None, cwd: str | None = None, overrides: dict | None = None)
         if k in valid:
             _apply(cfg, k, v)
 
-    # Default embedding mode: if unset but a Voyage key is present, prefer voyage.
-    if "AEGIS_EMBEDDING_MODE" not in env and not (overrides or {}).get("embedding_mode"):
+    # Default embedding mode: if unset *by any source* but a Voyage key is
+    # present, prefer voyage. The file counts as a source — it is a chosen
+    # setting, not a default, and a stray VOYAGE_API_KEY in the environment
+    # must not silently switch a project configured for `local` onto a hosted
+    # provider at a dimension that provider does not produce.
+    if ("AEGIS_EMBEDDING_MODE" not in env
+            and "embedding_mode" not in from_file
+            and not (overrides or {}).get("embedding_mode")):
         if env.get("VOYAGE_API_KEY"):
             cfg.embedding_mode = "voyage"
 

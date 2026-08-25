@@ -24,7 +24,7 @@ import sys
 
 from . import config as config_mod
 from . import seed as seed_mod
-from .config import derive_namespace
+from .config import derive_namespace, env_for_explicit_root, project_root
 
 RECALL_CMD = "uvx --from aegisdb-mcp aegisdb-recall-hook"
 CAPTURE_CMD = "uvx --from aegisdb-mcp aegisdb-capture-hook"
@@ -70,11 +70,22 @@ def build_project_config(*, namespace: str, host: str, port: int,
     committed, and a bearer token in git is a different kind of mistake than a
     wrong port.
     """
-    doc = {"namespace": namespace, "aegis_host": host, "aegis_port": port}
-    if embedding_mode and embedding_mode != "none":
-        doc["embedding_mode"] = embedding_mode
+    doc = {"namespace": namespace, "aegis_host": host, "aegis_port": port,
+           "embedding_mode": embedding_mode or "none"}
+    # Dimensions only mean something with a provider; omitting them when there
+    # is none keeps a stale width from outliving the mode that chose it.
+    if doc["embedding_mode"] != "none":
         doc["embedding_dimensions"] = embedding_dim
     return doc
+
+
+# The keys init manages. Anything else in the file is the user's and is never
+# touched — but a key we own and no longer emit has to be *removed*, not left
+# behind: `--embedding-mode none` drops AEGIS_EMBEDDING_MODE from .mcp.json, and
+# a stale `embedding_mode: local` here would then be the value the server reads,
+# reviving the divergence this file exists to prevent, inverted.
+OWNED_CONFIG_KEYS = ("namespace", "aegis_host", "aegis_port",
+                     "embedding_mode", "embedding_dimensions")
 
 
 def merge_project_config(existing: dict, entry: dict) -> tuple[dict, int]:
@@ -82,8 +93,15 @@ def merge_project_config(existing: dict, entry: dict) -> tuple[dict, int]:
     rest. Returns (doc, changed-key-count) so an unchanged file is a no-op the
     caller can report as such — re-running init is expected, not exceptional."""
     out = dict(existing or {})
-    changed = sum(1 for k, v in entry.items() if out.get(k) != v)
-    out.update(entry)
+    changed = 0
+    for k in OWNED_CONFIG_KEYS:
+        if k in entry:
+            if out.get(k) != entry[k]:
+                changed += 1
+            out[k] = entry[k]
+        elif k in out:
+            del out[k]
+            changed += 1
     return out, changed
 
 
@@ -111,6 +129,24 @@ GITIGNORE_LINE = f"{config_mod.PROJECT_DIR}/{config_mod.LOCAL_SUBDIR}/"
 GITIGNORE_NOTE = "# aegisdb: machine state (local server data, overrides)"
 
 
+def _git_checkout_root(start: str) -> str | None:
+    """The nearest ancestor containing `.git`, or None.
+
+    `os.path.exists` rather than `isdir`: in a worktree or a submodule `.git` is
+    a *file*, and walking up covers a project that is a subdirectory of its
+    checkout — between them, exactly the setups where an un-ignored data
+    directory would otherwise get committed.
+    """
+    cur = os.path.abspath(start)
+    while True:
+        if os.path.exists(os.path.join(cur, ".git")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+
+
 def ensure_gitignore(proj: str) -> str:
     """Ignore `.aegisdb/local/`, and only that.
 
@@ -119,7 +155,7 @@ def ensure_gitignore(proj: str) -> str:
     beside `local/` is meant to be committed. Touches nothing outside a git
     checkout, and never rewrites an existing line.
     """
-    if not os.path.isdir(os.path.join(proj, ".git")):
+    if _git_checkout_root(proj) is None:
         return "skipped (not a git checkout)"
     path = os.path.join(proj, ".gitignore")
     body = ""
@@ -225,7 +261,11 @@ def main(argv: list[str] | None = None) -> int:
         description="Scaffold the AegisDB Claude Code memory integration: write "
                     ".mcp.json and merge the recall/capture hooks into "
                     ".claude/settings.json.")
-    ap.add_argument("--dir", default=".", help="project directory (default: cwd)")
+    ap.add_argument("--dir", default=None,
+                    help="project directory. Default: CLAUDE_PROJECT_DIR if set "
+                         "(so running this from a subdirectory still scaffolds "
+                         "the project root), else the cwd. Naming one here "
+                         "overrides the session's project entirely.")
     ap.add_argument("--host", help="AegisDB host (default 127.0.0.1)")
     ap.add_argument("--port", type=int, help="AegisDB port (default 9470)")
     ap.add_argument("--namespace", default=None,
@@ -288,7 +328,12 @@ def main(argv: list[str] | None = None) -> int:
         if extract_model:
             capture_env["AEGIS_EXTRACT_MODEL"] = extract_model
 
-    proj = os.path.abspath(args.dir)
+    # An explicit --dir must beat CLAUDE_PROJECT_DIR, or init writes the
+    # *session's* namespace into another project's config and pins it there.
+    if args.dir is None:
+        proj, env = project_root(), os.environ
+    else:
+        proj, env = os.path.abspath(args.dir), env_for_explicit_root()
     mcp_path = os.path.join(proj, ".mcp.json")
     settings_path = os.path.join(proj, ".claude", "settings.json")
     cfg_path = os.path.join(proj, config_mod.PROJECT_DIR, config_mod.CONFIG_BASENAME)
@@ -302,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
     # A namespaced auth token is the exception: the server pins agent_id from
     # the token and ignores what the client asks for, so a namespace written
     # beside one would be a value nothing reads.
-    pinned = namespace or ("" if auth_token else derive_namespace(cwd=proj))
+    pinned = namespace or ("" if auth_token else derive_namespace(env=env, cwd=proj))
 
     entry = build_mcp_config(host=host, port=port, namespace=pinned,
                              auth_token=auth_token, embedding_mode=embedding_mode,

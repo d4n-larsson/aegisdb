@@ -99,8 +99,15 @@ class TestBundledVocabulary(unittest.TestCase):
 
     def test_load_registry_falls_back_to_it(self):
         with tempfile.TemporaryDirectory() as d:
-            missing = os.path.join(d, "nope.json")
-            self.assertEqual(load_registry(missing), json.load(open(DEFAULT_PREDICATES)))
+            reg, used = load_registry(os.path.join(d, "nope.json"))
+            self.assertEqual(reg, json.load(open(DEFAULT_PREDICATES)))
+            self.assertEqual(used, DEFAULT_PREDICATES)
+
+    def test_a_named_registry_that_is_missing_is_an_error(self):
+        """A typo'd --registry must not silently seed against the fallback."""
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(SystemExit):
+                load_registry(os.path.join(d, "typo.json"), explicit=True)
 
     def test_it_matches_the_repo_root_example(self):
         """The packaged copy and predicates.example.json must not drift.
@@ -187,3 +194,49 @@ class TestSeedCorpus(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FailingClient:
+    """A server that refuses the probe — e.g. --no-lexical-index."""
+
+    def __init__(self, code="NOT_READY"):
+        self.code = code
+        self.inserted = 0
+
+    def request(self, payload):
+        if payload["operation"] == "search":
+            return {"ok": False, "error": {"code": self.code,
+                                           "message": "lexical index disabled"}}
+        self.inserted += 1
+        return {"ok": True, "record": {"id": self.inserted}}
+
+
+class TestProbesMustActuallyRun(unittest.TestCase):
+    def test_a_refused_lookup_is_not_read_as_absent(self):
+        """Otherwise every run re-mints every entity: idempotency silently
+        becomes duplication."""
+        db = FailingClient()
+        with self.assertRaises(SystemExit) as ctx:
+            seed_corpus(db, CORPUS, REGISTRY)
+        self.assertIn("NOT_READY", str(ctx.exception))
+        self.assertEqual(db.inserted, 0)
+
+
+class ExplodingClient(FakeClient):
+    """Inserts fail; searches still work."""
+
+    def request(self, payload):
+        if payload["operation"] == "insert":
+            self.sent.append(payload)
+            return {"ok": False, "error": {"message": "QUOTA_EXCEEDED"}}
+        return super().request(payload)
+
+
+class TestWriteFailuresAreReportedNotRaised(unittest.TestCase):
+    def test_a_failed_entity_insert_reports_instead_of_aborting(self):
+        rep = seed_corpus(ExplodingClient(), CORPUS, REGISTRY)
+        self.assertEqual(rep["entities_created"], 0)
+        self.assertEqual(rep["facts_written"], 0)
+        # every entity refused, and the facts that needed them refused in turn
+        self.assertGreaterEqual(len(rep["refused"]), 2)
+        self.assertTrue(any("entity insert failed" in why for _, why in rep["refused"]))

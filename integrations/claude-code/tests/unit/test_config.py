@@ -9,13 +9,19 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from aegis_mcp.config import (CONFIG_BASENAME, PROJECT_DIR, Config, ConfigError,
-                              config_path, derive_namespace, load_config,
-                              resolve_namespace)
+                              config_path, derive_namespace, env_for_explicit_root,
+                              load_config, project_root, resolve_namespace)
+
+# The pre-existing cases below call load_config without a cwd, which now
+# discovers <cwd>/.aegisdb/config.json — and this repo is itself a consumer, so
+# the moment anyone runs aegisdb-init here they would start reading real project
+# settings and asserting against them. Point them at an empty directory instead.
+_ISOLATED = tempfile.mkdtemp(prefix='aegis-test-noconfig-')
 
 
 class TestConfig(unittest.TestCase):
     def test_defaults(self):
-        cfg = load_config(env={"AEGIS_NAMESPACE": "x"})
+        cfg = load_config(env={"AEGIS_NAMESPACE": "x"}, cwd=_ISOLATED)
         self.assertEqual(cfg.aegis_port, 9470)
         self.assertEqual(cfg.recall_time_budget_ms, 800)
         self.assertTrue(cfg.recall_enabled)
@@ -28,7 +34,7 @@ class TestConfig(unittest.TestCase):
             "AEGIS_NAMESPACE": "x",
             "AEGIS_RECALL_MAX_CHARS_PER_MEMORY": "120",
             "AEGIS_RECALL_CHAR_BUDGET": "0",
-        })
+        }, cwd=_ISOLATED)
         self.assertEqual(cfg.recall_max_chars_per_memory, 120)
         self.assertIsInstance(cfg.recall_max_chars_per_memory, int)
         self.assertEqual(cfg.recall_char_budget, 0)
@@ -40,7 +46,7 @@ class TestConfig(unittest.TestCase):
             "AEGIS_RECALL_ENABLED": "false",
             "AEGIS_RECALL_MIN_SCORE": "0.5",
             "AEGIS_EMBEDDING_DIMENSIONS": "256",
-        })
+        }, cwd=_ISOLATED)
         self.assertEqual(cfg.aegis_port, 1234)
         self.assertIsInstance(cfg.aegis_port, int)
         self.assertFalse(cfg.recall_enabled)
@@ -49,20 +55,20 @@ class TestConfig(unittest.TestCase):
 
     def test_overrides_beat_env(self):
         cfg = load_config(env={"AEGIS_NAMESPACE": "x", "AEGIS_PORT": "1111"},
-                          overrides={"aegis_port": 2222})
+                          overrides={"aegis_port": 2222}, cwd=_ISOLATED)
         self.assertEqual(cfg.aegis_port, 2222)
 
     def test_voyage_key_selects_voyage_mode(self):
-        cfg = load_config(env={"AEGIS_NAMESPACE": "x", "VOYAGE_API_KEY": "k"})
+        cfg = load_config(env={"AEGIS_NAMESPACE": "x", "VOYAGE_API_KEY": "k"}, cwd=_ISOLATED)
         self.assertEqual(cfg.embedding_mode, "voyage")
         # explicit mode still wins
         cfg2 = load_config(env={"AEGIS_NAMESPACE": "x", "VOYAGE_API_KEY": "k",
-                                "AEGIS_EMBEDDING_MODE": "none"})
+                                "AEGIS_EMBEDDING_MODE": "none"}, cwd=_ISOLATED)
         self.assertEqual(cfg2.embedding_mode, "none")
 
     def test_auth_token_defaults_blank_and_reads_env(self):
-        self.assertEqual(load_config(env={"AEGIS_NAMESPACE": "x"}).auth_token, "")
-        cfg = load_config(env={"AEGIS_NAMESPACE": "x", "AEGIS_AUTH_TOKEN": "s3cret"})
+        self.assertEqual(load_config(env={"AEGIS_NAMESPACE": "x"}, cwd=_ISOLATED).auth_token, "")
+        cfg = load_config(env={"AEGIS_NAMESPACE": "x", "AEGIS_AUTH_TOKEN": "s3cret"}, cwd=_ISOLATED)
         self.assertEqual(cfg.auth_token, "s3cret")
 
     def test_namespace_never_blank(self):
@@ -109,7 +115,7 @@ class TestCoercionCoverage(unittest.TestCase):
     def test_a_false_string_disables_a_bool_field(self):
         from aegis_mcp.config import load_config
         for off in ("false", "0", "no", "off"):
-            c = load_config(env={"AEGIS_EXTRACT_TRIPLES": off})
+            c = load_config(env={"AEGIS_EXTRACT_TRIPLES": off}, cwd=_ISOLATED)
             self.assertFalse(c.extract_triples, f"{off!r} should disable")
 
 
@@ -197,3 +203,50 @@ class TestProjectDirDiscovery(unittest.TestCase):
         d = self._project(["a", "list"])
         with self.assertRaises(ConfigError):
             load_config(env={}, cwd=d)
+
+
+class TestFileIsASourceNotADefault(unittest.TestCase):
+    """A setting chosen in the file must not be overridden by an inferred one."""
+
+    def _project(self, doc):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        os.makedirs(os.path.join(d, PROJECT_DIR))
+        with open(os.path.join(d, PROJECT_DIR, CONFIG_BASENAME), "w") as fh:
+            json.dump(doc, fh)
+        return d
+
+    def test_a_voyage_key_does_not_override_a_file_set_mode(self):
+        d = self._project({"embedding_mode": "local", "embedding_dimensions": 384})
+        cfg = load_config(env={"VOYAGE_API_KEY": "k"}, cwd=d)
+        self.assertEqual(cfg.embedding_mode, "local")
+        self.assertEqual(cfg.embedding_dimensions, 384)
+
+    def test_a_voyage_key_still_applies_when_nothing_chose_a_mode(self):
+        d = self._project({"aegis_port": 1234})
+        self.assertEqual(load_config(env={"VOYAGE_API_KEY": "k"}, cwd=d).embedding_mode,
+                         "voyage")
+
+    def test_a_bad_value_names_the_file_and_the_key(self):
+        d = self._project({"aegis_port": "abc"})
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(env={}, cwd=d)
+        self.assertIn(CONFIG_BASENAME, str(ctx.exception))
+        self.assertIn("aegis_port", str(ctx.exception))
+
+    def test_a_null_value_is_a_config_error_not_a_typeerror(self):
+        d = self._project({"recall_top_k": None})
+        with self.assertRaises(ConfigError):
+            load_config(env={}, cwd=d)
+
+
+class TestExplicitRootEnv(unittest.TestCase):
+    def test_it_drops_only_the_project_pointer(self):
+        env = env_for_explicit_root({"CLAUDE_PROJECT_DIR": "/x", "AEGIS_PORT": "1"})
+        self.assertNotIn("CLAUDE_PROJECT_DIR", env)
+        self.assertEqual(env["AEGIS_PORT"], "1")
+
+    def test_the_root_then_follows_the_given_cwd(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = env_for_explicit_root({"CLAUDE_PROJECT_DIR": "/elsewhere"})
+            self.assertEqual(project_root(env=env, cwd=d), os.path.abspath(d))
