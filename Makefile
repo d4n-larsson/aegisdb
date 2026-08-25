@@ -59,7 +59,7 @@ DEPS := $(CORE_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(CJSON_OBJ:.o=.d) \
 
 PYTHON ?= python3
 
-.PHONY: all clean test integration check eval eval-multihop eval-extraction eval-tasks sdk-test langgraph-test seed-facts inspector inspector-test first-contact bench wire-bench fuzz fuzz-regress fuzz-corpus
+.PHONY: all clean test integration check eval eval-multihop eval-extraction eval-tasks sdk-test langgraph-test seed-facts seed-surface inspector inspector-test first-contact bench wire-bench fuzz fuzz-regress fuzz-corpus
 all: $(BIN)
 
 $(BIN): $(CORE_OBJ) $(CJSON_OBJ) $(MAIN_OBJ)
@@ -140,11 +140,20 @@ sdk-test: $(BIN)
 langgraph-test: $(BIN)
 	cd integrations/langgraph && $(PYTHON) -m unittest discover -s tests -p 'test_*.py'
 
-# Load the worked typed-fact corpus (tools/facts/) into a running server. The
-# server must have been started with --predicate-registry; add --inference to
-# see the closures. `SEED_ARGS='--dry-run'` reports without writing.
+# Load the worked typed-fact corpus (tools/facts/aegisdb.json — what the server
+# is made of) into a running server. The server must have been started with
+# --predicate-registry; add --inference to see the closures.
+# `SEED_ARGS='--dry-run'` reports without writing; SEED_ARGS also carries
+# --port/--namespace/--token. See also `seed-surface` below.
 seed-facts:
 	$(PYTHON) tools/facts/seed.py $(SEED_ARGS)
+
+# The second corpus: what the server *exposes* — the operations, the retrieval
+# modes, the flags and request parameters, and what each defaults to or is
+# disabled by. It shares entity prose with the first, so seed.py's exact-prose
+# reuse binds the two into one graph; load them in either order, or on their own.
+seed-surface:
+	$(PYTHON) tools/facts/seed.py --facts tools/facts/aegisdb-surface.json $(SEED_ARGS)
 
 # A/B task benchmark: does memory lift task success? Teaches a fact, then answers
 # a fresh question with memory ON vs OFF and reports the lift (ROADMAP 1.1+).
