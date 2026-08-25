@@ -51,6 +51,21 @@ on:
 permissions:
   contents: read
 
+# One publish at a time per tag. A single `git push origin v0.8.2` fired this
+# workflow twice, three seconds apart; with no group both runs went through and
+# raced per package, and since the three jobs are independent they split the
+# release between them — one run uploaded `aegisdb-mcp`, the other `aegisdb` and
+# `aegisdb-langgraph`. Every package landed exactly once, and **both runs
+# reported failure**, each having lost the race for what the other won. A red
+# release that actually published is the worst of both readings.
+#
+# `cancel-in-progress: false`, unlike every other workflow here: cancelling a
+# publish mid-upload is precisely the partial release this is meant to prevent.
+# The duplicate waits and then no-ops on `skip-existing` below.
+concurrency:
+  group: pypi-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   pypi:
     runs-on: ubuntu-latest
@@ -80,6 +95,12 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
+          # A version already on PyPI is a skip, not a 400. Uploads are
+          # immutable there, so re-running this can only ever be a no-op — and
+          # the one thing it must not do is fail a release that is already
+          # published. Also what makes `gh run rerun` safe after a partial run,
+          # which the pending-publisher note above tells you to do.
+          skip-existing: true
           packages-dir: integrations/claude-code/dist
 
   client:
@@ -127,6 +148,12 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
+          # A version already on PyPI is a skip, not a 400. Uploads are
+          # immutable there, so re-running this can only ever be a no-op — and
+          # the one thing it must not do is fail a release that is already
+          # published. Also what makes `gh run rerun` safe after a partial run,
+          # which the pending-publisher note above tells you to do.
+          skip-existing: true
           packages-dir: clients/python/dist
 
   langgraph:
@@ -156,4 +183,10 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
+          # A version already on PyPI is a skip, not a 400. Uploads are
+          # immutable there, so re-running this can only ever be a no-op — and
+          # the one thing it must not do is fail a release that is already
+          # published. Also what makes `gh run rerun` safe after a partial run,
+          # which the pending-publisher note above tells you to do.
+          skip-existing: true
           packages-dir: integrations/langgraph/dist
