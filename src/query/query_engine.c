@@ -486,6 +486,9 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
         if (n) {
             nv = malloc(n * sizeof(float));
             if (!nv) {
+                /* `old_data` is already detached from the record by this point
+                 * when the patch carries one, so record_free cannot reach it. */
+                free(old_data);
                 record_free(&cur);
                 pthread_rwlock_unlock(&db->index_lock);
                 return AEGIS_ERR_INTERNAL;
@@ -515,6 +518,9 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
         if (record_set_tags(&cur, patch->tags, patch->tag_count) != 0) {
             cur.tags = old_tags; /* reattach originals for record_free */
             cur.tag_count = old_tag_count;
+            /* Both already detached above, so record_free walks past them. */
+            free(old_data);
+            free(old_embedding);
             record_free(&cur);
             pthread_rwlock_unlock(&db->index_lock);
             return AEGIS_ERR_INTERNAL;
@@ -557,8 +563,17 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
          * case needing an explicit remove is the one that leaves it with
          * none. */
         if (cur.embedding_dim && cur.vec_count) {
-            semantic_index_add(db->sem, cur.id, cur.embedding, cur.vec_count,
-                               cur.embedding_dim);
+            /* Its failure is worth saying out loud here, unlike on insert. It
+             * drops the record's prior slots before adding the new ones, so a
+             * failure leaves an *existing* record with neither vector while the
+             * log already holds the new one — a silent hole in recall that a
+             * restart repairs, and nothing else reports. */
+            if (semantic_index_add(db->sem, cur.id, cur.embedding,
+                                   cur.vec_count, cur.embedding_dim) != 0) {
+                LOG_ERROR("update: record %llu is out of the semantic index "
+                          "until the next restart (reindex failed)",
+                          (unsigned long long)cur.id);
+            }
         } else if (old_vec_count) {
             semantic_index_remove(db->sem, cur.id);
         }

@@ -246,6 +246,16 @@ long recovery_run(AegisDB *db) {
                 (!sem_loaded || e->offset >= sem_covered)) {
                 semantic_index_add(db->sem, r.id, r.embedding, r.vec_count,
                                    r.embedding_dim);
+            } else if (sem_loaded && e->offset >= sem_covered) {
+                /* A tail version with no usable vector, which `update` can now
+                 * produce by clearing one. The checkpoint predates that version
+                 * and still holds the vector the record used to have, and
+                 * reconcile below only evicts ids the hash no longer reports
+                 * live — this record is live. Without this the cleared vector
+                 * comes back on the next start and the record ranks by a vector
+                 * it does not hold: the exact failure clearing exists to
+                 * prevent, reintroduced across a restart. */
+                semantic_index_remove(db->sem, r.id);
             }
             record_free(&r);
             live++;

@@ -3503,6 +3503,35 @@ def test_update_embedding(binary, port):
         check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
               "wrong-dimension embedding rejected on update")
 
+        # A malformed value must be refused, not read as "no vector". Taking it
+        # as a clear would let the ordinary client bug — a stringified vector, a
+        # scalar, a wrapper object — delete a record's vector and report
+        # success, which is worse than the staleness this whole op fixes.
+        srv.req({"operation": "update", "id": rid, "embedding": on_y})
+        for bad in ("abc", 7, {"values": on_y}, True):
+            r = srv.req({"operation": "update", "id": rid, "embedding": bad})
+            kept = srv.req({"operation": "get", "id": rid})["record"].get("embedding")
+            check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST"
+                  and kept == on_y,
+                  f"a malformed embedding ({type(bad).__name__}) is refused, "
+                  f"and the record keeps its vector")
+
+        # Clearing takes every supplied key saying so: nulling one key while
+        # passing a real vector in the other sets that vector.
+        r = srv.req({"operation": "update", "id": rid, "embedding": None,
+                     "embeddings": [on_x, on_y]})
+        embs = r.get("record", {}).get("embeddings")
+        check(r.get("ok") is True and isinstance(embs, list) and len(embs) == 2,
+              "a null on one key does not discard a vector sent in the other")
+
+        # `[]` clears on either key — the table in the wire protocol says so.
+        for key in ("embedding", "embeddings"):
+            srv.req({"operation": "update", "id": rid, "embedding": on_y})
+            r = srv.req({"operation": "update", "id": rid, key: []})
+            check(r.get("ok") is True and not r["record"].get("embedding")
+                  and not r["record"].get("embeddings"),
+                  f"an empty `{key}` clears")
+
 
 def test_multivector(binary, port):
     print("[multi-vector: embeddings array round-trip]")
@@ -3800,6 +3829,60 @@ def test_lexical_disabled(binary, port):
         s = srv.req({"operation": "stats"})
         check(s["indexes"]["lexical_terms"] == 0 and s["memory"]["lexical_bytes"] == 0,
               "disabled index reports zero terms and zero bytes")
+
+
+def test_cleared_embedding_stays_cleared_across_a_restart(binary, port):
+    print("[update: a cleared vector does not come back from the checkpoint]")
+    datadir = tempfile.mkdtemp(prefix="aegis_semclear_")
+    dim = 384
+    on_x = [1.0] + [0.0] * (dim - 1)
+    near_x = [0.9, 0.1] + [0.0] * (dim - 2)
+    # First run checkpoints; the rest must NOT, or a checkpoint written after
+    # the clear would cover it and the stale-checkpoint path would go
+    # unexercised — which is how the first version of this test passed against
+    # the bug it was written for.
+    ckpt = ["--ann-threshold", "2", "--checkpoint-sec", "1"]
+    no_ckpt = ["--ann-threshold", "2", "--checkpoint-sec", "0"]
+
+    with Server(binary, port, phase=4, datadir=datadir, extra_args=ckpt) as srv:
+        cleared = srv.req({"operation": "insert", "type": "semantic",
+                           "data": "will be cleared",
+                           "embedding": on_x})["record"]["id"]
+        srv.req({"operation": "insert", "type": "semantic", "data": "stays",
+                 "embedding": near_x})
+        for _ in range(50):  # the cadence is 1s; wait for the file to appear
+            if os.path.exists(os.path.join(datadir, "memory.sem")):
+                break
+            time.sleep(0.2)
+        srv.graceful_stop()
+    check(os.path.exists(os.path.join(datadir, "memory.sem")),
+          "a semantic checkpoint exists (without one this proves nothing)")
+
+    # Second run: clear the vector, then die without a clean shutdown, so the
+    # checkpoint on disk still holds the vector this record no longer has.
+    with Server(binary, port, phase=4, datadir=datadir, extra_args=no_ckpt) as srv:
+        r = srv.req({"operation": "update", "id": cleared, "embedding": None})
+        check(r.get("ok") is True, "cleared the vector")
+        hits = [rec["id"] for rec in srv.req(
+            {"operation": "search", "embedding": on_x, "top_k": 5,
+             "include_embeddings": False}).get("records", [])]
+        check(cleared not in hits, "gone from vector search before the crash")
+        srv.proc.kill()
+        srv.proc.wait()
+
+    # Recovery replays the tail over the checkpoint. A tail version with no
+    # vector has to *evict*, not be skipped: reconcile only drops ids the hash
+    # no longer reports live, and this record is still live.
+    with Server(binary, port, phase=4, datadir=datadir, extra_args=no_ckpt) as srv:
+        rec = srv.req({"operation": "get", "id": cleared})["record"]
+        check(not rec.get("embedding") and not rec.get("embeddings"),
+              "the record still holds no vector after recovery")
+        hits = [r["id"] for r in srv.req(
+            {"operation": "search", "embedding": on_x, "top_k": 5,
+             "include_embeddings": False}).get("records", [])]
+        check(cleared not in hits,
+              "and is still absent from vector search — not resurrected from "
+              "the checkpoint")
 
 
 def test_lexical_recovery(binary, port):
@@ -4972,6 +5055,7 @@ def main():
     test_lexical_hybrid(binary, 19531)
     test_lexical_disabled(binary, 19532)
     test_lexical_recovery(binary, 19533)
+    test_cleared_embedding_stays_cleared_across_a_restart(binary, 19484)
     test_lexical_isolation(binary, 19534)
     test_recall_latency_histogram(binary, 19535)
     test_usage_feedback(binary, 19536)
