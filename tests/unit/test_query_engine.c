@@ -135,6 +135,134 @@ static void test_semantic_update(void) {
     record_free(&upd);
 }
 
+/* An update that changes a record's vectors must move it in the semantic index,
+ * not just in the log. Before this, `update` had no embedding field at all: a
+ * record kept the vector it was inserted with, so editing its prose left recall
+ * ranking it by text it no longer held, and a client that sent a new vector had
+ * it silently dropped. `other` never moves and is the fixed reference — without
+ * it a single-record index returns the same record whatever is asked. */
+static void test_update_reindexes_the_embedding(void) {
+    float on_x[] = {1.0f, 0.0f, 0.0f};
+    float near_x[] = {0.9f, 0.1f, 0.0f};
+    uint64_t moved = insert_vec_tag(&g_db, on_x, "moved");
+    uint64_t other = insert_vec_tag(&g_db, near_x, "other");
+
+    SearchParams p = {0};
+    float query_x[] = {1.0f, 0.0f, 0.0f};
+    p.embedding = query_x;
+    p.embedding_dim = 3;
+    p.top_k = 2;
+    MemoryRecord *recs = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &recs, &n));
+    TEST_ASSERT_EQUAL_size_t(2, n);
+    TEST_ASSERT_EQUAL_UINT64(moved, recs[0].id); /* exactly on the query */
+    for (size_t i = 0; i < n; i++) {
+        record_free(&recs[i]);
+    }
+    free(recs);
+
+    float on_y[] = {0.0f, 1.0f, 0.0f};
+    UpdatePatch patch = {0};
+    patch.has_data = 1;
+    patch.data = "moved to y";
+    patch.data_len = strlen("moved to y");
+    patch.has_embedding = 1;
+    patch.embedding = on_y;
+    patch.embedding_dim = 3;
+    patch.vec_count = 1;
+    MemoryRecord upd;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK,
+                          qe_update(&g_db, moved, &patch, NULL, &upd));
+    TEST_ASSERT_EQUAL_size_t(1, upd.vec_count);
+    TEST_ASSERT_EQUAL_FLOAT(1.0f,
+                            upd.embedding[1]); /* the record itself moved */
+    record_free(&upd);
+
+    recs = NULL;
+    n = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &recs, &n));
+    TEST_ASSERT_EQUAL_size_t(2, n);
+    TEST_ASSERT_EQUAL_UINT64(other, recs[0].id); /* the one that stayed on x */
+    for (size_t i = 0; i < n; i++) {
+        record_free(&recs[i]);
+    }
+    free(recs);
+
+    float query_y[] = {0.0f, 1.0f, 0.0f};
+    p.embedding = query_y;
+    recs = NULL;
+    n = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &recs, &n));
+    TEST_ASSERT_EQUAL_size_t(2, n);
+    TEST_ASSERT_EQUAL_UINT64(moved, recs[0].id); /* found where it now is */
+    for (size_t i = 0; i < n; i++) {
+        record_free(&recs[i]);
+    }
+    free(recs);
+}
+
+/* An empty patch vector clears. What it must not do is take the record with it:
+ * prose a caller cannot re-embed should stop claiming a meaning it no longer
+ * has, and stay readable by every other route. */
+static void test_update_can_clear_the_embedding(void) {
+    float on_x[] = {1.0f, 0.0f, 0.0f};
+    uint64_t id = insert_vec_tag(&g_db, on_x, "clearable");
+
+    UpdatePatch patch = {0};
+    patch.has_embedding = 1; /* no vector: clear */
+    MemoryRecord upd;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_update(&g_db, id, &patch, NULL, &upd));
+    TEST_ASSERT_EQUAL_size_t(0, upd.vec_count);
+    TEST_ASSERT_NULL(upd.embedding);
+    record_free(&upd);
+
+    SearchParams p = {0};
+    float query_x[] = {1.0f, 0.0f, 0.0f};
+    p.embedding = query_x;
+    p.embedding_dim = 3;
+    p.top_k = 5;
+    MemoryRecord *recs = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &recs, &n));
+    TEST_ASSERT_EQUAL_size_t(0, n); /* gone from vector search */
+    free(recs);
+
+    MemoryRecord got;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_get(&g_db, id, NULL, &got));
+    TEST_ASSERT_EQUAL_size_t(0, got.vec_count);
+    record_free(&got);
+}
+
+/* A patch that says nothing about vectors must leave them alone: updating a
+ * confidence should not cost a record its place in the index. */
+static void test_update_without_an_embedding_keeps_it(void) {
+    float on_x[] = {1.0f, 0.0f, 0.0f};
+    uint64_t id = insert_vec_tag(&g_db, on_x, "kept");
+
+    UpdatePatch patch = {0};
+    patch.has_confidence = 1;
+    patch.confidence = 0.5f;
+    MemoryRecord upd;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_update(&g_db, id, &patch, NULL, &upd));
+    TEST_ASSERT_EQUAL_size_t(1, upd.vec_count);
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, upd.embedding[0]);
+    record_free(&upd);
+
+    SearchParams p = {0};
+    float query_x[] = {1.0f, 0.0f, 0.0f};
+    p.embedding = query_x;
+    p.embedding_dim = 3;
+    p.top_k = 1;
+    MemoryRecord *recs = NULL;
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(AEGIS_OK, qe_search(&g_db, &p, &recs, &n));
+    TEST_ASSERT_EQUAL_size_t(1, n);
+    TEST_ASSERT_EQUAL_UINT64(id, recs[0].id);
+    record_free(&recs[0]);
+    free(recs);
+}
+
 /* Regression: a rejected update must NOT mutate the tag index. The old code
  * rewrote db->tags before validate_common/append, so an update that changed
  * tags but failed validation (here an out-of-range importance) stripped the
@@ -1262,6 +1390,9 @@ int main(void) {
     RUN_TEST(test_get_not_found);
     RUN_TEST(test_episodic_update_rejected);
     RUN_TEST(test_semantic_update);
+    RUN_TEST(test_update_reindexes_the_embedding);
+    RUN_TEST(test_update_can_clear_the_embedding);
+    RUN_TEST(test_update_without_an_embedding_keeps_it);
     RUN_TEST(test_update_failed_preserves_tag_index);
     RUN_TEST(test_update_tags_swings_index);
     RUN_TEST(test_search_by_time_and_tags);

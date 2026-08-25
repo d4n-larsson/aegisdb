@@ -3445,6 +3445,65 @@ def test_encrypted_backup_restore(binary, port):
           "restore with the wrong key is refused")
 
 
+def test_update_embedding(binary, port):
+    print("[update: a record's vectors move with its prose]")
+    with Server(binary, port, phase=4) as srv:  # --embedding-dim 384
+        dim = 384
+        on_x = [1.0] + [0.0] * (dim - 1)
+        on_y = [0.0, 1.0] + [0.0] * (dim - 2)
+        near_x = [0.9, 0.1] + [0.0] * (dim - 2)
+
+        rid = srv.req({"operation": "insert", "type": "semantic",
+                       "data": "on x", "embedding": on_x})["record"]["id"]
+        # A record that never moves. Without it a one-record index answers every
+        # query with the same record and proves nothing about ranking.
+        srv.req({"operation": "insert", "type": "semantic", "data": "near x",
+                 "embedding": near_x})
+
+        def top(q):
+            r = srv.req({"operation": "search", "embedding": q, "top_k": 2,
+                         "include_embeddings": False})
+            return [rec["data"] for rec in r.get("records", [])]
+
+        check(top(on_x)[:1] == ["on x"], "before: the record on x ranks first for x")
+
+        r = srv.req({"operation": "update", "id": rid, "data": "on y",
+                     "embedding": on_y})
+        check(r.get("ok") is True, "update with an embedding ok")
+        check(r["record"].get("embedding") == on_y,
+              "the response carries the new vector, not the old one")
+        check(srv.req({"operation": "get", "id": rid})["record"]["embedding"] == on_y,
+              "and so does a fresh read")
+        check(top(on_x)[:1] == ["near x"],
+              "after: the query it no longer matches ranks the other record first")
+        check(top(on_y)[:1] == ["on y"], "after: it is found where it now is")
+
+        # `embeddings` (multi-vector) is accepted on update too, same as insert.
+        r = srv.req({"operation": "update", "id": rid, "embeddings": [on_x, on_y]})
+        embs = r.get("record", {}).get("embeddings")
+        check(r.get("ok") is True and isinstance(embs, list) and len(embs) == 2,
+              "update accepts a multi-vector `embeddings` array")
+
+        # null clears: prose a caller cannot re-embed stops claiming a meaning.
+        r = srv.req({"operation": "update", "id": rid, "data": "no vector now",
+                     "embedding": None})
+        check(r.get("ok") is True and not r["record"].get("embedding"),
+              "null clears the vectors")
+        check("no vector now" not in top(on_y), "cleared: gone from vector search")
+        check(srv.req({"operation": "get", "id": rid})["record"]["data"]
+              == "no vector now", "cleared: the record itself is untouched")
+
+        # Omitting the field is not the same as clearing it.
+        srv.req({"operation": "update", "id": rid, "embedding": on_y})
+        r = srv.req({"operation": "update", "id": rid, "confidence": 0.5})
+        check(r["record"].get("embedding") == on_y,
+              "an update that says nothing about vectors keeps them")
+
+        r = srv.req({"operation": "update", "id": rid, "embedding": [1.0, 2.0]})
+        check(r.get("ok") is False and r["error"]["code"] == "INVALID_REQUEST",
+              "wrong-dimension embedding rejected on update")
+
+
 def test_multivector(binary, port):
     print("[multi-vector: embeddings array round-trip]")
     with Server(binary, port, phase=4) as srv:  # --embedding-dim 384
@@ -4906,6 +4965,7 @@ def main():
     test_temporal_isolation(binary, 19503)
     test_memory_quality_metrics(binary, 19504)
     test_multivector(binary, 19482)
+    test_update_embedding(binary, 19486)
     test_include_embeddings(binary, 19487)
     test_search_explain(binary, 19498)
     test_lexical_search(binary, 19530)

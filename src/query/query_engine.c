@@ -472,6 +472,33 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
         cur.confidence = patch->confidence;
     }
 
+    /* Vectors, staged the way the payload is: detached rather than freed, so
+     * the semantic index can be swung only once the append has committed, and
+     * so a failed update leaves the record with the vectors it came in with.
+     * Copied because the patch borrows the caller's buffer while the record
+     * owns what it holds. An empty patch vector clears — the record keeps its
+     * prose and its tags and stops claiming a meaning it no longer has. */
+    float *old_embedding = NULL;
+    size_t old_vec_count = 0;
+    if (patch->has_embedding) {
+        float *nv = NULL;
+        size_t n = patch->vec_count * patch->embedding_dim;
+        if (n) {
+            nv = malloc(n * sizeof(float));
+            if (!nv) {
+                record_free(&cur);
+                pthread_rwlock_unlock(&db->index_lock);
+                return AEGIS_ERR_INTERNAL;
+            }
+            memcpy(nv, patch->embedding, n * sizeof(float));
+        }
+        old_embedding = cur.embedding;
+        old_vec_count = cur.vec_count;
+        cur.embedding = nv;
+        cur.embedding_dim = nv ? patch->embedding_dim : 0;
+        cur.vec_count = nv ? patch->vec_count : 0;
+    }
+
     /* Stage the new tags on the record, but defer the shared tag-index mutation
      * until validate_common + append_and_hash both succeed. The old ordering
      * rewrote the index up front, so a rejected update (e.g. an out-of-range
@@ -525,6 +552,17 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
         lexical_index_remove(db->lex, cur.id, old_data, old_data_len);
         lexical_index_add(db->lex, cur.id, cur.data, cur.data_len);
     }
+    if (st == AEGIS_OK && patch->has_embedding) {
+        /* semantic_index_add replaces a record's prior vectors, so the only
+         * case needing an explicit remove is the one that leaves it with
+         * none. */
+        if (cur.embedding_dim && cur.vec_count) {
+            semantic_index_add(db->sem, cur.id, cur.embedding, cur.vec_count,
+                               cur.embedding_dim);
+        } else if (old_vec_count) {
+            semantic_index_remove(db->sem, cur.id);
+        }
+    }
     pthread_rwlock_unlock(&db->index_lock);
     if (st == AEGIS_OK && durably_flush(db) != 0) {
         st = AEGIS_ERR_INTERNAL; /* not durable: do not acknowledge the write */
@@ -535,6 +573,7 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
     }
     free(old_tags);
     free(old_data);
+    free(old_embedding);
 
     if (st != AEGIS_OK) {
         record_free(&cur);
