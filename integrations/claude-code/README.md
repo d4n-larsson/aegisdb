@@ -362,6 +362,8 @@ a project with `embedding_mode: local` on the server would still recall
 *without* embeddings in the hook, silently, because the hook fell back to the
 built-in default. A file on disk is read by whoever runs next.
 
+A path named by `AEGIS_CONFIG` and not found is an **error**, not a quiet fall back to the defaults: naming it is a claim that it is there, and the failure it would otherwise cause is the exact one this file exists to prevent — settings reverting to the built-ins with nothing said. Worth knowing while `.aegisdb/` is on one branch and `AEGIS_CONFIG` points into the working tree, since every other checkout then has no file at that path. A *discovered* `.aegisdb/config.json` that is simply absent stays normal and means "defaults".
+
 Two things deliberately not in it: the **auth token**, because this file is
 meant to be committed and a bearer token in git is a different class of mistake
 than a wrong port; and the **server's data directory**, which stays wherever you
@@ -442,7 +444,7 @@ its `fact`.
 | `AEGIS_PORT` | `9470` | AegisDB TCP port |
 | `AEGIS_CONNECT_TIMEOUT_MS` | `500` | connect timeout (degradation guard) |
 | `AEGIS_READ_TIMEOUT_MS` | `1000` | per-request read timeout |
-| `AEGIS_CONFIG` | `.aegisdb/config.json` in the project | explicit path to the JSON config file; overrides the discovered one |
+| `AEGIS_CONFIG` | `.aegisdb/config.json` in the project | explicit path to the JSON config file; overrides the discovered one. Naming a path is a claim that it is there, so a path that **does not exist is an error**, not a fall back to the defaults — worth knowing if you point it into the working tree while `.aegisdb/` is still on one branch, since every other checkout would otherwise reconfigure the integration silently. A *discovered* file that is simply absent stays normal |
 | `AEGIS_NAMESPACE` | `.aegisdb/config.json`, else derived from project dir | isolation boundary (AegisDB `agent_id`); **ignored when the token is namespaced** — the token's namespace then governs |
 | `AEGIS_AUTH_TOKEN` | _(none)_ | bearer token sent with every request; required when the server enforces auth. A namespaced token also defines the tenant |
 | `AEGIS_EMBEDDING_MODE` | `voyage` if key present, else `none` | `voyage` \| `local` \| `none` \| `fake` |

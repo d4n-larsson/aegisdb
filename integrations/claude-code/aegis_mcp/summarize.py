@@ -16,7 +16,7 @@ import sys
 import time
 
 from .client import AegisClient
-from .config import load_config
+from .config import ConfigError, load_config
 from .embeddings import make_provider
 from .summary import make_summary_provider
 from .tools import MemoryTools
@@ -134,7 +134,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="select + summarize but write nothing; print the plan")
     args = ap.parse_args(argv)
 
-    config = load_config()
+    try:
+        config = load_config()
+    except ConfigError as e:
+        print(f"aegisdb-summarize: {e}", file=sys.stderr)
+        return 1
     summary_provider = make_summary_provider(config)
     embed_provider = make_provider(config)
     client = AegisClient.from_config(config)
