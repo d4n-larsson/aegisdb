@@ -63,8 +63,9 @@ a long transcript, and tunable via the knobs above.
 ## Fast path: one command
 
 If you already have (or can start) a server, scaffold the whole client side —
-`.mcp.json` plus the recall/capture hooks — with one command from your project
-root, instead of the manual steps below:
+`.mcp.json`, the recall/capture hooks, and [`.aegisdb/`](#aegisdb--the-projects-own-directory)
+with a starter predicate vocabulary — with one command from your project root,
+instead of the manual steps below:
 
 ```bash
 # preview what it writes (changes nothing)
@@ -331,8 +332,109 @@ required** to use the hooks or to run the tests.
 
 ## Configure
 
-Resolution precedence: defaults → JSON file (`AEGIS_CONFIG`) → environment →
-explicit overrides.
+Resolution precedence: defaults → JSON file → environment → explicit overrides.
+
+### `.aegisdb/` — the project's own directory
+
+Everything the integration reads from or writes into *your* project lives in
+one place, created by `aegisdb-init`:
+
+```text
+.aegisdb/
+  config.json      # settings both the MCP server and the hooks read — commit this
+  predicates.json  # your predicate vocabulary — starter copy written for you
+  facts/           # typed-fact corpora, loaded by `aegisdb-seed` — commit these
+  local/           # machine state: gitignored wholesale, never committed
+```
+
+The split is the point. Everything beside `local/` is a reviewed input that
+belongs in git — the namespace this project writes under, the vocabulary it may
+assert in — and `local/` is machine state that does not. One gitignore line,
+which `aegisdb-init` adds, and no per-file judgement calls.
+
+**Why a file and not more env vars.** `config.json` is *discovered*, not
+configured: `AEGIS_CONFIG` still names a file explicitly and always wins, but
+with it unset the project's `.aegisdb/config.json` is read if present. That is
+what makes one setting reach both callers. The MCP server gets its env from
+`.mcp.json`; a Claude Code hook entry has **no env field at all**, which is why
+`aegisdb-init` has to inline extraction settings onto the hook command — and why
+a project with `embedding_mode: local` on the server would still recall
+*without* embeddings in the hook, silently, because the hook fell back to the
+built-in default. A file on disk is read by whoever runs next.
+
+Two things deliberately not in it: the **auth token**, because this file is
+meant to be committed and a bearer token in git is a different class of mistake
+than a wrong port; and the **server's data directory**, which stays wherever you
+point `--data-dir`. `memory.log` is the plaintext of everything the agent was
+ever told, and a project-root default invites exactly one `git add -f` too many.
+
+**The namespace is now pinned.** With no namespace configured the fallback is
+`basename(project) + hash(absolute path)` — stable until someone renames or
+moves the directory, at which point every memory written under the old name is
+still there and no longer reachable. `aegisdb-init` writes the value the path
+*already* derives into `config.json`, so re-running it on an existing project
+changes nothing and future you can move the directory freely. A namespaced auth
+token is the exception: the server pins `agent_id` from the token, so the file
+leaves the namespace blank rather than writing a value nothing reads.
+
+### Typed facts: a vocabulary you start with, not one you invent
+
+`aegisdb-init` writes `.aegisdb/predicates.json` containing the ten starter
+predicates — `is_a`, `part_of`/`contains`, `depends_on` for structure;
+`defaults_to`, `guarded_by`, `measured_by`, `owned_by` for the properties a
+developer keeps re-asking about; `deprecated_by`/`recommended_by` declared
+`mutex_with` each other. You are meant to edit it: it is your project's
+contract, and ten is a deliberate ceiling, not a starting bid — a registry that
+grows to fit every sentence has stopped being a contract.
+
+It is **written once and never overwritten**. Re-running init keeps yours,
+because predicates already asserted live in records that cannot be rewritten.
+
+Two things this does *not* do, both because the server is a separate process:
+
+- **Point the server at it.** The registry is read by the server, from disk, at
+  startup: `--predicate-registry /path/to/.aegisdb/predicates.json`. If the
+  server was started with a *different* file, that one decides what `insert`
+  accepts, and this copy is decoration. Same file, both places.
+- **Turn on inference.** `--inference` is separate, and without it the
+  `transitive` / `inverse_of` / `mutex_with` declarations are validated and
+  inert, and `subsume` reports `NOT_READY`.
+
+Then drop corpora in `.aegisdb/facts/` and load them:
+
+```bash
+uvx --from aegisdb-mcp aegisdb-seed --dry-run   # report; write nothing
+uvx --from aegisdb-mcp aegisdb-seed
+```
+
+It discovers everything: the registry from `.aegisdb/predicates.json`, every
+`*.json` under `.aegisdb/facts/` in name order, and host/port/namespace from
+`config.json` — so a corpus lands in the namespace the agent recalls from rather
+than one somebody typed twice. Re-running is safe: an entity whose exact prose
+already exists is reused and a fact already asserted is skipped.
+
+A corpus is one JSON object. Entities are keyed by a label local to the file;
+the label becomes a record id at load time, and the **prose is the identity** —
+which is how two corpora written months apart land on one record instead of
+minting a second:
+
+```json
+{
+  "name": "my-service",
+  "entities": { "api": "the public API", "db": "the datastore" },
+  "facts": [
+    ["api", "depends_on", "db", "The API reads and writes the datastore."],
+    ["db",  "defaults_to", "postgres 15", "We run Postgres 15 in every environment."]
+  ]
+}
+```
+
+Each fact row is `[subject, predicate, object, prose]`. The object is another
+**label** when the registry declares that predicate `object: "id"`, and a
+**literal string** when it declares `object: "string"` — so a corpus only means
+something against a registry, and `aegisdb-seed` refuses (naming the predicate)
+rather than guessing. The prose becomes the record's `data`; the triple becomes
+its `fact`.
 
 | Env var | Default | Description |
 |---------|---------|-------------|
@@ -340,7 +442,8 @@ explicit overrides.
 | `AEGIS_PORT` | `9470` | AegisDB TCP port |
 | `AEGIS_CONNECT_TIMEOUT_MS` | `500` | connect timeout (degradation guard) |
 | `AEGIS_READ_TIMEOUT_MS` | `1000` | per-request read timeout |
-| `AEGIS_NAMESPACE` | derived from project dir | isolation boundary (AegisDB `agent_id`); **ignored when the token is namespaced** — the token's namespace then governs |
+| `AEGIS_CONFIG` | `.aegisdb/config.json` in the project | explicit path to the JSON config file; overrides the discovered one |
+| `AEGIS_NAMESPACE` | `.aegisdb/config.json`, else derived from project dir | isolation boundary (AegisDB `agent_id`); **ignored when the token is namespaced** — the token's namespace then governs |
 | `AEGIS_AUTH_TOKEN` | _(none)_ | bearer token sent with every request; required when the server enforces auth. A namespaced token also defines the tenant |
 | `AEGIS_EMBEDDING_MODE` | `voyage` if key present, else `none` | `voyage` \| `local` \| `none` \| `fake` |
 | `AEGIS_EMBEDDING_MODEL` | `voyage-3-large` | provider model id (Voyage mode) |
@@ -560,9 +663,16 @@ aegis_mcp/
   capture.py      # session salience heuristic + persistence
   server.py       # MCP binding (lazy-imports `mcp`; supports SDK 1.x and 2.x)
   hooks.py        # console-script entry points (aegisdb-recall-hook / -capture-hook)
+  seed.py         # aegisdb-seed: discover + load .aegisdb/facts/ corpora
+  default_predicates.json  # starter vocabulary aegisdb-init copies into a project
 hooks/
   recall_hook.py  # UserPromptSubmit (checkout path: python3 …/hooks/recall_hook.py)
   capture_hook.py # SessionEnd / Stop
 tests/            # unit, contract, integration (stdlib unittest)
 examples/         # mcp.json, settings.json
 ```
+
+In a project that *uses* the integration, `aegisdb-init` writes `.mcp.json`,
+`.claude/settings.json` (merged), and `.aegisdb/` — see
+[`.aegisdb/`](#aegisdb--the-projects-own-directory). The first two are Claude
+Code's paths and stay where it expects them; everything of ours is in the third.

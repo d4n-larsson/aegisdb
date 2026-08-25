@@ -45,9 +45,17 @@ aegisdb-init = "aegis_mcp.init:main"
 aegisdb-recall-hook = "aegis_mcp.hooks:recall"
 aegisdb-capture-hook = "aegis_mcp.hooks:capture"
 aegisdb-summarize = "aegis_mcp.summarize:main"
+aegisdb-seed = "aegis_mcp.seed:main"
 
 [tool.setuptools]
 packages = ["aegis_mcp"]
+
+# The starter predicate vocabulary ships inside the package: `aegisdb-init`
+# runs via `uvx --from aegisdb-mcp` with no clone, so it cannot read the
+# repo-root predicates.example.json it is copied from. A unit test asserts
+# the two stay identical when the repo is present.
+[tool.setuptools.package-data]
+aegis_mcp = ["default_predicates.json"]
 
 [tool.setuptools_scm]
 # The package lives in a subdirectory; the git repo root is two levels up.

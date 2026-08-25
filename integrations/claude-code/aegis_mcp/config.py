@@ -1,8 +1,16 @@
 """Integration configuration (T006) and project-namespace resolution (T009).
 
-Resolution precedence (lowest to highest): built-in defaults -> optional JSON
-config file (``AEGIS_CONFIG`` path) -> environment variables -> explicit
-overrides. All values are plain types so the config is trivially testable.
+Resolution precedence (lowest to highest): built-in defaults -> JSON config
+file -> environment variables -> explicit overrides. All values are plain types
+so the config is trivially testable.
+
+The config file is **discovered**, not configured: ``AEGIS_CONFIG`` still names
+one explicitly, and with it unset the project's ``.aegisdb/config.json`` is read
+if present. That is what makes one setting reach both callers — the MCP server
+gets its env from ``.mcp.json``, but a Claude Code hook entry has no env field
+at all, so until now a hook fell back to the built-in defaults and silently
+recalled without embeddings while the MCP server used them. A file on disk is
+read by whoever runs next.
 """
 from __future__ import annotations
 
@@ -10,6 +18,27 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass, fields
+
+# Everything the integration reads from or writes into a *consumer* project
+# lives under one directory, so a project has one place to look. The split
+# inside it is deliberate and is the whole reason `local/` exists: the files
+# beside it are reviewed inputs that belong in git (the namespace this project
+# writes under, its predicate registry, its fact corpora), and `local/` is
+# machine state that never should be. One gitignore line, no judgement calls.
+PROJECT_DIR = ".aegisdb"
+CONFIG_BASENAME = "config.json"
+LOCAL_SUBDIR = "local"
+
+
+class ConfigError(RuntimeError):
+    """A config file exists but could not be read.
+
+    Raised rather than ignored: a discovered file that silently does nothing is
+    the failure mode the predicate registry already refuses (a broken registry
+    is an error, not silent permissiveness). Both hooks already catch every
+    exception and degrade to a no-op with the message on stderr, so this
+    surfaces as a legible complaint rather than a broken turn.
+    """
 
 
 @dataclass
@@ -212,23 +241,64 @@ def _apply(cfg: Config, name: str, value) -> None:
     setattr(cfg, name, _coerce(name, value))
 
 
+def project_root(env=None, cwd: str | None = None) -> str:
+    """The consumer project's root: CLAUDE_PROJECT_DIR, else cwd."""
+    env = os.environ if env is None else env
+    return os.path.abspath(env.get("CLAUDE_PROJECT_DIR") or cwd or os.getcwd())
+
+
+def project_dir(env=None, cwd: str | None = None) -> str:
+    """The project's ``.aegisdb/`` directory. Not created by reading."""
+    return os.path.join(project_root(env, cwd), PROJECT_DIR)
+
+
+def local_dir(env=None, cwd: str | None = None) -> str:
+    """``.aegisdb/local/`` — machine state, gitignored wholesale."""
+    return os.path.join(project_dir(env, cwd), LOCAL_SUBDIR)
+
+
+def config_path(env=None, cwd: str | None = None) -> str:
+    """Where the JSON config is read from.
+
+    ``AEGIS_CONFIG`` when set (an explicit path always wins, and may point
+    anywhere), otherwise the project's ``.aegisdb/config.json``. The path is
+    returned whether or not it exists; callers check.
+    """
+    env = os.environ if env is None else env
+    return env.get("AEGIS_CONFIG") or os.path.join(
+        project_dir(env, cwd), CONFIG_BASENAME)
+
+
+def derive_namespace(env=None, cwd: str | None = None) -> str:
+    """The fallback namespace: project basename plus a hash of its full path.
+
+    The hash avoids collisions between two projects sharing a directory name —
+    but it also means **moving or renaming the project changes the namespace**,
+    which silently orphans everything written under the old one. That is why
+    `aegisdb-init` now pins the derived value into `.aegisdb/config.json`
+    instead of leaving it implied: the same string, but no longer a function of
+    where the directory happens to sit.
+    """
+    root = project_root(env, cwd)
+    base = os.path.basename(root.rstrip("/")) or "default"
+    digest = hashlib.sha256(root.encode()).hexdigest()[:8]
+    return f"{base}-{digest}"
+
+
 def resolve_namespace(env=None, cwd: str | None = None, explicit: str | None = None) -> str:
     """Resolve the project isolation namespace (FR-008, R-008).
 
-    Order: explicit override -> AEGIS_NAMESPACE -> CLAUDE_PROJECT_DIR/cwd basename
-    plus a short stable hash of the full path (avoids collisions between two
-    projects sharing a directory name).
+    Order: explicit override -> AEGIS_NAMESPACE -> the path-derived fallback.
+    `load_config` passes the file's value as `explicit`, so a namespace pinned
+    in `.aegisdb/config.json` beats the fallback and loses to the environment,
+    which is the same precedence every other setting follows.
     """
     env = os.environ if env is None else env
     if explicit:
         return explicit
     if env.get("AEGIS_NAMESPACE"):
         return env["AEGIS_NAMESPACE"]
-    root = env.get("CLAUDE_PROJECT_DIR") or cwd or os.getcwd()
-    root = os.path.abspath(root)
-    base = os.path.basename(root.rstrip("/")) or "default"
-    digest = hashlib.sha256(root.encode()).hexdigest()[:8]
-    return f"{base}-{digest}"
+    return derive_namespace(env, cwd)
 
 
 def load_config(env=None, cwd: str | None = None, overrides: dict | None = None) -> Config:
@@ -236,13 +306,22 @@ def load_config(env=None, cwd: str | None = None, overrides: dict | None = None)
     cfg = Config()
     valid = {f.name for f in fields(Config)}
 
-    # 1) optional JSON config file
-    path = env.get("AEGIS_CONFIG")
-    if path and os.path.isfile(path):
-        with open(path, "r", encoding="utf-8") as fh:
-            for k, v in (json.load(fh) or {}).items():
-                if k in valid:
-                    _apply(cfg, k, v)
+    # 1) JSON config file: AEGIS_CONFIG when set, else the project's
+    #    .aegisdb/config.json. Absent is normal and means "defaults"; present
+    #    but unreadable is an error, because a file someone wrote and the
+    #    integration silently ignored is worse than a complaint.
+    path = config_path(env, cwd)
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                doc = json.load(fh) or {}
+        except (OSError, ValueError) as exc:
+            raise ConfigError(f"cannot read {path}: {exc}") from exc
+        if not isinstance(doc, dict):
+            raise ConfigError(f"{path}: expected a JSON object")
+        for k, v in doc.items():
+            if k in valid:
+                _apply(cfg, k, v)
 
     # 2) environment variables
     for name, var in _ENV.items():

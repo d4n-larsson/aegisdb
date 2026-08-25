@@ -8,7 +8,11 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from aegis_mcp.init import (build_mcp_config, main, merge_hooks, merge_mcp,
+from aegis_mcp.config import (CONFIG_BASENAME, PROJECT_DIR, derive_namespace,
+                              load_config)
+from aegis_mcp.init import (GITIGNORE_LINE, build_mcp_config,
+                            build_project_config, ensure_gitignore, main,
+                            merge_hooks, merge_mcp, merge_project_config,
                             CAPTURE_CMD, RECALL_CMD)
 
 
@@ -166,3 +170,106 @@ class TestMainWritesFiles(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProjectConfig(unittest.TestCase):
+    def test_auth_token_is_never_written(self):
+        doc = build_project_config(namespace="n", host="h", port=1)
+        self.assertNotIn("auth_token", doc)
+
+    def test_embedding_omitted_when_off(self):
+        doc = build_project_config(namespace="n", host="h", port=1)
+        self.assertEqual(doc, {"namespace": "n", "aegis_host": "h", "aegis_port": 1})
+
+    def test_embedding_written_when_on(self):
+        doc = build_project_config(namespace="n", host="h", port=1,
+                                   embedding_mode="local", embedding_dim=384)
+        self.assertEqual(doc["embedding_mode"], "local")
+        self.assertEqual(doc["embedding_dimensions"], 384)
+
+    def test_merge_preserves_hand_edited_keys(self):
+        out, changed = merge_project_config(
+            {"recall_top_k": 9, "aegis_port": 1},
+            {"namespace": "n", "aegis_host": "h", "aegis_port": 2})
+        self.assertEqual(out["recall_top_k"], 9)   # not ours, left alone
+        self.assertEqual(out["aegis_port"], 2)     # ours, updated
+        self.assertEqual(changed, 3)
+
+    def test_merge_reports_no_change_when_identical(self):
+        entry = {"namespace": "n", "aegis_host": "h", "aegis_port": 1}
+        _, changed = merge_project_config(dict(entry), entry)
+        self.assertEqual(changed, 0)
+
+
+class TestGitignore(unittest.TestCase):
+    def test_skipped_outside_a_checkout(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIn("not a git checkout", ensure_gitignore(d))
+            self.assertFalse(os.path.exists(os.path.join(d, ".gitignore")))
+
+    def test_added_then_idempotent(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, ".git"))
+            self.assertEqual(ensure_gitignore(d), "added")
+            self.assertEqual(ensure_gitignore(d), "already ignored")
+            body = open(os.path.join(d, ".gitignore")).read()
+            self.assertEqual(body.count(GITIGNORE_LINE), 1)
+
+    def test_existing_content_is_preserved_and_newline_safe(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, ".git"))
+            with open(os.path.join(d, ".gitignore"), "w") as fh:
+                fh.write("build/")  # no trailing newline
+            ensure_gitignore(d)
+            lines = open(os.path.join(d, ".gitignore")).read().splitlines()
+            self.assertIn("build/", lines)
+            self.assertIn(GITIGNORE_LINE, lines)
+
+
+class TestMainPinsNamespace(unittest.TestCase):
+    """Pinning is a no-op for an existing project and a fix for a future one:
+    the value written is exactly what the path already derived."""
+
+    def _run(self, d, *extra):
+        argv = ["--dir", d, "--host", "h", "--port", "9470", "--yes",
+                "--no-verify", *extra]
+        self.assertEqual(main(argv), 0)
+        return json.load(open(os.path.join(d, PROJECT_DIR, CONFIG_BASENAME)))
+
+    def test_writes_the_value_the_path_already_derived(self):
+        with tempfile.TemporaryDirectory() as d:
+            doc = self._run(d)
+            self.assertEqual(doc["namespace"], derive_namespace(env={}, cwd=d))
+
+    def test_explicit_namespace_is_used_verbatim(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(self._run(d, "--namespace", "mine")["namespace"],
+                             "mine")
+
+    def test_a_namespaced_token_leaves_it_blank(self):
+        with tempfile.TemporaryDirectory() as d:
+            doc = self._run(d, "--auth-token", "tok")
+            self.assertEqual(doc["namespace"], "")
+            mcp = json.load(open(os.path.join(d, ".mcp.json")))
+            self.assertNotIn("AEGIS_NAMESPACE", mcp["mcpServers"]["memory"]["env"])
+
+    def test_mcp_and_the_file_agree(self):
+        with tempfile.TemporaryDirectory() as d:
+            doc = self._run(d)
+            mcp = json.load(open(os.path.join(d, ".mcp.json")))
+            self.assertEqual(mcp["mcpServers"]["memory"]["env"]["AEGIS_NAMESPACE"],
+                             doc["namespace"])
+
+    def test_a_hook_reading_the_file_gets_what_the_server_got(self):
+        # The point of the whole change: no env, and still the right settings.
+        with tempfile.TemporaryDirectory() as d:
+            doc = self._run(d, "--embedding-mode", "local", "--embedding-dim", "384")
+            cfg = load_config(env={}, cwd=d)
+            self.assertEqual(cfg.namespace, doc["namespace"])
+            self.assertEqual(cfg.embedding_mode, "local")
+            self.assertEqual(cfg.embedding_dimensions, 384)
+
+    def test_print_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(main(["--dir", d, "--yes", "--no-verify", "--print"]), 0)
+            self.assertFalse(os.path.exists(os.path.join(d, PROJECT_DIR)))

@@ -1,11 +1,16 @@
 """Unit tests for config precedence and namespace resolution (T012)."""
+import json
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from aegis_mcp.config import load_config, resolve_namespace, Config
+from aegis_mcp.config import (CONFIG_BASENAME, PROJECT_DIR, Config, ConfigError,
+                              config_path, derive_namespace, load_config,
+                              resolve_namespace)
 
 
 class TestConfig(unittest.TestCase):
@@ -106,3 +111,89 @@ class TestCoercionCoverage(unittest.TestCase):
         for off in ("false", "0", "no", "off"):
             c = load_config(env={"AEGIS_EXTRACT_TRIPLES": off})
             self.assertFalse(c.extract_triples, f"{off!r} should disable")
+
+
+class TestProjectDirDiscovery(unittest.TestCase):
+    """`.aegisdb/config.json` is found without anyone naming it.
+
+    This is what makes one setting reach both callers: the MCP server gets env
+    from `.mcp.json`, a Claude Code hook entry has no env field at all, and a
+    file on disk is read by whoever runs next.
+    """
+
+    def _project(self, doc=None):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        if doc is not None:
+            os.makedirs(os.path.join(d, PROJECT_DIR), exist_ok=True)
+            with open(os.path.join(d, PROJECT_DIR, CONFIG_BASENAME), "w",
+                      encoding="utf-8") as fh:
+                json.dump(doc, fh)
+        return d
+
+    def test_default_path_is_project_local(self):
+        d = self._project()
+        self.assertEqual(config_path(env={}, cwd=d),
+                         os.path.join(d, PROJECT_DIR, CONFIG_BASENAME))
+
+    def test_claude_project_dir_wins_over_cwd(self):
+        d, other = self._project(), self._project()
+        self.assertEqual(config_path(env={"CLAUDE_PROJECT_DIR": d}, cwd=other),
+                         os.path.join(d, PROJECT_DIR, CONFIG_BASENAME))
+
+    def test_explicit_aegis_config_still_wins(self):
+        d = self._project({"aegis_port": 1})
+        elsewhere = os.path.join(self._project(), "other.json")
+        self.assertEqual(config_path(env={"AEGIS_CONFIG": elsewhere}, cwd=d),
+                         elsewhere)
+
+    def test_absent_file_is_not_an_error(self):
+        cfg = load_config(env={}, cwd=self._project())
+        self.assertEqual(cfg.aegis_port, 9470)
+
+    def test_discovered_file_is_loaded(self):
+        d = self._project({"aegis_port": 9999, "recall_top_k": 2})
+        cfg = load_config(env={}, cwd=d)
+        self.assertEqual(cfg.aegis_port, 9999)
+        self.assertEqual(cfg.recall_top_k, 2)
+
+    def test_env_still_beats_the_file(self):
+        d = self._project({"aegis_port": 9999})
+        cfg = load_config(env={"AEGIS_PORT": "7000"}, cwd=d)
+        self.assertEqual(cfg.aegis_port, 7000)
+
+    def test_values_are_coerced_from_json_strings(self):
+        d = self._project({"aegis_port": "9999", "recall_enabled": "false"})
+        cfg = load_config(env={}, cwd=d)
+        self.assertEqual(cfg.aegis_port, 9999)
+        self.assertIsInstance(cfg.aegis_port, int)
+        self.assertFalse(cfg.recall_enabled)
+
+    def test_unknown_keys_are_ignored(self):
+        d = self._project({"not_a_field": 1, "aegis_port": 9999})
+        self.assertEqual(load_config(env={}, cwd=d).aegis_port, 9999)
+
+    def test_pinned_namespace_beats_the_path_fallback(self):
+        d = self._project({"namespace": "pinned"})
+        self.assertEqual(load_config(env={}, cwd=d).namespace, "pinned")
+        self.assertNotEqual(derive_namespace(env={}, cwd=d), "pinned")
+
+    def test_env_namespace_still_beats_the_pinned_one(self):
+        d = self._project({"namespace": "pinned"})
+        cfg = load_config(env={"AEGIS_NAMESPACE": "from-env"}, cwd=d)
+        self.assertEqual(cfg.namespace, "from-env")
+
+    def test_a_broken_file_is_an_error_not_a_silent_default(self):
+        d = self._project()
+        os.makedirs(os.path.join(d, PROJECT_DIR), exist_ok=True)
+        with open(os.path.join(d, PROJECT_DIR, CONFIG_BASENAME), "w",
+                  encoding="utf-8") as fh:
+            fh.write("{not json")
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(env={}, cwd=d)
+        self.assertIn(CONFIG_BASENAME, str(ctx.exception))
+
+    def test_a_json_scalar_is_refused(self):
+        d = self._project(["a", "list"])
+        with self.assertRaises(ConfigError):
+            load_config(env={}, cwd=d)

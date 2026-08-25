@@ -1,6 +1,7 @@
 """`aegisdb-init` — scaffold the Claude Code memory integration for a project.
 
-Writes ``.mcp.json`` (the MCP server registration) and merges the recall +
+Writes ``.mcp.json`` (the MCP server registration) and ``.aegisdb/config.json``
+(the settings both the server and the hooks read), and merges the recall +
 capture hooks into ``.claude/settings.json``, so a user — or the ``/aegis-setup``
 skill — can wire up AegisDB without hand-editing JSON.
 
@@ -20,6 +21,10 @@ import json
 import os
 import shlex
 import sys
+
+from . import config as config_mod
+from . import seed as seed_mod
+from .config import derive_namespace
 
 RECALL_CMD = "uvx --from aegisdb-mcp aegisdb-recall-hook"
 CAPTURE_CMD = "uvx --from aegisdb-mcp aegisdb-capture-hook"
@@ -51,6 +56,82 @@ def build_mcp_config(*, host: str, port: int, namespace: str = "",
         env["AEGIS_EMBEDDING_MODE"] = embedding_mode
         env["AEGIS_EMBEDDING_DIMENSIONS"] = str(embedding_dim)
     return {"command": "uvx", "args": ["aegisdb-mcp"], "env": env}
+
+
+def build_project_config(*, namespace: str, host: str, port: int,
+                         embedding_mode: str = "none",
+                         embedding_dim: int = 1024) -> dict:
+    """The `.aegisdb/config.json` document.
+
+    Deliberately a *subset* of `.mcp.json`'s env, not a copy of it. What goes
+    here is what both callers need — and the hooks are the ones that could not
+    get it before, since a Claude Code hook entry carries no env. The auth
+    token is the one thing left out on purpose: this file is meant to be
+    committed, and a bearer token in git is a different kind of mistake than a
+    wrong port.
+    """
+    doc = {"namespace": namespace, "aegis_host": host, "aegis_port": port}
+    if embedding_mode and embedding_mode != "none":
+        doc["embedding_mode"] = embedding_mode
+        doc["embedding_dimensions"] = embedding_dim
+    return doc
+
+
+def merge_project_config(existing: dict, entry: dict) -> tuple[dict, int]:
+    """Merge our keys into an existing `.aegisdb/config.json`, preserving the
+    rest. Returns (doc, changed-key-count) so an unchanged file is a no-op the
+    caller can report as such — re-running init is expected, not exceptional."""
+    out = dict(existing or {})
+    changed = sum(1 for k, v in entry.items() if out.get(k) != v)
+    out.update(entry)
+    return out, changed
+
+
+def ensure_predicates(proj: str) -> str:
+    """Put the starter vocabulary in `.aegisdb/predicates.json` if there is none.
+
+    A project should not have to invent a vocabulary before it can see typed
+    facts work — that was the gap `predicates.example.json` was written to close,
+    and copying it in is what makes it reachable from a `uvx` run with no clone.
+
+    **Never overwritten.** Once the file exists it is the project's contract:
+    predicates already asserted against it are in records that cannot be
+    rewritten, so replacing it could invalidate facts already in the store.
+    """
+    path = os.path.join(proj, config_mod.PROJECT_DIR, "predicates.json")
+    if os.path.isfile(path):
+        return "kept (yours)"
+    with open(seed_mod.DEFAULT_PREDICATES, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    _write_json(path, doc)
+    return f"written ({len(doc)} starter predicates)"
+
+
+GITIGNORE_LINE = f"{config_mod.PROJECT_DIR}/{config_mod.LOCAL_SUBDIR}/"
+GITIGNORE_NOTE = "# aegisdb: machine state (local server data, overrides)"
+
+
+def ensure_gitignore(proj: str) -> str:
+    """Ignore `.aegisdb/local/`, and only that.
+
+    The directory holds both reviewed inputs and machine state, so the boundary
+    has to be a path rather than a convention people remember — everything
+    beside `local/` is meant to be committed. Touches nothing outside a git
+    checkout, and never rewrites an existing line.
+    """
+    if not os.path.isdir(os.path.join(proj, ".git")):
+        return "skipped (not a git checkout)"
+    path = os.path.join(proj, ".gitignore")
+    body = ""
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as fh:
+            body = fh.read()
+        if any(ln.strip() == GITIGNORE_LINE for ln in body.splitlines()):
+            return "already ignored"
+    prefix = "" if (not body or body.endswith("\n")) else "\n"
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(f"{prefix}\n{GITIGNORE_NOTE}\n{GITIGNORE_LINE}\n")
+    return "added"
 
 
 def merge_mcp(existing: dict, entry: dict, *, force: bool) -> tuple[dict, str]:
@@ -210,16 +291,36 @@ def main(argv: list[str] | None = None) -> int:
     proj = os.path.abspath(args.dir)
     mcp_path = os.path.join(proj, ".mcp.json")
     settings_path = os.path.join(proj, ".claude", "settings.json")
+    cfg_path = os.path.join(proj, config_mod.PROJECT_DIR, config_mod.CONFIG_BASENAME)
 
-    entry = build_mcp_config(host=host, port=port, namespace=namespace,
+    # Pin the namespace rather than leaving it implied. Blank previously meant
+    # "derive it from the path at read time", which is the same string until
+    # someone renames or moves the directory and every memory written under the
+    # old name becomes unreachable. Writing the value it *already* resolves to
+    # is therefore a no-op for an existing project and a fix for a future one.
+    #
+    # A namespaced auth token is the exception: the server pins agent_id from
+    # the token and ignores what the client asks for, so a namespace written
+    # beside one would be a value nothing reads.
+    pinned = namespace or ("" if auth_token else derive_namespace(cwd=proj))
+
+    entry = build_mcp_config(host=host, port=port, namespace=pinned,
                              auth_token=auth_token, embedding_mode=embedding_mode,
                              embedding_dim=embedding_dim)
     mcp_doc, mcp_status = merge_mcp(_load_json(mcp_path), entry, force=args.force)
     settings_doc, hooks_added = merge_hooks(_load_json(settings_path), capture_env)
+    cfg_doc, cfg_changed = merge_project_config(
+        _load_json(cfg_path),
+        build_project_config(namespace=pinned, host=host, port=port,
+                             embedding_mode=embedding_mode,
+                             embedding_dim=embedding_dim))
 
     if args.dry:
         print("# .mcp.json\n" + json.dumps(mcp_doc, indent=2))
+        print(f"\n# {config_mod.PROJECT_DIR}/{config_mod.CONFIG_BASENAME}\n"
+              + json.dumps(cfg_doc, indent=2))
         print("\n# .claude/settings.json\n" + json.dumps(settings_doc, indent=2))
+        print(f"\n# .gitignore\n{GITIGNORE_NOTE}\n{GITIGNORE_LINE}")
         return 0
 
     if mcp_status == "conflict":
@@ -229,11 +330,22 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     _write_json(mcp_path, mcp_doc)
+    _write_json(cfg_path, cfg_doc)
     _write_json(settings_path, settings_doc)
+    pred_status = ensure_predicates(proj)
+    os.makedirs(os.path.join(proj, config_mod.PROJECT_DIR, "facts"), exist_ok=True)
+    ignore_status = ensure_gitignore(proj)
 
     print(f"✓ .mcp.json         ({mcp_status}) — memory server → {host}:{port}")
+    print(f"✓ {config_mod.PROJECT_DIR}/{config_mod.CONFIG_BASENAME}  "
+          f"({'unchanged' if cfg_changed == 0 else 'written'})"
+          + (f" — namespace `{pinned}`" if pinned else
+             " — namespace comes from the auth token"))
+    print(f"✓ {config_mod.PROJECT_DIR}/predicates.json  ({pred_status})")
     print(f"✓ .claude/settings.json — {hooks_added} hook(s) added/updated"
           f"{' (already present)' if hooks_added == 0 else ''}")
+    print(f"• .gitignore: {config_mod.PROJECT_DIR}/{config_mod.LOCAL_SUBDIR}/ "
+          f"({ignore_status}) — commit the rest of {config_mod.PROJECT_DIR}/")
     if embedding_mode == "voyage":
         print("• voyage embeddings: ensure VOYAGE_API_KEY is set in your environment "
               "(not written to .mcp.json).")
@@ -244,6 +356,10 @@ def main(argv: list[str] | None = None) -> int:
             key = "ANTHROPIC_API_KEY" if extract_mode == "anthropic" else "OPENAI_API_KEY"
             print(f"  ensure {key} is set in the environment the hook runs in "
                   "(not written to settings.json).")
+    print(f"• typed facts: start the server with --predicate-registry "
+          f"<path>/{config_mod.PROJECT_DIR}/predicates.json (it reads the file, "
+          f"not this config), then drop corpora in "
+          f"{config_mod.PROJECT_DIR}/facts/ and run `aegisdb-seed`.")
     if not args.no_verify:
         print(f"• server ping: {_verify(host, port)}")
     print("\nDone. Restart Claude Code in this project to pick up the memory "
