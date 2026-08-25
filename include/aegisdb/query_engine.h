@@ -46,6 +46,16 @@ typedef struct {
      * assertion of a record it absorbs. */
     int has_fact;
     const Fact *fact;
+    /* Replace the record's vectors. Present-but-empty clears them: a
+     * caller that rewrites `data` it cannot re-embed can say the old vector no
+     * longer describes the record, rather than leaving one that ranks it by
+     * text it no longer holds. Absent leaves the vectors alone — an update of
+     * tags or confidence must not have to re-send an embedding to keep one.
+     * `embedding` is borrowed for the call; qe_update copies what it keeps. */
+    int has_embedding;
+    const float *embedding;
+    size_t embedding_dim;
+    size_t vec_count;
 } UpdatePatch;
 /* Update a semantic record. When `ns` is non-NULL the record must belong to that
  * namespace, or it reads back as NOT_FOUND (no cross-tenant leak). */

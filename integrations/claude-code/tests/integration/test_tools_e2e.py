@@ -67,6 +67,41 @@ class TestToolsE2E(unittest.TestCase):
             self.assertTrue(u["ok"])
             self.assertEqual(u["memory"]["text"], "sky is azure")
 
+    def test_a_revised_memory_is_recalled_by_its_new_meaning(self):
+        """The whole point of sending an embedding on update. `update` used to
+        take no vector at all, so a revised memory kept the one it was saved
+        with and semantic recall went on ranking it by prose it no longer held.
+
+        `decoy` never changes and is the fixed reference: with one record in the
+        index every query returns it, which would prove nothing about ranking."""
+        with AegisServer() as srv:
+            t = self._tools(srv)
+            mem_id = t.save("the deploy script runs on friday",
+                            semantic=True)["id"]
+            decoy = t.save("friday deploys need approval", semantic=True)["id"]
+
+            def top(query):
+                res = t.search(query=query, top_k=2)
+                return [m["id"] for m in res["memories"]]
+
+            self.assertEqual(top("the deploy script runs on friday")[0], mem_id)
+
+            u = t.update(mem_id, text="the backup job runs on sunday")
+            self.assertTrue(u["ok"], u)
+            # Found by what it says now...
+            self.assertEqual(top("the backup job runs on sunday")[0], mem_id)
+            # ...and no longer the best answer to what it used to say.
+            self.assertEqual(top("the deploy script runs on friday")[0], decoy)
+
+    def test_an_update_that_changes_no_text_keeps_the_vector(self):
+        """A confidence edit must not cost a memory its place in recall."""
+        with AegisServer() as srv:
+            t = self._tools(srv)
+            mem_id = t.save("the cache warms at boot", semantic=True)["id"]
+            self.assertTrue(t.update(mem_id, confidence=0.4)["ok"])
+            res = t.search(query="the cache warms at boot", top_k=1)
+            self.assertEqual([m["id"] for m in res["memories"]], [mem_id])
+
     def test_relate(self):
         with AegisServer() as srv:
             t = self._tools(srv)

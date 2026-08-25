@@ -381,13 +381,44 @@ Update a semantic memory record.
   "id": 42,
   "data": "User prefers espresso",
   "confidence": 0.9,
-  "tags": ["user", "preference"]
+  "tags": ["user", "preference"],
+  "embedding": [0.1, 0.2, "…"]
 }
 ```
 
+Every field is optional but `id`; an omitted one is left alone.
+
+**Vectors.** `embedding` (single) and `embeddings` (multi-vector) take exactly
+the shapes `insert` takes, and **replace** the record's vectors — the semantic
+index moves with them, so the record is found where its new vector puts it
+rather than where its old one did.
+
+Three cases, and the difference between the last two matters:
+
+| | |
+|---|---|
+| a non-empty vector | replaces what the record had, and re-indexes |
+| `null` or `[]` | **clears** the vectors: the record leaves vector search and stays readable by id, tags and lexical query |
+| omitted | leaves the vectors untouched |
+
+Rewriting `data` without supplying a vector therefore keeps the old one, which
+will rank the record by text it no longer holds. Send a new vector when you can
+re-embed, and `null` when you cannot — an update of tags or confidence needs
+neither, which is why omission cannot mean "clear".
+
+Sending both keys is allowed and clears only if *both* say so: `{"embedding":
+null, "embeddings": [[…]]}` sets the multi-vector rather than discarding it.
+
+Unlike `insert`, which reads any non-array value as "no vector", a value here
+that is neither an array nor `null` is **refused**. The shapes are the same but
+the stakes are not: on an insert a malformed vector costs a new record its index
+entry, while on an update it would delete the vector the record already has.
+
 **Response**: Same shape as `insert` with updated `record`.
 
-**Errors**: `IMMUTABLE` if `id` refers to episodic record.
+**Errors**: `IMMUTABLE` if `id` refers to episodic record. `INVALID_REQUEST` if
+a supplied vector is not the server's embedding dimension — refused rather than
+stored, as on `insert`.
 
 ---
 

@@ -205,6 +205,75 @@ static int build_fact(const cJSON *req, MemoryRecord *in, aegis_status_t *err) {
     return -1;
 }
 
+/* Vectors: `embeddings` (array of equal-length arrays) for multi-vector, or
+ * `embedding` (a single array) for the common one-vector case (#85). All
+ * vectors must equal the server's embedding dimension.
+ *
+ * Shared by `insert` and `update` so the two cannot drift on what a vector is
+ * allowed to look like. On success *out_vecs owns a fresh buffer (NULL when the
+ * request carries no vector at all, which both callers read as "none"); on
+ * failure it is NULL and nothing was allocated.
+ */
+static int parse_vectors(AegisDB *db, const cJSON *req, float **out_vecs,
+                         size_t *out_dim, size_t *out_count,
+                         aegis_status_t *err) {
+    *out_vecs = NULL;
+    *out_dim = 0;
+    *out_count = 0;
+    size_t dim = db->config.embedding_dimensions;
+    const cJSON *embs = cJSON_GetObjectItemCaseSensitive(req, "embeddings");
+    if (cJSON_IsArray(embs)) {
+        size_t vc = (size_t)cJSON_GetArraySize(embs);
+        if (vc == 0 || vc > MAX_VECS_PER_RECORD) {
+            *err = AEGIS_ERR_INVALID_REQUEST;
+            return -1;
+        }
+        float *buf = malloc(vc * dim * sizeof(float));
+        if (!buf) {
+            *err = AEGIS_ERR_INTERNAL;
+            return -1;
+        }
+        size_t w = 0;
+        for (size_t v = 0; v < vc; v++) {
+            const cJSON *vec = cJSON_GetArrayItem(embs, (int)v);
+            if (!cJSON_IsArray(vec) || (size_t)cJSON_GetArraySize(vec) != dim) {
+                free(buf);
+                *err = AEGIS_ERR_INVALID_REQUEST;
+                return -1;
+            }
+            for (size_t i = 0; i < dim; i++) {
+                const cJSON *n = cJSON_GetArrayItem(vec, (int)i);
+                if (!cJSON_IsNumber(n)) {
+                    free(buf);
+                    *err = AEGIS_ERR_INVALID_REQUEST;
+                    return -1;
+                }
+                buf[w++] = (float)n->valuedouble;
+            }
+        }
+        *out_vecs = buf;
+        *out_dim = dim;
+        *out_count = vc;
+        *err = AEGIS_OK;
+        return 0;
+    }
+    float *emb = NULL;
+    size_t en = 0;
+    if (jr_float_array(req, "embedding", &emb, &en, dim) != 0) {
+        *err = AEGIS_ERR_INVALID_REQUEST;
+        return -1;
+    }
+    if (en) {
+        *out_vecs = emb;
+        *out_dim = en;
+        *out_count = 1;
+    } else {
+        free(emb);
+    }
+    *err = AEGIS_OK;
+    return 0;
+}
+
 static int build_input_record(AegisDB *db, const cJSON *req, MemoryRecord *in,
                               aegis_status_t *err) {
     record_init(in);
@@ -267,55 +336,9 @@ static int build_input_record(AegisDB *db, const cJSON *req, MemoryRecord *in,
         return -1;
     }
     free(tags);
-    /* Vectors: `embeddings` (array of equal-length arrays) for multi-vector, or
-     * `embedding` (a single array) for the common one-vector case (#85). All
-     * vectors must equal the server's embedding dimension. */
-    size_t dim = db->config.embedding_dimensions;
-    const cJSON *embs = cJSON_GetObjectItemCaseSensitive(req, "embeddings");
-    if (cJSON_IsArray(embs)) {
-        size_t vc = (size_t)cJSON_GetArraySize(embs);
-        if (vc == 0 || vc > MAX_VECS_PER_RECORD) {
-            *err = AEGIS_ERR_INVALID_REQUEST;
-            return -1;
-        }
-        float *buf = malloc(vc * dim * sizeof(float));
-        if (!buf) {
-            *err = AEGIS_ERR_INTERNAL;
-            return -1;
-        }
-        size_t w = 0;
-        for (size_t v = 0; v < vc; v++) {
-            const cJSON *vec = cJSON_GetArrayItem(embs, (int)v);
-            if (!cJSON_IsArray(vec) || (size_t)cJSON_GetArraySize(vec) != dim) {
-                free(buf);
-                *err = AEGIS_ERR_INVALID_REQUEST;
-                return -1;
-            }
-            for (size_t i = 0; i < dim; i++) {
-                const cJSON *n = cJSON_GetArrayItem(vec, (int)i);
-                if (!cJSON_IsNumber(n)) {
-                    free(buf);
-                    *err = AEGIS_ERR_INVALID_REQUEST;
-                    return -1;
-                }
-                buf[w++] = (float)n->valuedouble;
-            }
-        }
-        in->embedding = buf;
-        in->embedding_dim = dim;
-        in->vec_count = vc;
-    } else {
-        float *emb = NULL;
-        size_t en = 0;
-        if (jr_float_array(req, "embedding", &emb, &en, dim) != 0) {
-            *err = AEGIS_ERR_INVALID_REQUEST;
-            return -1;
-        }
-        if (en) {
-            in->embedding = emb;
-            in->embedding_dim = en;
-            in->vec_count = 1;
-        }
+    if (parse_vectors(db, req, &in->embedding, &in->embedding_dim,
+                      &in->vec_count, err) != 0) {
+        return -1;
     }
     *err = AEGIS_OK;
     return 0;
@@ -1008,8 +1031,53 @@ static cJSON *handle_update(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
         patch.tags = tags;
         patch.tag_count = tn;
     }
+    /* Vectors, in exactly the shapes `insert` accepts. Editing `data` without
+     * this used to leave the record's old vector in place, so semantic search
+     * went on ranking it by text it no longer held — and a client that *did*
+     * send a new one had it silently dropped, which is the same silent no-op on
+     * a correctly spelled field that `fact` above refuses outright.
+     *
+     * `null` (or an empty array) clears the vectors instead of setting them:
+     * a caller rewriting prose it cannot re-embed can say so, rather than
+     * choosing between a stale vector and not editing at all.
+     *
+     * Which makes the shape of the value load-bearing here in a way it is not
+     * on `insert`, and it is checked rather than inferred. `jr_float_array`
+     * reads any non-array as "no vector", which on an insert costs a record its
+     * index entry and on an update would *delete* the vector it has — so a
+     * stringified vector or a stray scalar, the ordinary client bug, would
+     * quietly drop the record out of semantic search and report success. A
+     * value that is neither an array nor null is refused. */
+    const cJSON *jemb = cJSON_GetObjectItemCaseSensitive(req, "embedding");
+    const cJSON *jembs = cJSON_GetObjectItemCaseSensitive(req, "embeddings");
+    float *vecs = NULL;
+    if (jemb || jembs) {
+        if ((jemb && !cJSON_IsArray(jemb) && !cJSON_IsNull(jemb)) ||
+            (jembs && !cJSON_IsArray(jembs) && !cJSON_IsNull(jembs))) {
+            free(tags);
+            return json_error_status(AEGIS_ERR_INVALID_REQUEST);
+        }
+        /* Clearing takes *every* supplied key saying so. A request that nulls
+         * one key while passing a real vector in the other is setting that
+         * vector, not clearing: reading it as a clear would discard the vector
+         * the caller sent, which is the failure this whole block exists to
+         * stop. */
+        int has_vec = (cJSON_IsArray(jemb) && cJSON_GetArraySize(jemb) > 0) ||
+                      (cJSON_IsArray(jembs) && cJSON_GetArraySize(jembs) > 0);
+        patch.has_embedding = 1;
+        if (has_vec) {
+            aegis_status_t verr = AEGIS_OK;
+            if (parse_vectors(db, req, &vecs, &patch.embedding_dim,
+                              &patch.vec_count, &verr) != 0) {
+                free(tags);
+                return json_error_status(verr);
+            }
+            patch.embedding = vecs;
+        }
+    }
     MemoryRecord out;
     aegis_status_t st = qe_update(db, id, &patch, ns, &out);
+    free(vecs);
     free(tags);
     if (st != AEGIS_OK) {
         return json_error_status(st);

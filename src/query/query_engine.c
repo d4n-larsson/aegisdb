@@ -472,6 +472,36 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
         cur.confidence = patch->confidence;
     }
 
+    /* Vectors, staged the way the payload is: detached rather than freed, so
+     * the semantic index can be swung only once the append has committed, and
+     * so a failed update leaves the record with the vectors it came in with.
+     * Copied because the patch borrows the caller's buffer while the record
+     * owns what it holds. An empty patch vector clears — the record keeps its
+     * prose and its tags and stops claiming a meaning it no longer has. */
+    float *old_embedding = NULL;
+    size_t old_vec_count = 0;
+    if (patch->has_embedding) {
+        float *nv = NULL;
+        size_t n = patch->vec_count * patch->embedding_dim;
+        if (n) {
+            nv = malloc(n * sizeof(float));
+            if (!nv) {
+                /* `old_data` is already detached from the record by this point
+                 * when the patch carries one, so record_free cannot reach it. */
+                free(old_data);
+                record_free(&cur);
+                pthread_rwlock_unlock(&db->index_lock);
+                return AEGIS_ERR_INTERNAL;
+            }
+            memcpy(nv, patch->embedding, n * sizeof(float));
+        }
+        old_embedding = cur.embedding;
+        old_vec_count = cur.vec_count;
+        cur.embedding = nv;
+        cur.embedding_dim = nv ? patch->embedding_dim : 0;
+        cur.vec_count = nv ? patch->vec_count : 0;
+    }
+
     /* Stage the new tags on the record, but defer the shared tag-index mutation
      * until validate_common + append_and_hash both succeed. The old ordering
      * rewrote the index up front, so a rejected update (e.g. an out-of-range
@@ -488,6 +518,9 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
         if (record_set_tags(&cur, patch->tags, patch->tag_count) != 0) {
             cur.tags = old_tags; /* reattach originals for record_free */
             cur.tag_count = old_tag_count;
+            /* Both already detached above, so record_free walks past them. */
+            free(old_data);
+            free(old_embedding);
             record_free(&cur);
             pthread_rwlock_unlock(&db->index_lock);
             return AEGIS_ERR_INTERNAL;
@@ -525,6 +558,26 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
         lexical_index_remove(db->lex, cur.id, old_data, old_data_len);
         lexical_index_add(db->lex, cur.id, cur.data, cur.data_len);
     }
+    if (st == AEGIS_OK && patch->has_embedding) {
+        /* semantic_index_add replaces a record's prior vectors, so the only
+         * case needing an explicit remove is the one that leaves it with
+         * none. */
+        if (cur.embedding_dim && cur.vec_count) {
+            /* Its failure is worth saying out loud here, unlike on insert. It
+             * drops the record's prior slots before adding the new ones, so a
+             * failure leaves an *existing* record with neither vector while the
+             * log already holds the new one — a silent hole in recall that a
+             * restart repairs, and nothing else reports. */
+            if (semantic_index_add(db->sem, cur.id, cur.embedding,
+                                   cur.vec_count, cur.embedding_dim) != 0) {
+                LOG_ERROR("update: record %llu is out of the semantic index "
+                          "until the next restart (reindex failed)",
+                          (unsigned long long)cur.id);
+            }
+        } else if (old_vec_count) {
+            semantic_index_remove(db->sem, cur.id);
+        }
+    }
     pthread_rwlock_unlock(&db->index_lock);
     if (st == AEGIS_OK && durably_flush(db) != 0) {
         st = AEGIS_ERR_INTERNAL; /* not durable: do not acknowledge the write */
@@ -535,6 +588,7 @@ aegis_status_t qe_update(AegisDB *db, uint64_t id, const UpdatePatch *patch,
     }
     free(old_tags);
     free(old_data);
+    free(old_embedding);
 
     if (st != AEGIS_OK) {
         record_free(&cur);
