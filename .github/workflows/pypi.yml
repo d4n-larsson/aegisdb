@@ -1,21 +1,48 @@
 name: Publish to PyPI
 
-# Builds and publishes the two Python packages on every `v*` tag:
+# Builds and publishes the three Python packages on every `v*` tag:
 #
 #   aegisdb-mcp  (integrations/claude-code) — the Claude Code integration, so
 #                teammates can run it with no clone via `uvx aegisdb-mcp`
 #   aegisdb      (clients/python)           — the client SDK, dependency-free
 #   aegisdb-langgraph (integrations/langgraph) — the LangGraph store adapter
 #
-# Both take their version from the tag, so the server binary, the integration
-# and the client always carry the same one. Uses PyPI Trusted Publishing
-# (OIDC) — no API token.
+# All three take their version from the tag, so the server binary, the
+# integration and the clients always carry the same one. Uses PyPI Trusted
+# Publishing (OIDC) — no API token.
 #
 # One-time setup on PyPI: add a Trusted Publisher for EACH project
-# (`aegisdb-mcp`, `aegisdb`, `aegisdb-langgraph`) with owner=d4n-larsson, repo=aegisdb,
-# workflow=pypi.yml, environment=pypi. Until the `aegisdb` publisher exists,
-# that job fails and the other still publishes — the jobs are independent on
-# purpose, so one missing trusted-publisher entry cannot hold back a release.
+# (`aegisdb-mcp`, `aegisdb`, `aegisdb-langgraph`) with owner=d4n-larsson,
+# repo=aegisdb, workflow=pypi.yml, environment=pypi. A missing entry fails only
+# its own job — the jobs are independent on purpose, so one of them cannot hold
+# back a release.
+#
+# ADDING A PACKAGE — read this before tagging. A name PyPI has never seen needs
+# a **pending** publisher, registered *before* the tag is pushed: Trusted
+# Publishing can create a release but not a project. Without one the first
+# upload fails with
+#
+#     400 Non-user identities cannot create new projects
+#
+# and that is the whole message — it never says "register a pending publisher".
+# Two forms look alike and only one works:
+#
+#   pypi.org/manage/project/<name>/settings/publishing/  — owner, repository,
+#       workflow, environment. No project-name field, because the project you
+#       are inside *is* the project. This is the wrong one for a new package.
+#   pypi.org/manage/account/publishing/  — the same four fields plus "PyPI
+#       Project Name". Under the ACCOUNT sidebar, because the project does not
+#       exist yet. This is the one.
+#
+# The project name must match the built distribution's metadata
+# character-for-character; a typo fails with the identical 400, which reads as
+# though the publisher were still missing. A pending publisher does not reserve
+# the name — it is claimed on first successful upload.
+#
+# Recovering after the fact is cheap: nothing is uploaded on that 400, so the
+# version stays free. Register the pending publisher, then
+# `gh run rerun <run-id> --failed`. (`aegisdb-langgraph` hit exactly this on
+# v0.8.0, and the other two packages published normally in the same run.)
 on:
   push:
     tags: ['v*']
