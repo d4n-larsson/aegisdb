@@ -181,6 +181,17 @@ falls back to ordinary retrieval. This is strictly an addition: no query that
 works today stops working, which is the `--no-lexical-index` discipline the
 ground rules ask for.
 
+**Falling back has to be legible.** Everything above runs on a *model*, so the
+read path needs an extraction backend (`AEGIS_EXTRACT_MODE`) as much as it needs
+a vocabulary — with neither, `AEGIS_ASK_PATTERN` is on in the config and inert at
+runtime. The additive design is what makes that hard to see: a feature that never
+runs and a question the corpus cannot answer both come back `"symbolic": false`,
+and the difference lives in the server's stderr, which belongs to whoever
+launched it rather than whoever is asking. So a read path that is configured and
+cannot run says why *in the result*, as `read_path`, on the questions it would
+otherwise have taken. Strictly additive still: the key is absent when the feature
+is off and when it is working.
+
 **Derivation to English.** `explain.derivation` already carries the rule, the
 depth, the premises and whether each is still live. The model renders that as
 prose: *"because hnsw.c is part of the storage layer, and the neighbour-selection
