@@ -241,6 +241,116 @@ def _prompt(label: str, default: str) -> str:
     return got or default
 
 
+#: What `--start-local` runs. A named container and a named volume, so a second
+#: run adopts the first rather than racing it for the port, and so the data
+#: survives `docker rm`. Kept beside the command the README and the setup skill
+#: print, because three copies of a docker line drift into three behaviours.
+LOCAL_IMAGE = "ghcr.io/d4n-larsson/aegisdb:latest"
+LOCAL_CONTAINER = "aegisdb"
+LOCAL_VOLUME = "aegis-data"
+
+
+def local_server_command(port: int, dim: int) -> list[str]:
+    """The `docker run` for a local server, as an argv (never a shell string)."""
+    return ["docker", "run", "-d", "--name", LOCAL_CONTAINER,
+            "-p", f"{port}:9470", "-v", f"{LOCAL_VOLUME}:/data",
+            "--restart", "unless-stopped", LOCAL_IMAGE,
+            "--data-dir", "/data", "--embedding-dim", str(dim)]
+
+
+def _docker(*args, timeout=60):
+    """Run docker, returning (rc, output). rc 127 = no docker on this machine."""
+    import subprocess
+    try:
+        r = subprocess.run(["docker", *args], capture_output=True, text=True,
+                           timeout=timeout)
+    except FileNotFoundError:
+        return 127, ""
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return 1, str(exc)
+    return r.returncode, (r.stdout or r.stderr or "").strip()
+
+
+def start_local_server(port: int, dim: int, wait_s: float = 30.0):
+    """Bring up a local AegisDB in Docker. Returns (started, message).
+
+    Adopts rather than duplicates: a container already named `aegisdb` is
+    started if stopped and left alone if running. Creating a second one would
+    fail on the port anyway, and that failure reads as "docker is broken"
+    rather than "you already have one".
+
+    Never raises, and never leaves the caller guessing: every path returns a
+    sentence, because the fallback for all of them is the same — print the
+    command and let a person run it.
+    """
+    adopted = False
+    rc, out = _docker("inspect", "-f", "{{.State.Running}}", LOCAL_CONTAINER)
+    if rc == 127:
+        return False, ("docker is not on PATH — start a server yourself:\n  "
+                       + " ".join(local_server_command(port, dim)))
+    if rc == 0 and out == "true":
+        message = f"a container named {LOCAL_CONTAINER} is already running"
+        adopted = True
+    elif rc == 0:
+        rc2, out2 = _docker("start", LOCAL_CONTAINER)
+        if rc2 != 0:
+            return False, f"`docker start {LOCAL_CONTAINER}` failed: {out2}"
+        message = f"started the existing {LOCAL_CONTAINER} container"
+    else:
+        rc2, out2 = _docker(*local_server_command(port, dim)[1:], timeout=300)
+        if rc2 != 0:
+            return False, f"`docker run` failed: {out2}"
+        message = f"started {LOCAL_CONTAINER} on port {port} (dim {dim})"
+
+    # Answering a ping is the only definition of "up" worth acting on: the
+    # container can be running while the server is still opening its data dir.
+    import time
+    from .client import AegisClient, AegisUnavailable
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        try:
+            if AegisClient("127.0.0.1", port).request(
+                    {"operation": "ping"}, read_timeout_ms=1000).get("ok"):
+                return True, message
+        except AegisUnavailable:
+            pass
+        time.sleep(0.5)
+    if adopted:
+        # The likeliest reason by far, and a timeout alone points at the wrong
+        # thing: the container we adopted is somebody's existing AegisDB, mapped
+        # to the port *they* chose rather than the one asked for here.
+        return False, (f"{message}, but nothing answers on port {port} — it is "
+                       f"probably mapped to another one. Check `docker port "
+                       f"{LOCAL_CONTAINER}` and re-run with that --port, or "
+                       f"give the new server a different container name.")
+    return False, (f"{message}, but it did not answer a ping within "
+                   f"{wait_s:.0f}s — check `docker logs {LOCAL_CONTAINER}`")
+
+
+def _local(host: str) -> bool:
+    """Is this a server we could start? Only ever loopback: `--start-local`
+    against a remote host would bind a container here and configure the project
+    to talk to a machine that still has nothing running on it."""
+    return host in ("127.0.0.1", "localhost", "::1", "0.0.0.0")
+
+
+def _answers(host: str, port: int) -> bool:
+    return _server_dimension(host, port) is not None or _pings(host, port)
+
+
+def _pings(host: str, port: int) -> bool:
+    """Reachability alone, for a server too old to report a dimension."""
+    try:
+        from .client import AegisClient, AegisUnavailable
+    except ImportError:  # pragma: no cover
+        return False
+    try:
+        return bool(AegisClient(host, port).request(
+            {"operation": "ping"}, read_timeout_ms=1500).get("ok"))
+    except AegisUnavailable:
+        return False
+
+
 def _server_dimension(host: str, port: int):
     """The server's `--embedding-dim`, or None if it cannot say.
 
@@ -311,6 +421,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="print what would be written; change nothing")
     ap.add_argument("--no-verify", action="store_true",
                     help="skip the post-write connectivity check")
+    ap.add_argument("--start-local", action="store_true",
+                    help="if nothing answers on the local port, start AegisDB "
+                         "in Docker (named container `aegisdb`, volume "
+                         "`aegis-data`) and wait for it")
     args = ap.parse_args(argv)
 
     interactive = not args.yes and sys.stdin.isatty()
@@ -325,6 +439,32 @@ def main(argv: list[str] | None = None) -> int:
                        "AegisDB port", "9470"))
     embedding_mode = resolve(args.embedding_mode,
                              "Embedding mode (none/local/voyage)", "none")
+    # Getting a server is the step this scaffolder used to leave on the floor:
+    # it wrote a perfect client config, pinged, and said "unreachable — start
+    # the server, then re-run". Offered here rather than after the write,
+    # because a server that exists by the next line is one the dimension can be
+    # read from.
+    #
+    # Only ever on an explicit flag or an explicit yes: starting a container is
+    # a side effect on the machine, and `--yes` means "don't ask me about the
+    # config", not "do things to my Docker daemon".
+    if args.start_local and not _local(host):
+        # Refused rather than obeyed: it would bind a container on *this*
+        # machine and then configure the project to talk to another one, which
+        # is two wrong things that look like one working setup.
+        print(f"! --start-local ignored: {host} is not this machine",
+              file=sys.stderr)
+    elif _local(host) and not args.dry and not _answers(host, port):
+        start = args.start_local or (
+            interactive and _prompt(
+                f"Nothing is listening on {host}:{port}. Start AegisDB in "
+                f"Docker? (y/N)", "n").strip().lower().startswith("y"))
+        if start:
+            dim_for_start = args.embedding_dim or (
+                384 if embedding_mode == "local" else 1024)
+            ok, message = start_local_server(port, dim_for_start)
+            print(("✓ " if ok else "! ") + message)
+
     # The dimension is the server's to state, not the user's to remember: every
     # vector has to match `--embedding-dim`, and a number typed here from memory
     # is a number that can be wrong for days — a mismatch does not surface until

@@ -39,18 +39,17 @@ If they passed arguments, treat `$0` as the host and `$1` as the port.
 4. **Namespace** — only if they are *not* using a namespaced auth token. Default:
    derive from the project directory.
 
-## 2. (Only if they need a local server) offer to start one
+## 2. (Only if they need a local server) let the scaffolder start one
 
-If they chose "local, and I need one", offer to run:
+If they chose "local, and I need one", don't hand them a `docker run` — add
+`--start-local` to the commands in step 3. It starts a named container
+(`aegisdb`) on a named volume (`aegis-data`), waits until the server actually
+answers, adopts an existing `aegisdb` container instead of racing it, and then
+reads the embedding dimension back from it so nobody has to type one.
 
-```bash
-docker run -d --name aegisdb -p 9470:9470 -v aegis-data:/data \
-  ghcr.io/d4n-larsson/aegisdb:latest --data-dir /data --embedding-dim 1024
-```
-
-Match `--embedding-dim` to their embedding choice (1024 for voyage/none, 384 for
-local). If they don't have Docker or want auth/encryption/quotas, point them to
-the [team server tutorial](https://github.com/d4n-larsson/aegisdb/blob/main/docs/tutorial-team-server.md)
+If they don't have Docker, it says so and prints the command to run by hand. If
+they want auth/encryption/quotas, point them at the
+[team server tutorial](https://github.com/d4n-larsson/aegisdb/blob/main/docs/tutorial-team-server.md)
 and continue — `aegisdb-init` can still write the config now.
 
 ## 3. Preview, then scaffold
@@ -59,27 +58,42 @@ First show what will be written (this changes nothing):
 
 ```bash
 uvx --from aegisdb-mcp aegisdb-init --print \
-  --host <HOST> --port <PORT> --embedding-mode <MODE> --embedding-dim <DIM> \
+  --host <HOST> --port <PORT> --embedding-mode <MODE> \
   [--extract-mode <EXTRACT>] [--namespace <NS>] [--auth-token <TOKEN>]
 ```
 
 If it looks right, run it for real (drop `--print`, add `--yes`; add `--force`
-only if it reports an existing, different `memory` server you want to replace):
+only if it reports an existing, different `memory` server you want to replace,
+and `--start-local` if they need a server started):
 
 ```bash
-uvx --from aegisdb-mcp aegisdb-init --yes \
-  --host <HOST> --port <PORT> --embedding-mode <MODE> --embedding-dim <DIM> \
+uvx --from aegisdb-mcp aegisdb-init --yes [--start-local] \
+  --host <HOST> --port <PORT> --embedding-mode <MODE> \
   [--extract-mode <EXTRACT>] [--namespace <NS>] [--auth-token <TOKEN>]
 ```
 
-Omit `--extract-mode`/`--namespace`/`--auth-token` when they're blank/`none`. The
-command prints a connectivity check at the end.
+Omit `--extract-mode`/`--namespace`/`--auth-token` when they're blank/`none`.
 
-## 4. Wrap up
+**Do not pass `--embedding-dim`** unless they insist on a specific number: the
+scaffolder asks the server for its own and writes that, which is the only value
+that can be right. A number typed from memory is one that can disagree with
+`--embedding-dim` on the server, and a mismatch does not surface until the first
+embedded write is refused.
 
-Report what was written and tell the user to **restart Claude Code in this
-project** so it picks up the `memory` MCP server and the recall/capture hooks. If
-the connectivity check failed, help them get the server running, then re-run.
+## 4. Check it, then wrap up
+
+Run the doctor — it checks every link, not just connectivity, and each failure
+names its fix:
+
+```bash
+uvx --from aegisdb-mcp aegisdb-doctor
+```
+
+Then report what was written and tell the user to **restart Claude Code in this
+project** so it picks up the `memory` MCP server and the recall/capture hooks.
+(The hook and MCP-entry checks read files on disk, so they pass before the
+restart; the restart is what makes Claude Code *use* them.) `/aegis-doctor`
+re-runs this any time recall looks wrong.
 
 Optionally point them at the **memory inspector** — a local browser UI to
 browse/search what's been captured, see why each hit ranked, and edit or delete

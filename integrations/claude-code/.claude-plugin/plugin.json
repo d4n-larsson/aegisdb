@@ -1,0 +1,12 @@
+{
+  "name": "aegisdb-memory",
+  "version": "0.8.3",
+  "description": "Persistent long-term memory for Claude Code, backed by AegisDB. Installs the guided setup skill and a wiring check; `/aegis-setup` scaffolds this project's memory server and hooks.",
+  "author": {
+    "name": "Dan Larsson"
+  },
+  "homepage": "https://github.com/d4n-larsson/aegisdb",
+  "repository": "https://github.com/d4n-larsson/aegisdb",
+  "license": "MIT",
+  "keywords": ["memory", "recall", "mcp", "aegisdb", "context"]
+}
