@@ -4,5 +4,5 @@
   "aegis_port": 9470,
   "embedding_mode": "none",
   "extract_mode": "claude-code",
-  "extract_supersede": false
+  "extract_supersede": true
 }
