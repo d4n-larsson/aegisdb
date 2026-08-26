@@ -55,3 +55,6 @@ dist/
 .pytest_cache/
 # Local backup tarballs (docker compose --profile backup)
 backups/
+
+# aegisdb: machine state (local server data, overrides)
+.aegisdb/local/
