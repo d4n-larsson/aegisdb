@@ -21,8 +21,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from aegis_mcp.config import CONFIG_BASENAME, PROJECT_DIR, Config  # noqa: E402
 from aegis_mcp.doctor import (FAIL, OK, SKIP, WARN, Report,  # noqa: E402
                               check_config, check_dimension, check_embeddings,
-                              check_hook_runs, check_hooks, check_read_path,
-                              check_registration, main)
+                              check_hook_runs, check_hooks, check_mcp_runs,
+                              check_read_path, check_registration,
+                              check_round_trip, main)
 from aegis_mcp.extract import ExtractionProvider  # noqa: E402
 
 
@@ -342,3 +343,133 @@ class TestHookActuallyRuns(unittest.TestCase):
                         timeout_s=20)
         with open(out) as fh:
             self.assertEqual(fh.read(), root)
+
+
+class _Store:
+    """A MemoryTools stand-in that records what the doctor did to it."""
+
+    def __init__(self, config=None, find=True):
+        self.config = config or Config()
+        self.saved, self.deleted = [], []
+        self._find = find
+
+    def save(self, text, tags=None, importance=0.5):
+        self.saved.append(text)
+        return {"ok": True, "id": 7}
+
+    def search(self, **kw):
+        return {"ok": True, "memories": [{"id": 7}] if self._find else []}
+
+    def delete(self, mem_id):
+        self.deleted.append(mem_id)
+        return {"ok": True}
+
+
+class TestRoundTripGoesThroughTheHook(unittest.TestCase):
+    """A hook is contracted to exit 0 whatever happens, so its exit code shows
+    only that the command started. This is what shows it *worked*: a probe
+    token planted in a memory has to come back out of the hook's stdout."""
+
+    def _run(self, cmd, store=None):
+        store = store or _Store()
+        rep = Report()
+        check_round_trip(rep, store, True, cmd, tempfile.mkdtemp())
+        return rep, store
+
+    def test_a_hook_that_recalls_the_probe_passes(self):
+        # Echo whatever prompt came in: the token is in it, so it comes back.
+        rep, store = self._run("cat")
+        self.assertEqual(status(rep, "round trip"), OK)
+        self.assertIn("through the hook", detail(rep, "round trip"))
+
+    def test_a_hook_that_exits_cleanly_and_recalls_nothing_fails(self):
+        """The failure the exit code cannot see, and the one a session lives
+        with: green wiring, empty context, every turn."""
+        rep, _ = self._run("true")
+        self.assertEqual(status(rep, "round trip"), FAIL)
+        self.assertIn("injects nothing", detail(rep, "round trip"))
+
+    def test_the_probe_record_is_always_removed(self):
+        """Including when the hook leg fails — a diagnostic that leaves debris
+        behind on every failed run is its own slow problem."""
+        for cmd in ("cat", "true"):
+            _, store = self._run(cmd)
+            self.assertEqual(store.deleted, [7])
+
+    def test_the_probe_token_is_unique_per_run(self):
+        """Two runs must not match each other's leftovers."""
+        _, a = self._run("cat")
+        _, b = self._run("cat")
+        self.assertNotEqual(a.saved, b.saved)
+
+    def test_no_hook_is_a_warning_not_a_pass(self):
+        rep, _ = self._run(None)
+        self.assertEqual(status(rep, "round trip"), WARN)
+        self.assertIn("nothing proves a session would",
+                      detail(rep, "round trip"))
+
+    def test_recall_switched_off_is_not_reported_as_broken(self):
+        rep, _ = self._run("true", _Store(Config(recall_enabled=False)))
+        self.assertEqual(status(rep, "round trip"), WARN)
+
+    def test_a_write_that_never_lands_fails_before_the_hook(self):
+        rep, _ = self._run("cat", _Store(find=False))
+        self.assertEqual(status(rep, "round trip"), FAIL)
+        self.assertIn("namespace", detail(rep, "round trip"))
+
+
+class TestMcpServerActuallyStarts(unittest.TestCase):
+    """Claude Code reports a server that fails to start as simply absent: no
+    tools, no reason. A handshake is the smallest proof there is one."""
+
+    def _run(self, entry):
+        root = project(**{".mcp.json": {"mcpServers": {"memory": entry}}}) \
+            if entry is not None else project()
+        rep = Report()
+        check_mcp_runs(rep, root, timeout_s=30)
+        return rep
+
+    def test_a_server_that_answers_passes(self):
+        reply = ('{"jsonrpc":"2.0","id":1,"result":{"serverInfo":'
+                 '{"name":"memory"},"capabilities":{}}}')
+        self.assertEqual(
+            status(self._run({"command": "sh",
+                              "args": ["-c", f"cat >/dev/null; echo '{reply}'"]}),
+                   "mcp runs"), OK)
+
+    def test_a_command_that_does_not_exist_fails(self):
+        rep = self._run({"command": "definitely-not-installed-xyz"})
+        self.assertEqual(status(rep, "mcp runs"), FAIL)
+
+    def test_a_silent_launcher_says_the_tools_would_be_missing(self):
+        rep = self._run({"command": "sh", "args": ["-c", "exit 1"]})
+        self.assertEqual(status(rep, "mcp runs"), FAIL)
+        said = detail(rep, "mcp runs")
+        self.assertIn("no memory tools", said)
+        self.assertIn("printed nothing", said)
+
+    def test_no_entry_skips(self):
+        self.assertEqual(status(self._run(None), "mcp runs"), SKIP)
+
+
+class TestTheDoctorKnowsEveryWiringInitWrites(unittest.TestCase):
+    """A drift guard, because this pair has already drifted once: the doctor
+    recognised only the console script, so a path-run project was told its
+    hooks were missing — and following that advice added a duplicate."""
+
+    def test_every_launcher_form_is_recognised(self):
+        from aegis_mcp.init import LAUNCHERS, merge_hooks
+        for launcher in LAUNCHERS:
+            settings, _ = merge_hooks({}, None, launcher)
+            rep = Report()
+            check_hooks(rep, project(**{".claude/settings.json": settings}))
+            self.assertEqual(status(rep, "hooks"), OK,
+                             f"the {launcher} wiring reads as unwired")
+
+    def test_the_recall_command_comes_back_for_every_form(self):
+        from aegis_mcp.init import LAUNCHERS, merge_hooks
+        for launcher in LAUNCHERS:
+            settings, _ = merge_hooks({}, None, launcher)
+            cmd = check_hooks(Report(),
+                              project(**{".claude/settings.json": settings}))
+            self.assertEqual(cmd, LAUNCHERS[launcher]["recall"])

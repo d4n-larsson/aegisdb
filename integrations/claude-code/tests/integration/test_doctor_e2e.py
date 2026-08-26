@@ -26,6 +26,16 @@ from aegis_mcp.doctor import main  # noqa: E402
 # documented forms, and it is the one that can actually run here. A fixture
 # wiring `uvx` describes a project whose hooks do not work on a machine without
 # it — which the `hook runs` check correctly fails, as CI demonstrated.
+#: A server that answers one handshake and nothing else. Deliberately not the
+#: real MCP server: that needs the `mcp` SDK, which is optional here (only the
+#: server entry point requires it), so a fixture using it would make this test
+#: about what is installed rather than about what the doctor reports. The
+#: check's own behaviour against a real and a broken server is unit-tested.
+MCP_HELLO = ('{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"memory"},'
+             '"capabilities":{}}}')
+MCP_STUB = {"command": "sh", "args": ["-c", f"cat >/dev/null; echo '{MCP_HELLO}'"],
+            "env": {}}
+
 RECALL = f'python3 "{os.path.join(PKG_ROOT, "hooks", "recall_hook.py")}"'
 CAPTURE = f'python3 "{os.path.join(PKG_ROOT, "hooks", "capture_hook.py")}"' 
 
@@ -42,7 +52,7 @@ class TestDoctorE2E(unittest.TestCase):
         with open(os.path.join(d, PROJECT_DIR, CONFIG_BASENAME), "w") as fh:
             json.dump(cfg, fh)
         with open(os.path.join(d, ".mcp.json"), "w") as fh:
-            json.dump({"mcpServers": {"memory": {"command": "uvx"}}}, fh)
+            json.dump({"mcpServers": {"memory": MCP_STUB}}, fh)
         os.makedirs(os.path.join(d, ".claude"))
         with open(os.path.join(d, ".claude", "settings.json"), "w") as fh:
             json.dump({"hooks": {
@@ -74,6 +84,23 @@ class TestDoctorE2E(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertEqual(self._status(doc, "hooks"), "ok")       # wired…
             self.assertEqual(self._status(doc, "hook runs"), "fail")  # …not working
+
+    def test_the_round_trip_proves_the_hook_and_not_just_the_library(self):
+        """The whole point of routing it through the hook: a project whose hook
+        starts, exits 0 and injects nothing is what a session actually lives
+        with, and every other check passes on it."""
+        with AegisServer() as srv:
+            d = self._project(srv)
+            with open(os.path.join(d, ".claude", "settings.json"), "w") as fh:
+                json.dump({"hooks": {
+                    "UserPromptSubmit": [{"hooks": [
+                        {"command": "true  # aegisdb-recall-hook"}]}],
+                    "SessionEnd": [{"hooks": [{"command": CAPTURE}]}]}}, fh)
+            code, doc = self._run(d)
+            self.assertEqual(code, 1)
+            self.assertEqual(self._status(doc, "hooks"), "ok")        # named…
+            self.assertEqual(self._status(doc, "hook runs"), "ok")    # …started…
+            self.assertEqual(self._status(doc, "round trip"), "fail")  # …did nothing
 
     def test_a_wired_project_comes_back_clean(self):
         with AegisServer() as srv:

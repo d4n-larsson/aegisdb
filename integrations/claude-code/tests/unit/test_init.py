@@ -124,8 +124,11 @@ class TestMergeHooks(unittest.TestCase):
 class TestMainWritesFiles(unittest.TestCase):
     def test_writes_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as d:
+            # --launcher script: `auto` would spawn `uvx` to prove the
+            # console scripts, which is a package resolve over the network and
+            # not what this test is about.
             argv = ["--dir", d, "--host", "h", "--port", "9470", "--yes",
-                    "--no-verify"]
+                    "--no-verify", "--launcher", "script"]
             self.assertEqual(main(argv), 0)
             mcp = json.load(open(os.path.join(d, ".mcp.json")))
             self.assertEqual(mcp["mcpServers"]["memory"]["env"]["AEGIS_HOST"], "h")
@@ -142,14 +145,14 @@ class TestMainWritesFiles(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             with open(os.path.join(d, ".mcp.json"), "w") as fh:
                 json.dump({"mcpServers": {"memory": {"command": "old"}}}, fh)
-            rc = main(["--dir", d, "--host", "h", "--yes", "--no-verify"])
+            rc = main(["--dir", d, "--host", "h", "--yes", "--launcher", "script", "--no-verify"])
             self.assertEqual(rc, 1)  # refuses to clobber without --force
-            rc = main(["--dir", d, "--host", "h", "--yes", "--no-verify", "--force"])
+            rc = main(["--dir", d, "--host", "h", "--yes", "--launcher", "script", "--no-verify", "--force"])
             self.assertEqual(rc, 0)
 
     def test_extract_mode_writes_prefixed_capture_hook(self):
         with tempfile.TemporaryDirectory() as d:
-            rc = main(["--dir", d, "--host", "h", "--yes", "--no-verify",
+            rc = main(["--dir", d, "--host", "h", "--yes", "--launcher", "script", "--no-verify",
                        "--extract-mode", "claude-code"])
             self.assertEqual(rc, 0)
             settings = json.load(open(os.path.join(d, ".claude", "settings.json")))
@@ -234,7 +237,7 @@ class TestMainPinsNamespace(unittest.TestCase):
 
     def _run(self, d, *extra):
         argv = ["--dir", d, "--host", "h", "--port", "9470", "--yes",
-                "--no-verify", *extra]
+                "--no-verify", "--launcher", "script", *extra]
         self.assertEqual(main(argv), 0)
         return json.load(open(os.path.join(d, PROJECT_DIR, CONFIG_BASENAME)))
 
@@ -302,7 +305,7 @@ class TestExplicitDirBeatsTheSessionProject(unittest.TestCase):
         with tempfile.TemporaryDirectory() as session, \
              tempfile.TemporaryDirectory() as other:
             os.environ["CLAUDE_PROJECT_DIR"] = session
-            main(["--dir", other, "--host", "h", "--port", "9470", "--yes",
+            main(["--dir", other, "--host", "h", "--port", "9470", "--yes", "--launcher", "script",
                   "--no-verify"])
             self.assertEqual(self._pinned(other),
                              derive_namespace(env={}, cwd=other))
@@ -313,7 +316,7 @@ class TestExplicitDirBeatsTheSessionProject(unittest.TestCase):
         # A hook-shaped default: run from anywhere, scaffold the project root.
         with tempfile.TemporaryDirectory() as session:
             os.environ["CLAUDE_PROJECT_DIR"] = session
-            main(["--host", "h", "--port", "9470", "--yes", "--no-verify"])
+            main(["--host", "h", "--port", "9470", "--yes", "--launcher", "script", "--no-verify"])
             self.assertTrue(os.path.isfile(
                 os.path.join(session, PROJECT_DIR, CONFIG_BASENAME)))
             self.assertEqual(self._pinned(session),
@@ -333,10 +336,15 @@ class TestOwnedKeysAreRemovable(unittest.TestCase):
 
     def test_init_can_actually_turn_embeddings_off(self):
         with tempfile.TemporaryDirectory() as d:
+            # --launcher script: `auto` would spawn `uvx` to prove the
+            # console scripts, which is a package resolve over the network and
+            # not what this test is about.
             argv = ["--dir", d, "--host", "h", "--port", "9470", "--yes",
-                    "--no-verify"]
-            main(argv + ["--embedding-mode", "local", "--embedding-dim", "384"])
-            main(argv + ["--embedding-mode", "none", "--force"])
+                    "--no-verify", "--launcher", "script"]
+            main(argv + ["--launcher", "script", "--embedding-mode", "local",
+                         "--embedding-dim", "384"])
+            main(argv + ["--launcher", "script", "--embedding-mode", "none",
+                         "--force"])
             cfg = load_config(env={}, cwd=d)
             self.assertEqual(cfg.embedding_mode, "none")
 
@@ -479,13 +487,13 @@ class TestStartLocalGuards(unittest.TestCase):
             old = os.getcwd()
             os.chdir(d)
             try:
-                init_mod.main(argv)
+                init_mod.main(argv + ["--launcher", "script"])
             finally:
                 os.chdir(old)
         return started
 
     def test_yes_alone_never_touches_docker(self):
-        self.assertEqual(self._main(["--yes", "--port", "19555", "--no-verify"]),
+        self.assertEqual(self._main(["--yes", "--launcher", "script", "--port", "19555", "--no-verify"]),
                          [])
 
     def test_dry_run_never_touches_docker(self):
@@ -494,14 +502,14 @@ class TestStartLocalGuards(unittest.TestCase):
 
     def test_start_local_starts_it(self):
         self.assertEqual(
-            len(self._main(["--yes", "--start-local", "--port", "19555",
+            len(self._main(["--yes", "--launcher", "script", "--start-local", "--port", "19555",
                             "--no-verify"])), 1)
 
     def test_a_remote_host_is_refused(self):
         """It would bind a container on this machine and then point the project
         at another one: two wrong things that look like one working setup."""
         self.assertEqual(
-            self._main(["--yes", "--start-local", "--host", "memory.internal",
+            self._main(["--yes", "--launcher", "script", "--start-local", "--host", "memory.internal",
                         "--port", "19555", "--no-verify"]), [])
 
 
@@ -525,7 +533,8 @@ class TestPlaceholderNamespace(unittest.TestCase):
         try:
             with contextlib.redirect_stderr(err), \
                  contextlib.redirect_stdout(io.StringIO()):
-                init_mod.main(argv + ["--yes", "--no-verify", "--port", "19555"])
+                init_mod.main(argv + ["--yes", "--no-verify", "--launcher", "script",
+                                  "--port", "19555"])
         finally:
             os.chdir(old)
         with open(os.path.join(d, PROJECT_DIR, CONFIG_BASENAME)) as fh:
@@ -556,3 +565,79 @@ class TestPlaceholderNamespace(unittest.TestCase):
         self.assertNotIn("literal name", err)
         self.assertTrue(cfg["namespace"])
         self.assertNotIn(cfg["namespace"], ("default", ""))
+
+
+class TestLauncherForms(unittest.TestCase):
+    """Two ways a scaffolded project reaches this package, because one of them
+    can fail where the other works — and its failure is silent, so the wiring
+    looks right while nothing runs."""
+
+    def test_the_module_form_avoids_the_console_shims(self):
+        from aegis_mcp.init import LAUNCHERS, build_mcp_config
+        entry = build_mcp_config(host="h", port=1, launcher="module")
+        self.assertEqual(entry["args"][:4],
+                         ["--from", "aegisdb-mcp", "python", "-m"])
+        for kind in ("recall", "capture"):
+            self.assertIn("python -m aegis_mcp.hooks",
+                          LAUNCHERS["module"][kind])
+            self.assertNotIn("aegisdb-recall-hook", LAUNCHERS["module"][kind])
+
+    def test_switching_launcher_updates_in_place(self):
+        """Not a second hook beside the first: two would recall twice into one
+        turn and capture the same session twice."""
+        script, _ = merge_hooks({}, None, "script")
+        both, changed = merge_hooks(script, None, "module")
+        self.assertEqual(changed, 2)
+        for event in ("UserPromptSubmit", "SessionEnd"):
+            self.assertEqual(len(both["hooks"][event]), 1)
+            self.assertIn("python -m",
+                          both["hooks"][event][0]["hooks"][0]["command"])
+
+    def test_a_hook_we_did_not_write_is_left_alone(self):
+        """The path-run wiring a checkout uses works and was chosen. Adding
+        ours beside it is the duplicate-recall bug; rewriting it is taking a
+        decision that was not ours."""
+        theirs = 'python3 "$CLAUDE_PROJECT_DIR/x/hooks/recall_hook.py"'
+        out, changed = merge_hooks(
+            {"hooks": {"UserPromptSubmit": [{"hooks": [{"command": theirs}]}]}})
+        self.assertEqual(len(out["hooks"]["UserPromptSubmit"]), 1)
+        self.assertEqual(out["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+                         theirs)
+        self.assertEqual(changed, 1)  # the capture hook, which was absent
+
+
+class TestResolveLauncher(unittest.TestCase):
+    """`auto` proves the console scripts before writing them. The probe is
+    stubbed: the real one spawns `uvx` and resolves a package."""
+
+    def _resolve(self, works):
+        from unittest import mock
+        import aegis_mcp.init as init_mod
+        with mock.patch.object(init_mod, "launcher_works",
+                               lambda l, **kw: works.get(l, False)):
+            return init_mod.resolve_launcher("auto")
+
+    def test_the_console_scripts_are_preferred_when_they_work(self):
+        launcher, note = self._resolve({"script": True, "module": True})
+        self.assertEqual(launcher, "script")
+        self.assertEqual(note, "")
+
+    def test_it_falls_back_to_the_module_form_and_says_why(self):
+        launcher, note = self._resolve({"script": False, "module": True})
+        self.assertEqual(launcher, "module")
+        self.assertIn("python -m", note)
+        self.assertIn("--launcher", note)
+
+    def test_neither_working_still_writes_something_usable_later(self):
+        """Refusing to scaffold would leave nothing to fix once `uvx` works;
+        the note says plainly that nothing will run until it does."""
+        launcher, note = self._resolve({})
+        self.assertEqual(launcher, "script")
+        self.assertIn("do nothing", note)
+
+    def test_an_explicit_choice_is_not_probed(self):
+        from unittest import mock
+        import aegis_mcp.init as init_mod
+        with mock.patch.object(init_mod, "launcher_works",
+                               lambda *a, **kw: self.fail("should not probe")):
+            self.assertEqual(init_mod.resolve_launcher("module"), ("module", ""))
