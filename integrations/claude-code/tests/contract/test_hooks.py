@@ -5,9 +5,11 @@ event on stdin and asserting the stdout/exit-code contract in contracts/hooks.md
 """
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -30,6 +32,10 @@ def _server_env(srv, namespace="hook-ns", mode="fake", **extra):
         "AEGIS_HOST": "127.0.0.1", "AEGIS_PORT": str(srv.port),
         "AEGIS_NAMESPACE": namespace, "AEGIS_EMBEDDING_MODE": mode,
         "AEGIS_EMBEDDING_DIMENSIONS": str(srv.dim),
+        # Capture detaches by default, so its exit code means "started". The
+        # assertions below are about what got STORED, which needs the work
+        # finished before the hook returns.
+        "AEGIS_CAPTURE_DETACH": "0",
     }
     env.update({k: str(v) for k, v in extra.items()})
     return env
@@ -136,6 +142,102 @@ class TestCaptureHookContract(unittest.TestCase):
             self.assertEqual(proc.returncode, 0)
         finally:
             os.remove(transcript)
+
+
+# What Claude Code does to a SessionEnd hook that has not finished: it kills the
+# hook's process group ~1.5s in ("failed: Hook cancelled"). Capture takes tens of
+# seconds with `local` embeddings or an extraction backend, so surviving that is
+# the difference between capturing a session and silently capturing nothing.
+_DETACH_DRIVER = """
+import os, sys, time
+sys.path.insert(0, %r)
+from aegis_mcp import hooks
+if hooks._detach():
+    sys.exit(0)          # the hook returns at once, as Claude Code requires
+time.sleep(%s)           # still working when the cancellation lands
+open(%r, "w").write("survived")
+"""
+
+
+class TestCaptureDetach(unittest.TestCase):
+    def _driver(self, marker, sleep_s):
+        return _DETACH_DRIVER % (PKG_ROOT, sleep_s, marker)
+
+    def test_worker_survives_process_group_kill(self):
+        marker = os.path.join(tempfile.mkdtemp(), "marker")
+        env = dict(os.environ)
+        env.pop("AEGIS_CAPTURE_DETACH", None)  # detached is the default
+        proc = subprocess.Popen([sys.executable, "-c", self._driver(marker, 2)],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                env=env, start_new_session=True)
+        pgid = os.getpgid(proc.pid)                 # the group Claude Code kills
+        self.assertEqual(proc.wait(timeout=10), 0)  # returns without waiting
+        self.assertFalse(os.path.exists(marker))    # the work is still running
+        try:
+            os.killpg(pgid, signal.SIGKILL)  # "Hook cancelled"
+        except ProcessLookupError:
+            pass  # nothing left in the hook's group at all: the worker is out
+
+        deadline = time.time() + 15
+        while time.time() < deadline and not os.path.exists(marker):
+            time.sleep(0.1)
+        self.assertTrue(os.path.exists(marker),
+                        "detached capture died with the hook's process group")
+
+    def test_inline_when_disabled_dies_with_the_group(self):
+        """The control: without detaching, the cancellation takes the work with it.
+
+        Which is what shipped, and why nothing was ever captured.
+        """
+        marker = os.path.join(tempfile.mkdtemp(), "marker")
+        env = dict(os.environ)
+        env["AEGIS_CAPTURE_DETACH"] = "0"
+        proc = subprocess.Popen([sys.executable, "-c", self._driver(marker, 5)],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                env=env, start_new_session=True)
+        time.sleep(1.0)
+        self.assertIsNone(proc.poll(), "inline capture should still be working")
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)  # "Hook cancelled"
+        proc.wait(timeout=5)
+        time.sleep(1.0)
+        self.assertFalse(os.path.exists(marker))
+
+
+@unittest.skipUnless(binary_available(), "aegisdb binary not built")
+class TestCaptureHookDetachedE2E(unittest.TestCase):
+    def test_detached_capture_stores_after_the_hook_returns(self):
+        with AegisServer() as srv:
+            transcript = _write_transcript([
+                ("assistant", "We decided to use spaces for indentation going forward."),
+            ])
+            env = _server_env(srv, namespace="cap-detached")
+            env["AEGIS_CAPTURE_DETACH"] = "1"
+            event = {"hook_event_name": "SessionEnd", "cwd": os.getcwd(),
+                     "transcript_path": transcript}
+            proc = _run_hook(CAPTURE_HOOK, event, env)
+            self.assertEqual(proc.returncode, 0)
+            self.assertIn(b"detached", proc.stderr)
+
+            from aegis_mcp.client import AegisClient
+            from aegis_mcp.embeddings import FakeProvider
+            from aegis_mcp.tools import MemoryTools
+            cfg = make_config(srv, namespace="cap-detached")
+            tools = MemoryTools(cfg, AegisClient(cfg.aegis_host, cfg.aegis_port),
+                                FakeProvider(srv.dim))
+            deadline = time.time() + 20
+            found = False
+            while time.time() < deadline and not found:
+                res = tools.search(query="indentation", top_k=5)
+                found = any("spaces" in m["text"].lower()
+                            for m in res.get("memories", []))
+                if not found:
+                    time.sleep(0.2)
+            # The transcript has to outlive the hook: the worker reads it after
+            # the hook returns, so a caller that deletes it on return loses the
+            # capture. Claude Code keeps its transcripts, so this constrains
+            # tests -- and anything else that cleans up eagerly.
+            os.remove(transcript)
+            self.assertTrue(found, "detached worker stored nothing")
 
 
 if __name__ == "__main__":
