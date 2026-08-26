@@ -46,6 +46,7 @@ aegisdb-recall-hook = "aegis_mcp.hooks:recall"
 aegisdb-capture-hook = "aegis_mcp.hooks:capture"
 aegisdb-summarize = "aegis_mcp.summarize:main"
 aegisdb-seed = "aegis_mcp.seed:main"
+aegisdb-doctor = "aegis_mcp.doctor:main"
 
 [tool.setuptools]
 packages = ["aegis_mcp"]

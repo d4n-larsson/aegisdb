@@ -1154,12 +1154,23 @@ Health check. Always exempt from authentication.
 {
   "ok": true,
   "version": "0.1.0",
-  "phase": 4
+  "phase": 4,
+  "embedding_dimensions": 1024
 }
 ```
 
 `version` is the server version; `phase` echoes the server's `--phase` setting
 (default `4`).
+
+`embedding_dimensions` is the server's `--embedding-dim`, and it is here so a
+client can **agree with it rather than be told it**. Every vector a client sends
+has to match, and a client that keeps its own copy of the number keeps a copy
+that can drift — a mismatch then survives setup and first appears as a rejected
+write, long after anyone would connect it to a flag on another machine. Reported
+by `ping` rather than `stats` because the client that most needs it is one being
+configured, which has no token yet; `ping` is exempt from authentication and a
+dimension is not a secret. An older server omits the field, so treat its absence
+as "unknown", never as zero.
 
 ---
 
