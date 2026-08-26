@@ -9,6 +9,7 @@ configured namespace (FR-008), and never raises — backend failures become
 """
 from __future__ import annotations
 
+import re
 import sys
 
 from .client import AegisClient, AegisUnavailable
@@ -91,6 +92,133 @@ def _suppress_near_duplicates(scored, threshold):
         kept.append((s, r))
         if vec:
             kept_vecs.append(vec)
+    return kept
+
+
+#: Terms added to one keyword query, at most. A bound rather than a tuning knob:
+#: every added term is another posting list to walk, and past a handful they are
+#: variants of stopwords that match everything and rank nothing.
+_MAX_EXPANDED_TERMS = 16
+
+#: Words too short to inflect usefully. "do", "is", "the" gain nothing from a
+#: plural and cost a posting list each.
+_MIN_EXPAND_LEN = 4
+
+#: Function words: no signal in a keyword index, and nonsense when inflected —
+#: "this" is not the plural of "thi". Used for both jobs, because they are the
+#: same judgement about the same words.
+#:
+#: Short rather than exhaustive on purpose. A long stoplist starts discarding
+#: terms that are content in somebody's corpus, and the ones that actually hurt
+#: are the handful that appear in nearly every sentence.
+_STOPWORDS = frozenset("""
+a an the and or but not for nor so yet of in on at to by with from into onto
+over per via as is are was were be been being am do does did done have has had
+having i me my we us our you your he she it its they them their this that these
+those there here what when where which who whom whose why how all any both each
+few more most other some such only own same than then too very can will just
+should would could about above after before below between during if while
+""".split())
+
+
+
+def _variants(word: str) -> list[str]:
+    """Plausible other spellings of one English word, cheapest rules only.
+
+    Deliberately not a stemmer. A stemmer normalises *both* sides of a match,
+    which needs the index to agree — a server change, and one that would blunt
+    the exact-identifier matching this integration promises. Expanding the
+    query instead leaves the index alone: the original terms keep their weight
+    and the variants can only add.
+    """
+    w = word.lower()
+    if w.endswith("ies") and len(w) > 4:
+        return [w[:-3] + "y"]
+    if w.endswith("ss"):
+        return []  # "access", "class": the s is not a plural
+    if w.endswith("es") and len(w) > 4:
+        return [w[:-2], w[:-1]]
+    if w.endswith("s"):
+        return [w[:-1]]
+    if w.endswith("ing") and len(w) >= 6:
+        return _undouble(w[:-3])
+    if w.endswith("ed") and len(w) >= 5:
+        return _undouble(w[:-2])
+    return [w + "s"]
+
+
+def _undouble(stem: str) -> list[str]:
+    """`run`, `runne` and `runn` for "running" — English drops or doubles the
+    last letter before -ing/-ed, and guessing which costs one extra term."""
+    out = [stem, stem + "e"]
+    if len(stem) > 2 and stem[-1] == stem[-2] and stem[-1].isalpha():
+        out.insert(0, stem[:-1])
+    return out
+
+
+def expand_lexical_query(query: str) -> str:
+    """`query` plus light morphological variants of its words.
+
+    The keyword index matches whole tokens, so with embeddings off — where it is
+    the *only* content-based retrieval — a memory is found only when the prompt
+    happens to reuse its exact words. "how do I deploy this project?" missed
+    "widgetco deploys with make ship" on the plural alone, which is most of why
+    recall felt empty out of the box.
+
+    Safe because the server's keyword search is a disjunction scored by IDF: a
+    variant that matches nothing contributes nothing, and a variant that matches
+    is a hit the caller wanted. Only alphabetic words are touched — a flag, a
+    `file.c:12`, a version, an error code all pass through untouched, which is
+    the property that made the keyword path worth having in the first place.
+    """
+    # Whole whitespace-delimited tokens, so only a plain word is ever inflected.
+    # Splitting on letters instead would take `--tenant-max-records` apart and
+    # add "tenants" and "hnsws" — noise that eats the budget, and a step towards
+    # mangling the identifiers this path exists to match exactly.
+    tokens = [t.strip(".,;:!?\"'()[]{}") for t in query.split()]
+    words = [t for t in tokens if t.isalpha()]
+    seen: set[str] = {t.lower() for t in words}
+    extra: list[str] = []
+    for word in words:
+        if len(word) < _MIN_EXPAND_LEN or word.lower() in _STOPWORDS:
+            continue
+        for variant in _variants(word):
+            if len(variant) >= 3 and variant not in seen:
+                seen.add(variant)
+                extra.append(variant)
+                if len(extra) >= _MAX_EXPANDED_TERMS:
+                    break
+        if len(extra) >= _MAX_EXPANDED_TERMS:
+            break
+    kept = _content_terms(tokens)
+    if not kept:
+        # A question made entirely of function words. Nothing to sharpen, and an
+        # empty query is not a query — send what was asked.
+        return query + (" " + " ".join(extra) if extra else "")
+    return " ".join(kept + extra)
+
+
+def _content_terms(tokens: list[str]) -> list[str]:
+    """The tokens worth searching on, in order.
+
+    Function words are dropped, and that is a precision fix rather than tidying.
+    The keyword index has no stopword list, so *any* question containing "the"
+    matches *any* memory containing "the" — on a small corpus IDF has nothing to
+    push against, and recall injects an unrelated memory with a confident score.
+    Asking about "the kubernetes ingress annotation" returned a note about an
+    API token, on the strength of "the".
+
+    Anything that is not a plain word survives untouched: a flag, a `file.c:12`,
+    a version, an error code. Those are the terms most worth matching exactly.
+    """
+    kept = []
+    for token in tokens:
+        if not token:
+            continue
+        if not token.isalpha():
+            kept.append(token)  # identifiers, numbers, paths: never dropped
+        elif len(token) >= 3 and token.lower() not in _STOPWORDS:
+            kept.append(token)
     return kept
 
 
@@ -241,7 +369,10 @@ class MemoryTools:
         semantic = bool(query) and usable
         want_lexical = bool(lexical and query)
         if want_lexical:
-            payload["query"] = query
+            # Expanded only on the keyword-*only* path. With a vector alongside,
+            # the semantic side already spans the morphology and the extra terms
+            # would just tilt the fusion.
+            payload["query"] = query if semantic else expand_lexical_query(query)
         if semantic:
             query_embedding = self.provider.embed_query(query)
             payload["embedding"] = query_embedding

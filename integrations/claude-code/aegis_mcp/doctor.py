@@ -155,8 +155,10 @@ def check_embeddings(rep: Report, cfg):
     """The provider itself: configured is not the same as usable."""
     if cfg.embedding_mode == "none":
         rep.add("embeddings", WARN,
-                "mode is `none` — recall is tags and time only, no meaning",
-                "set embedding_mode to `voyage` or `local` for semantic recall")
+                "mode is `none` — recall matches keywords, not meaning: a "
+                "question finds a memory only when they share a word",
+                "set embedding_mode to `voyage` or `local` so a question can "
+                "reach a memory that says the same thing differently")
         return
     from .embeddings import make_provider
     provider = make_provider(cfg)
