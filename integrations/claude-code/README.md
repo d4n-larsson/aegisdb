@@ -98,7 +98,8 @@ From a zero state to working memory in six steps. Run these from your project ro
 
 ### 1. Start AegisDB
 
-Pick an embedding dimension and use it everywhere (see the dimension note below).
+Pick an embedding dimension **here** and let the client read it from the server
+rather than repeating it (see the dimension note below).
 
 ```bash
 ./build/aegisdb --data-dir ./data --port 9470 --embedding-dim 1024
@@ -219,7 +220,37 @@ From a checkout, run the scripts by path instead:
 
 ### 6. Confirm it works
 
-Start Claude Code in the project, then:
+**Check the wiring first, in one command:**
+
+```bash
+uvx --from aegisdb-mcp aegisdb-doctor
+```
+
+It walks every link between the project and its memory — which config file is in
+force and the namespace it resolves to, whether the server answers, whether your
+embedding dimension agrees with the server's, whether the provider is actually
+usable, whether `.mcp.json` and both hooks are wired, whether the read path can
+run — and finishes with a real `save → search → delete` round trip. Each failure
+names the fix; it exits non-zero, so a pre-commit hook or CI step can run it, and
+`--json` emits the same findings for a script. `--no-write` skips the round trip.
+
+This exists because almost every way this integration breaks is **silent**. A
+dimension that disagrees with the server refuses every embedded write. A hook
+missing from `settings.json` recalls nothing and says nothing. `AEGIS_ASK_PATTERN`
+without an extraction backend answers every question by ordinary search. None of
+those raise, and each leaves the setup looking finished.
+
+```text
+✓ config      /repo/.aegisdb/config.json (discovered)
+✓ namespace   my-project-6a9dbcb9
+✓ server      127.0.0.1:9470 v0.8.4 phase 4
+✗ dimension   client 384 ≠ server 1024 — every embedded write is refused
+              → set embedding_dimensions to 1024, or restart the server with --embedding-dim 384
+✓ mcp entry   `memory` registered in .mcp.json
+✓ hooks       recall + capture wired in .claude/settings.json
+```
+
+**Then try it for real.** Start Claude Code in the project, then:
 
 1. Run `/mcp` — the `memory` server should be listed `connected`, exposing
    `memory_save`, `memory_search`, `memory_get`, `memory_update`, `memory_relate`.
@@ -229,7 +260,8 @@ Start Claude Code in the project, then:
    hook injects the memory (or the agent calls `memory_search`) and answers from it.
 
 If `/mcp` shows the server but tools error, AegisDB is unreachable — check it is
-running on the configured host/port; the agent stays usable either way.
+running on the configured host/port (`aegisdb-doctor` says which, and whether it
+answers); the agent stays usable either way.
 
 > Tools surface to the model as `mcp__memory__memory_save`, etc. The reference
 > sections below cover every configuration option and the exact tool/hook contracts.
@@ -449,7 +481,7 @@ its `fact`.
 | `AEGIS_AUTH_TOKEN` | _(none)_ | bearer token sent with every request; required when the server enforces auth. A namespaced token also defines the tenant |
 | `AEGIS_EMBEDDING_MODE` | `voyage` if key present, else `none` | `voyage` \| `local` \| `none` \| `fake` |
 | `AEGIS_EMBEDDING_MODEL` | `voyage-3-large` | provider model id (Voyage mode) |
-| `AEGIS_EMBEDDING_DIMENSIONS` | `1024` | **must match the server's `--embedding-dim`** |
+| `AEGIS_EMBEDDING_DIMENSIONS` | *(the server's)* | **must match the server's `--embedding-dim`** — which is why you should not normally set it by hand: `ping` reports the server's own, so `aegisdb-init` reads it from there and `aegisdb-doctor` checks the two still agree. A number typed from memory is a number that can be wrong for days, since a mismatch first surfaces as a refused write. Falls back to `1024` (`384` for `local`) only when the server cannot be reached or is too old to say |
 | `AEGIS_RECALL_ENABLED` | `true` | toggle automatic recall |
 | `AEGIS_RECALL_TIME_BUDGET_MS` | `800` | hard ceiling for recall |
 | `AEGIS_RECALL_TOP_K` | `5` | max memories injected per turn |

@@ -241,6 +241,26 @@ def _prompt(label: str, default: str) -> str:
     return got or default
 
 
+def _server_dimension(host: str, port: int):
+    """The server's `--embedding-dim`, or None if it cannot say.
+
+    None covers three cases that need no distinguishing here — no server yet, an
+    older build whose `ping` omits the field, or an unparseable answer — because
+    all three mean the same thing to the caller: fall back to asking.
+    """
+    try:
+        from .client import AegisClient, AegisUnavailable
+    except ImportError:  # pragma: no cover
+        return None
+    try:
+        resp = AegisClient(host, port).request({"operation": "ping"},
+                                               read_timeout_ms=1500)
+    except AegisUnavailable:
+        return None
+    dim = resp.get("embedding_dimensions")
+    return dim if isinstance(dim, int) and dim > 0 else None
+
+
 def _verify(host: str, port: int) -> str:
     """Best-effort connectivity check; never fatal."""
     try:
@@ -305,9 +325,22 @@ def main(argv: list[str] | None = None) -> int:
                        "AegisDB port", "9470"))
     embedding_mode = resolve(args.embedding_mode,
                              "Embedding mode (none/local/voyage)", "none")
-    default_dim = "384" if embedding_mode == "local" else "1024"
+    # The dimension is the server's to state, not the user's to remember: every
+    # vector has to match `--embedding-dim`, and a number typed here from memory
+    # is a number that can be wrong for days — a mismatch does not surface until
+    # the first embedded write is refused. Ask the server; fall back to the
+    # per-mode guess only when it cannot answer (older build, or not up yet).
+    server_dim = _server_dimension(host, port)
+    default_dim = str(server_dim or (384 if embedding_mode == "local" else 1024))
     embedding_dim = int(resolve(None if args.embedding_dim is None else str(args.embedding_dim),
-                                "Embedding dimension", default_dim))
+                                "Embedding dimension"
+                                + (" (from the server)" if server_dim else ""),
+                                default_dim))
+    if server_dim and embedding_dim != server_dim:
+        print(f"! embedding dimension {embedding_dim} does not match the "
+              f"server's {server_dim} — every embedded write will be refused. "
+              f"Writing it anyway; `aegisdb-doctor` will keep saying so.",
+              file=sys.stderr)
     # Namespace/token: only prompt in interactive mode; blank is valid.
     namespace = args.namespace if args.namespace is not None else (
         _prompt("Namespace (blank = derive from a namespaced token)", "") if interactive else "")

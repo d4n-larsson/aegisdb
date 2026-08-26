@@ -364,6 +364,16 @@ static cJSON *handle_ping(AegisDB *db, const cJSON *req, const AuthCtx *ctx) {
     cJSON *o = json_ok();
     cJSON_AddStringToObject(o, "version", AEGIS_VERSION_STRING);
     cJSON_AddNumberToObject(o, "phase", db->config.enabled_phase);
+    /* The dimension a client has to agree with, said by the side that decides
+     * it. Without this a client is told the number by a human and cannot check
+     * it: a mismatch survives setup and first appears as a rejected write, long
+     * after the moment anyone would connect it to `--embedding-dim`. Reported
+     * from `ping` rather than `stats` because the client that most needs it is
+     * one being configured, which has no token yet — and a dimension is not a
+     * secret. Same reasoning as `predicates`: ask the server rather than keep a
+     * second copy of what it enforces. */
+    cJSON_AddNumberToObject(o, "embedding_dimensions",
+                            (double)db->config.embedding_dimensions);
     return o;
 }
 

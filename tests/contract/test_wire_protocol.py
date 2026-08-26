@@ -122,6 +122,11 @@ def test_full_phase(binary, port):
         check(isinstance(r.get("version"), str) and r.get("version"),
               "ping reports version")
         check("phase" in r, "ping reports phase")
+        # The dimension a client has to agree with, from the side that sets it:
+        # without this a client is told the number by a human and cannot check
+        # it, and a mismatch surfaces as a rejected write long after setup.
+        check(r.get("embedding_dimensions") == 384,
+              "ping reports the server's embedding dimension")
 
         # request_id echo
         r = srv.req({"operation": "ping", "request_id": "abc-123"})

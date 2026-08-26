@@ -79,21 +79,36 @@ class AegisClient:
 def check_startup(client: AegisClient, config) -> dict:
     """Best-effort startup check (T010).
 
-    Returns a dict describing reachability and a dimension warning. AegisDB's
-    ``ping`` does not expose the server's configured embedding dimension, so a
-    true server-vs-client dimension mismatch surfaces as a clear error on the
-    first embedded operation (translated in results.py). Here we validate what
-    we can locally and report reachability without ever raising — an unreachable
-    backend must not prevent the integration from starting (FR-009).
+    Returns a dict describing reachability and any dimension disagreement.
+    Never raises — an unreachable backend must not prevent the integration from
+    starting (FR-009).
+
+    The dimension is now checked against the *server's*, which `ping` reports.
+    It used to be uncheckable here, so a mismatch waited for the first embedded
+    write and arrived as a rejection with nothing pointing at `--embedding-dim`
+    on a machine the user had configured days earlier. An older server omits the
+    field; absent means unknown, and unknown is not a warning.
     """
-    info = {"reachable": False, "version": None, "phase": None, "warnings": []}
+    info = {"reachable": False, "version": None, "phase": None,
+            "server_dimensions": None, "warnings": []}
     try:
         resp = client.ping()
         info["reachable"] = bool(resp.get("ok"))
         info["version"] = resp.get("version")
         info["phase"] = resp.get("phase")
+        dim = resp.get("embedding_dimensions")
+        if isinstance(dim, int) and dim > 0:
+            info["server_dimensions"] = dim
     except AegisUnavailable as exc:
         info["warnings"].append(f"AegisDB unreachable at startup: {exc}")
     if config.embedding_mode != "none" and config.embedding_dimensions <= 0:
         info["warnings"].append("embedding_dimensions must be positive")
+    server_dim = info["server_dimensions"]
+    if (config.embedding_mode != "none" and server_dim
+            and config.embedding_dimensions != server_dim):
+        info["warnings"].append(
+            f"embedding dimension {config.embedding_dimensions} does not match "
+            f"the server's {server_dim} — every embedded write will be refused; "
+            f"set embedding_dimensions to {server_dim} (or restart the server "
+            f"with --embedding-dim {config.embedding_dimensions})")
     return info
