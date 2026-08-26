@@ -15,15 +15,19 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from harness import AegisServer, binary_available  # noqa: E402
+from harness import PKG_ROOT, AegisServer, binary_available  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from aegis_mcp.client import AegisClient  # noqa: E402
 from aegis_mcp.config import CONFIG_BASENAME, PROJECT_DIR  # noqa: E402
 from aegis_mcp.doctor import main  # noqa: E402
 
-RECALL = "uvx --from aegisdb-mcp aegisdb-recall-hook"
-CAPTURE = "uvx --from aegisdb-mcp aegisdb-capture-hook"
+# The path-run wiring rather than the `uvx` console script: it is one of the two
+# documented forms, and it is the one that can actually run here. A fixture
+# wiring `uvx` describes a project whose hooks do not work on a machine without
+# it — which the `hook runs` check correctly fails, as CI demonstrated.
+RECALL = f'python3 "{os.path.join(PKG_ROOT, "hooks", "recall_hook.py")}"'
+CAPTURE = f'python3 "{os.path.join(PKG_ROOT, "hooks", "capture_hook.py")}"' 
 
 
 @unittest.skipUnless(binary_available(), "aegisdb binary not built")
@@ -54,6 +58,22 @@ class TestDoctorE2E(unittest.TestCase):
 
     def _status(self, doc, name):
         return next(c["status"] for c in doc["checks"] if c["check"] == name)
+
+    def test_a_hook_that_cannot_run_fails_a_wired_project(self):
+        """The gap this closes end to end: `settings.json` names both hooks, so
+        every file-based check passes, and the recall hook does nothing in a
+        session. Before this the report was all green."""
+        with AegisServer() as srv:
+            d = self._project(srv)
+            with open(os.path.join(d, ".claude", "settings.json"), "w") as fh:
+                json.dump({"hooks": {
+                    "UserPromptSubmit": [{"hooks": [
+                        {"command": "sh -c 'exit 1'  # aegisdb-recall-hook"}]}],
+                    "SessionEnd": [{"hooks": [{"command": CAPTURE}]}]}}, fh)
+            code, doc = self._run(d)
+            self.assertEqual(code, 1)
+            self.assertEqual(self._status(doc, "hooks"), "ok")       # wired…
+            self.assertEqual(self._status(doc, "hook runs"), "fail")  # …not working
 
     def test_a_wired_project_comes_back_clean(self):
         with AegisServer() as srv:

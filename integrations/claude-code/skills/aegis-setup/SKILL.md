@@ -37,7 +37,12 @@ If they passed arguments, treat `$0` as the host and `$1` as the port.
      `OPENAI_API_KEY` in the environment the hook runs in (never written to the
      project). Only offer these if they can't use the `claude` CLI.
 4. **Namespace** — only if they are *not* using a namespaced auth token. Default:
-   derive from the project directory.
+   derive from the project directory. If they answer with a placeholder —
+   "default", "derived", "auto", "whatever" — that is a request for the default,
+   so **omit `--namespace` entirely**. Passing the word through pins a real,
+   shared namespace: every project answering that way lands in one memory store,
+   which is the isolation the derived name exists to give them. Pass it only when
+   they name something specific.
 
 ## 2. (Only if they need a local server) let the scaffolder start one
 

@@ -260,8 +260,10 @@ uvx --from aegisdb-mcp aegisdb-doctor
 It walks every link between the project and its memory — which config file is in
 force and the namespace it resolves to, whether the server answers, whether your
 embedding dimension agrees with the server's, whether the provider is actually
-usable, whether `.mcp.json` and both hooks are wired, whether the read path can
-run — and finishes with a real `save → search → delete` round trip. Each failure
+usable, whether `.mcp.json` and both hooks are wired, whether the recall hook
+**actually runs** (wired and working are different things: a hook whose command
+cannot start fails inside Claude Code with no message anywhere), whether the read
+path can run — and finishes with a real `save → search → delete` round trip. Each failure
 names the fix; it exits non-zero, so a pre-commit hook or CI step can run it, and
 `--json` emits the same findings for a script. `--no-write` skips the round trip.
 
