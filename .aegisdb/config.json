@@ -2,6 +2,7 @@
   "namespace": "aegisdb",
   "aegis_host": "127.0.0.1",
   "aegis_port": 9470,
-  "embedding_mode": "local",
-  "embedding_dimensions": 384
+  "embedding_mode": "none",
+  "extract_mode": "claude-code",
+  "extract_supersede": false
 }
