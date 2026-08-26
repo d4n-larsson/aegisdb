@@ -1,6 +1,6 @@
 {
   "name": "aegisdb-memory",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Persistent long-term memory for Claude Code, backed by AegisDB. Installs the guided setup skill and a wiring check; `/aegis-setup` scaffolds this project's memory server and hooks.",
   "author": {
     "name": "Dan Larsson"
