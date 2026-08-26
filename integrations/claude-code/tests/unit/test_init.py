@@ -503,3 +503,56 @@ class TestStartLocalGuards(unittest.TestCase):
         self.assertEqual(
             self._main(["--yes", "--start-local", "--host", "memory.internal",
                         "--port", "19555", "--no-verify"]), [])
+
+
+class TestPlaceholderNamespace(unittest.TestCase):
+    """"default" is a namespace, not a request for one.
+
+    Found by running `/aegis-setup` end to end: answering the namespace question
+    with "default" pinned `namespace: default` into the project config. Every
+    project answering that way shares one memory store — the isolation the
+    derived name exists to provide, lost without a word.
+    """
+
+    def _init(self, argv):
+        import contextlib
+        import io
+        import aegis_mcp.init as init_mod
+        d = tempfile.mkdtemp()
+        err = io.StringIO()
+        old = os.getcwd()
+        os.chdir(d)
+        try:
+            with contextlib.redirect_stderr(err), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                init_mod.main(argv + ["--yes", "--no-verify", "--port", "19555"])
+        finally:
+            os.chdir(old)
+        with open(os.path.join(d, PROJECT_DIR, CONFIG_BASENAME)) as fh:
+            return json.load(fh), err.getvalue()
+
+    def test_a_placeholder_is_warned_about(self):
+        cfg, err = self._init(["--namespace", "default"])
+        self.assertIn("literal name", err)
+        self.assertIn("--namespace", err)
+
+    def test_but_it_is_still_honoured(self):
+        """Warned, not rewritten: a namespace is a deliberate choice, and
+        quietly substituting another would be its own surprise."""
+        cfg, _ = self._init(["--namespace", "default"])
+        self.assertEqual(cfg["namespace"], "default")
+
+    def test_the_warning_names_what_they_probably_wanted(self):
+        _, err = self._init(["--namespace", "Auto"])  # case-insensitive
+        self.assertIn("derives ", err)
+
+    def test_a_real_name_passes_without_noise(self):
+        cfg, err = self._init(["--namespace", "team-search"])
+        self.assertEqual(cfg["namespace"], "team-search")
+        self.assertNotIn("literal name", err)
+
+    def test_omitting_it_derives_and_says_nothing(self):
+        cfg, err = self._init([])
+        self.assertNotIn("literal name", err)
+        self.assertTrue(cfg["namespace"])
+        self.assertNotIn(cfg["namespace"], ("default", ""))

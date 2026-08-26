@@ -26,6 +26,11 @@ from . import config as config_mod
 from . import seed as seed_mod
 from .config import derive_namespace, env_for_explicit_root, project_root
 
+#: Words people type when they mean "use the default", each of which is also a
+#: perfectly valid namespace. Warned about, never rewritten.
+_PLACEHOLDER_NAMESPACES = frozenset(
+    {"default", "derived", "derive", "auto", "none", "blank"})
+
 RECALL_CMD = "uvx --from aegisdb-mcp aegisdb-recall-hook"
 CAPTURE_CMD = "uvx --from aegisdb-mcp aegisdb-capture-hook"
 
@@ -517,6 +522,18 @@ def main(argv: list[str] | None = None) -> int:
     # old name becomes unreachable. Writing the value it *already* resolves to
     # is therefore a no-op for an existing project and a fix for a future one.
     #
+    # "default" is a namespace, not a request for one. Someone answering a
+    # prompt with the word almost always means "give me the default" — and gets
+    # a real, shared namespace instead, which every other project answering the
+    # same way also lands in. That is the isolation the derived name exists to
+    # provide, lost silently. Said rather than corrected: a namespace is a
+    # deliberate choice and quietly rewriting one would be its own surprise.
+    if namespace and namespace.strip().lower() in _PLACEHOLDER_NAMESPACES:
+        print(f"! namespace {namespace!r} is a literal name, not a request for "
+              f"the default — every project that answers this way shares one "
+              f"memory store. For this project's own, re-run without "
+              f"--namespace (it derives {derive_namespace(env=env, cwd=proj)}).",
+              file=sys.stderr)
     # A namespaced auth token is the exception: the server pins agent_id from
     # the token and ignores what the client asks for, so a namespace written
     # beside one would be a value nothing reads.
