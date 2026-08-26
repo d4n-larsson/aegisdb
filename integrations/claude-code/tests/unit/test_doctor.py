@@ -21,8 +21,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from aegis_mcp.config import CONFIG_BASENAME, PROJECT_DIR, Config  # noqa: E402
 from aegis_mcp.doctor import (FAIL, OK, SKIP, WARN, Report,  # noqa: E402
                               check_config, check_dimension, check_embeddings,
-                              check_hooks, check_read_path, check_registration,
-                              main)
+                              check_hook_runs, check_hooks, check_read_path,
+                              check_registration, main)
 from aegis_mcp.extract import ExtractionProvider  # noqa: E402
 
 
@@ -261,3 +261,61 @@ class TestExitCode(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHookActuallyRuns(unittest.TestCase):
+    """Wired and working are different things.
+
+    A hook present in `settings.json` whose command cannot run fails inside
+    Claude Code with no message anywhere — and every file-based check passes,
+    which is how the wiring can look complete while nothing is ever recalled.
+    Only recall is executed: it reads, while capture writes, and a diagnostic
+    must not store a memory to prove that storing works.
+    """
+
+    def run_cmd(self, cmd):
+        rep = Report()
+        check_hook_runs(rep, tempfile.mkdtemp(), cmd, timeout_s=20)
+        return rep
+
+    def test_a_hook_that_runs_passes(self):
+        self.assertEqual(status(self.run_cmd("cat >/dev/null"), "hook runs"), OK)
+
+    def test_a_silent_failure_is_named_as_a_launcher_problem(self):
+        """Exit 1 with nothing on either stream: the command never started, and
+        there is no other evidence to go on."""
+        rep = self.run_cmd("sh -c 'exit 1'")
+        self.assertEqual(status(rep, "hook runs"), FAIL)
+        said = detail(rep, "hook runs")
+        self.assertIn("printed nothing", said)
+        self.assertIn("by hand", said)
+
+    def test_a_loud_failure_relays_what_it_said(self):
+        rep = self.run_cmd("sh -c 'echo ModuleNotFoundError >&2; exit 2'")
+        self.assertEqual(status(rep, "hook runs"), FAIL)
+        self.assertIn("ModuleNotFoundError", detail(rep, "hook runs"))
+        self.assertIn("exits 2", detail(rep, "hook runs"))
+
+    def test_a_hang_is_a_warning_naming_the_turn_budget(self):
+        """A first `uvx` fetch is legitimately slow; a hook that always hangs is
+        eating the time budget of every turn."""
+        rep = Report()
+        check_hook_runs(rep, tempfile.mkdtemp(), "sleep 5", timeout_s=0.5)
+        self.assertEqual(status(rep, "hook runs"), WARN)
+        self.assertIn("time budget", detail(rep, "hook runs"))
+
+    def test_nothing_to_run_skips(self):
+        rep = Report()
+        check_hook_runs(rep, tempfile.mkdtemp(), None)
+        self.assertEqual(status(rep, "hook runs"), SKIP)
+
+    def test_the_hook_is_told_where_the_project_is(self):
+        """It runs outside a session, so `CLAUDE_PROJECT_DIR` has to be set or
+        the hook resolves config against the wrong directory."""
+        root = tempfile.mkdtemp()
+        rep = Report()
+        out = os.path.join(root, "seen")
+        check_hook_runs(rep, root, f"printf '%s' \"$CLAUDE_PROJECT_DIR\" > {out}",
+                        timeout_s=20)
+        with open(out) as fh:
+            self.assertEqual(fh.read(), root)

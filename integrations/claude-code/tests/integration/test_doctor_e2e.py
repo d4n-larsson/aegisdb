@@ -55,6 +55,22 @@ class TestDoctorE2E(unittest.TestCase):
     def _status(self, doc, name):
         return next(c["status"] for c in doc["checks"] if c["check"] == name)
 
+    def test_a_hook_that_cannot_run_fails_a_wired_project(self):
+        """The gap this closes end to end: `settings.json` names both hooks, so
+        every file-based check passes, and the recall hook does nothing in a
+        session. Before this the report was all green."""
+        with AegisServer() as srv:
+            d = self._project(srv)
+            with open(os.path.join(d, ".claude", "settings.json"), "w") as fh:
+                json.dump({"hooks": {
+                    "UserPromptSubmit": [{"hooks": [
+                        {"command": "sh -c 'exit 1'  # aegisdb-recall-hook"}]}],
+                    "SessionEnd": [{"hooks": [{"command": CAPTURE}]}]}}, fh)
+            code, doc = self._run(d)
+            self.assertEqual(code, 1)
+            self.assertEqual(self._status(doc, "hooks"), "ok")       # wired…
+            self.assertEqual(self._status(doc, "hook runs"), "fail")  # …not working
+
     def test_a_wired_project_comes_back_clean(self):
         with AegisServer() as srv:
             code, doc = self._run(self._project(srv))

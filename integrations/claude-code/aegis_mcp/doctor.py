@@ -200,28 +200,93 @@ def check_registration(rep: Report, root):
 
 def check_hooks(rep: Report, root):
     """Recall and capture. A missing hook is the quietest failure here: nothing
-    is injected, nothing is stored, and nothing anywhere says so."""
+    is injected, nothing is stored, and nothing anywhere says so.
+
+    Returns the recall command found, so `check_hook_runs` can try it.
+    """
     path = os.path.join(root, ".claude", "settings.json")
     doc = _load_json(path)
     if doc is False:
         rep.add("hooks", FAIL, f"{path} is not valid JSON")
-        return
+        return None
     hooks = (doc or {}).get("hooks") or {}
-    missing = []
+    missing, found_cmd = [], {}
     for event, needle, label in (("UserPromptSubmit", "aegisdb-recall-hook",
                                   "recall"),
                                  ("SessionEnd", "aegisdb-capture-hook",
                                   "capture")):
-        found = any(needle in (h.get("command") or "")
-                    for group in hooks.get(event, [])
-                    for h in group.get("hooks", []))
-        if not found:
+        cmd = next((h.get("command") for group in hooks.get(event, [])
+                    for h in group.get("hooks", [])
+                    if needle in (h.get("command") or "")), None)
+        if cmd:
+            found_cmd[label] = cmd
+        else:
             missing.append(f"{label} ({event})")
     if missing:
         rep.add("hooks", FAIL, "not wired: " + ", ".join(missing),
                 "run `aegisdb-init`, then restart Claude Code")
-        return
+        return None
     rep.add("hooks", OK, "recall + capture wired in .claude/settings.json")
+    return found_cmd.get("recall")
+
+
+def check_hook_runs(rep: Report, root, recall_cmd, timeout_s: float = 60.0):
+    """Actually run the recall hook, rather than trusting that it is written.
+
+    Wired and working are different things, and nothing else here can tell them
+    apart: a hook whose command cannot run fails inside Claude Code with no
+    message anywhere, and every file-based check above still passes.
+
+    The case that prompted it, seen while testing the scaffolded setup: `uvx
+    --from aegisdb-mcp <script>` exiting 1 with **zero bytes on both streams**,
+    while the same code run as `python -m` worked. The cause was never pinned
+    down — some interaction between that machine's `uv` and its sandbox — which
+    is the point. A launcher that fails without saying anything is exactly what
+    a check like this is for, and diagnosing it needs the symptom reported, not
+    a guess about the cause.
+
+    Only recall is executed. It reads; capture writes, and a diagnostic must not
+    store a memory to prove that storing works — the round trip above already
+    proves the write path. Both hooks are contracted to exit 0 always ("memory
+    is best-effort and must never block a turn"), so a non-zero exit here is
+    unambiguous: the command did not run, rather than ran and found nothing.
+    """
+    if not recall_cmd:
+        rep.add("hook runs", SKIP, "no recall hook to run")
+        return
+    import subprocess
+    event = json.dumps({"prompt": "aegisdb-doctor probe", "cwd": root})
+    env = dict(os.environ, CLAUDE_PROJECT_DIR=root)
+    try:
+        r = subprocess.run(recall_cmd, shell=True, input=event, text=True,
+                           capture_output=True, timeout=timeout_s, cwd=root,
+                           env=env)
+    except subprocess.TimeoutExpired:
+        rep.add("hook runs", WARN,
+                f"the recall hook did not finish in {timeout_s:.0f}s",
+                "a first `uvx` fetch can be slow — re-run; if it persists, the "
+                "hook is eating the turn's time budget")
+        return
+    except OSError as exc:
+        rep.add("hook runs", FAIL, f"could not run the recall hook: {exc}")
+        return
+    if r.returncode == 0:
+        rep.add("hook runs", OK, "the recall hook runs")
+        return
+    said = (r.stderr or r.stdout or "").strip()
+    detail = (f"the recall hook exits {r.returncode} — it is wired, and it does "
+              f"nothing in a session")
+    if not said:
+        # The signature of a launcher that cannot launch. Named explicitly
+        # because there is nothing else to go on: no message, no log, no clue.
+        fix = ("it printed nothing at all — the signature of a launcher that "
+               "cannot start the command rather than a command that ran and "
+               "failed. Run it by hand outside Claude Code; if the launcher is "
+               "`uvx`, try the same entry point as `uvx --from aegisdb-mcp "
+               "python -m aegis_mcp.hooks` to tell the two apart.")
+    else:
+        fix = said if len(said) < 300 else said[:300] + "…"
+    rep.add("hook runs", FAIL, detail, fix)
 
 
 def check_read_path(rep: Report, cfg, tools, online: bool):
@@ -318,7 +383,8 @@ def run(env=None, cwd=None, write=True) -> Report:
     check_dimension(rep, cfg, ping)
     check_embeddings(rep, cfg)
     check_registration(rep, root)
-    check_hooks(rep, root)
+    recall_cmd = check_hooks(rep, root)
+    check_hook_runs(rep, root, recall_cmd)
     check_read_path(rep, cfg, tools, ping is not None)
     if ping is None:
         # Not "--no-write": the server is down, which the report already says
