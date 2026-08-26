@@ -211,13 +211,22 @@ def check_hooks(rep: Report, root):
         return None
     hooks = (doc or {}).get("hooks") or {}
     missing, found_cmd = [], {}
-    for event, needle, label in (("UserPromptSubmit", "aegisdb-recall-hook",
-                                  "recall"),
-                                 ("SessionEnd", "aegisdb-capture-hook",
-                                  "capture")):
+    # Both supported wirings, because both are documented and this used to
+    # recognise only the first: the packaged console script (`uvx --from
+    # aegisdb-mcp aegisdb-recall-hook`) and the path-run script a checkout uses
+    # (`python3 "$CLAUDE_PROJECT_DIR/…/hooks/recall_hook.py"`). Missing the
+    # second reported a correctly wired project as unwired — and sent it to
+    # `aegisdb-init`, which would then add the console-script hook *beside* the
+    # working one, so every turn recalled twice and every session captured twice.
+    for event, needles, label in (
+            ("UserPromptSubmit", ("aegisdb-recall-hook", "recall_hook.py"),
+             "recall"),
+            ("SessionEnd", ("aegisdb-capture-hook", "capture_hook.py"),
+             "capture")):
         cmd = next((h.get("command") for group in hooks.get(event, [])
                     for h in group.get("hooks", [])
-                    if needle in (h.get("command") or "")), None)
+                    if any(n in (h.get("command") or "") for n in needles)),
+                   None)
         if cmd:
             found_cmd[label] = cmd
         else:

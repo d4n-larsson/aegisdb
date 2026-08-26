@@ -174,6 +174,29 @@ class TestWiringChecks(unittest.TestCase):
         self.assertIn("capture", said)
         self.assertNotIn("recall (", said)
 
+    def test_the_path_run_wiring_counts_too(self):
+        """Regression: the doctor recognised only the packaged console script,
+        so a checkout wiring `python3 .../hooks/recall_hook.py` — the other
+        documented form, and the one this repo itself uses — was reported as
+        unwired. Its advice made it worse: `aegisdb-init` would then add the
+        console-script hook beside the working one, and every turn would recall
+        twice."""
+        rep = Report()
+        check_hooks(rep, project(**{".claude/settings.json": {"hooks": {
+            "UserPromptSubmit": [{"hooks": [{"command":
+                'AEGIS_RECALL_TOP_K=3 python3 "$CLAUDE_PROJECT_DIR/x/hooks/recall_hook.py"'}]}],
+            "SessionEnd": [{"hooks": [{"command":
+                'python3 "$CLAUDE_PROJECT_DIR/x/hooks/capture_hook.py"'}]}],
+        }}}))
+        self.assertEqual(status(rep, "hooks"), OK)
+
+    def test_the_recall_command_comes_back_for_the_run_check(self):
+        cmd = check_hooks(Report(), project(**{".claude/settings.json": {"hooks": {
+            "UserPromptSubmit": [{"hooks": [{"command": "python3 recall_hook.py"}]}],
+            "SessionEnd": [{"hooks": [{"command": "python3 capture_hook.py"}]}],
+        }}}))
+        self.assertEqual(cmd, "python3 recall_hook.py")
+
     def test_both_hooks_wired(self):
         rep = Report()
         check_hooks(rep, project(**{".claude/settings.json": {"hooks": {
