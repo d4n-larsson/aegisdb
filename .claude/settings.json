@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "AEGIS_EMBEDDING_MODE=local AEGIS_EMBEDDING_DIMENSIONS=384 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \"$CLAUDE_PROJECT_DIR/.venv/bin/python\" \"$CLAUDE_PROJECT_DIR/integrations/claude-code/hooks/capture_hook.py\""
+            "command": "AEGIS_CAPTURE_LOG=\"$CLAUDE_PROJECT_DIR/.aegisdb/local/capture.log\" AEGIS_EMBEDDING_MODE=local AEGIS_EMBEDDING_DIMENSIONS=384 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \"$CLAUDE_PROJECT_DIR/.venv/bin/python\" \"$CLAUDE_PROJECT_DIR/integrations/claude-code/hooks/capture_hook.py\""
           }
         ]
       }
