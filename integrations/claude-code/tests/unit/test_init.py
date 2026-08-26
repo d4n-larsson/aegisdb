@@ -356,3 +356,150 @@ class TestGitDetection(unittest.TestCase):
             self.assertEqual(ensure_gitignore(sub), "added")
             # written beside the project, so the relative pattern still matches
             self.assertTrue(os.path.isfile(os.path.join(sub, ".gitignore")))
+
+
+class TestLocalServerCommand(unittest.TestCase):
+    """The docker line `--start-local` runs. Pinned because the README and the
+    setup skill print the same one, and three copies drift into three
+    behaviours."""
+
+    def test_it_names_the_container_the_volume_and_the_dimension(self):
+        from aegis_mcp.init import (LOCAL_CONTAINER, LOCAL_VOLUME,
+                                    local_server_command)
+        argv = local_server_command(9999, 384)
+        self.assertEqual(argv[:2], ["docker", "run"])
+        joined = " ".join(argv)
+        self.assertIn(f"--name {LOCAL_CONTAINER}", joined)
+        self.assertIn(f"{LOCAL_VOLUME}:/data", joined)  # survives docker rm
+        self.assertIn("-p 9999:9470", joined)           # host port, fixed target
+        self.assertIn("--embedding-dim 384", joined)
+
+    def test_it_is_an_argv_not_a_shell_string(self):
+        from aegis_mcp.init import local_server_command
+        self.assertTrue(all(isinstance(a, str) for a in
+                            local_server_command(1, 2)))
+        self.assertNotIn(" ", local_server_command(1, 2)[3])
+
+
+class TestStartLocalServer(unittest.TestCase):
+    """Every path returns a sentence, because the fallback for all of them is
+    the same: print the command and let a person run it.
+
+    `_docker` is stubbed throughout — a test that shelled out would find the
+    developer's own `aegisdb` container and, on the stopped-container path,
+    start it.
+    """
+
+    def _run(self, docker_results, pings=True, wait_s=0.2):
+        from unittest import mock
+        import aegis_mcp.init as init_mod
+        calls = []
+
+        def fake_docker(*args, **kw):
+            calls.append(args)
+            return docker_results.pop(0)
+
+        class FakeClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            def request(self, *a, **kw):
+                return {"ok": True} if pings else {"ok": False}
+
+        with mock.patch.object(init_mod, "_docker", fake_docker), \
+             mock.patch("aegis_mcp.client.AegisClient", FakeClient):
+            started, message = init_mod.start_local_server(9470, 1024,
+                                                           wait_s=wait_s)
+        return started, message, calls
+
+    def test_no_docker_hands_back_the_command_to_run_by_hand(self):
+        started, message, _ = self._run([(127, "")])
+        self.assertFalse(started)
+        self.assertIn("not on PATH", message)
+        self.assertIn("docker run", message)
+
+    def test_a_running_container_is_adopted_not_duplicated(self):
+        """A second container would just lose the port race, and the failure
+        would read as "docker is broken" rather than "you already have one"."""
+        started, message, calls = self._run([(0, "true")])
+        self.assertTrue(started)
+        self.assertIn("already running", message)
+        self.assertEqual(len(calls), 1)  # inspect only: nothing was created
+
+    def test_a_stopped_container_is_started(self):
+        started, message, calls = self._run([(0, "false"), (0, "")])
+        self.assertTrue(started)
+        self.assertIn("started the existing", message)
+        self.assertEqual(calls[1][0], "start")
+
+    def test_no_container_creates_one(self):
+        started, message, calls = self._run([(1, "No such object"), (0, "abc")])
+        self.assertTrue(started)
+        self.assertIn("port 9470", message)
+        self.assertEqual(calls[1][0], "run")
+
+    def test_a_failed_run_says_what_docker_said(self):
+        started, message, _ = self._run([(1, "no such object"),
+                                         (125, "port is already allocated")])
+        self.assertFalse(started)
+        self.assertIn("port is already allocated", message)
+
+    def test_a_container_that_never_answers_is_not_reported_as_up(self):
+        """Running is not the same as ready: the process can be open while the
+        server is still opening its data directory."""
+        started, message, _ = self._run([(1, "no such object"), (0, "abc")],
+                                        pings=False)
+        self.assertFalse(started)
+        self.assertIn("did not answer a ping", message)
+        self.assertIn("docker logs", message)
+
+    def test_an_adopted_container_on_another_port_says_so(self):
+        """The common case on a machine that already runs AegisDB: the
+        container we adopted is theirs, mapped to the port they chose. A bare
+        timeout would send them to read logs of a perfectly healthy server."""
+        started, message, _ = self._run([(0, "true")], pings=False)
+        self.assertFalse(started)
+        self.assertIn("docker port", message)
+        self.assertNotIn("docker logs", message)
+
+
+class TestStartLocalGuards(unittest.TestCase):
+    """Starting a container is a side effect on the machine, so it happens only
+    on an explicit flag or an explicit yes — never as a consequence of `--yes`,
+    which means "don't ask me about the config"."""
+
+    def _main(self, argv):
+        from unittest import mock
+        import aegis_mcp.init as init_mod
+        d = tempfile.mkdtemp()
+        started = []
+        with mock.patch.object(init_mod, "start_local_server",
+                               lambda *a, **kw: (started.append(a), (True, "x"))[1]), \
+             mock.patch.object(init_mod, "_answers", lambda *a: False):
+            old = os.getcwd()
+            os.chdir(d)
+            try:
+                init_mod.main(argv)
+            finally:
+                os.chdir(old)
+        return started
+
+    def test_yes_alone_never_touches_docker(self):
+        self.assertEqual(self._main(["--yes", "--port", "19555", "--no-verify"]),
+                         [])
+
+    def test_dry_run_never_touches_docker(self):
+        self.assertEqual(
+            self._main(["--print", "--start-local", "--port", "19555"]), [])
+
+    def test_start_local_starts_it(self):
+        self.assertEqual(
+            len(self._main(["--yes", "--start-local", "--port", "19555",
+                            "--no-verify"])), 1)
+
+    def test_a_remote_host_is_refused(self):
+        """It would bind a container on this machine and then point the project
+        at another one: two wrong things that look like one working setup."""
+        self.assertEqual(
+            self._main(["--yes", "--start-local", "--host", "memory.internal",
+                        "--port", "19555", "--no-verify"]), [])

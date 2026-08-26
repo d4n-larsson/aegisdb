@@ -80,17 +80,48 @@ and only replaces an existing `memory` entry with `--force`). Flags let you driv
 it non-interactively: `--host --port --namespace --auth-token --embedding-mode
 --embedding-dim --yes`. Restart Claude Code afterward.
 
-**Even easier — a guided skill.** Install the `/aegis-setup` skill once and let
-Claude walk you through it (including offering to start a local server):
+**No server yet?** Add `--start-local` and it brings one up in Docker before
+writing anything, then reads the embedding dimension back from it:
 
 ```bash
-# personal (all projects) — or drop it in a project's .claude/skills/ instead
-mkdir -p ~/.claude/skills
-cp -r integrations/claude-code/skills/aegis-setup ~/.claude/skills/
+uvx --from aegisdb-mcp aegisdb-init --start-local
 ```
 
-Then run `/aegis-setup` in Claude Code. The manual, step-by-step path follows for
-anyone who wants to see exactly what those write.
+That runs a named container (`aegisdb`) on a named volume (`aegis-data`), waits
+until it actually answers a ping — a container can be running while the server is
+still opening its data directory — and **adopts** an existing `aegisdb` container
+rather than racing it for the port. Interactively you're offered this whenever
+nothing is listening, so you don't have to know the flag. It never happens on
+`--yes` alone or under `--print`: `--yes` means "don't ask me about the config",
+not "do things to my Docker daemon". A non-local `--host` is refused, since
+starting a container here and pointing the project at another machine is two
+wrong things that look like one working setup.
+
+**Even easier — the plugin.** Installing it needs no clone and no install step,
+and it brings the guided setup with it:
+
+```
+/plugin marketplace add d4n-larsson/aegisdb
+/plugin install aegisdb-memory@aegisdb
+```
+
+Then, in any project you want to give a memory:
+
+```
+/aegis-setup     # a few short questions, then it scaffolds this project
+/aegis-doctor    # check the wiring whenever recall looks wrong
+```
+
+The plugin ships **only** the skill and the check — deliberately. The memory
+server registration and the recall/capture hooks stay per-project, written by
+`aegisdb-init`, because they are a per-project decision (which server, which
+namespace, which embeddings) and because a plugin that registered them globally
+would collide with the ones `aegisdb-init` writes: two `memory` servers, and
+hooks that fire twice — recalling twice into one turn and capturing the same
+session twice. One place owns that wiring.
+
+The manual, step-by-step path follows for anyone who wants to see exactly what
+those write.
 
 ## Integrate with Claude Code (step by step)
 
