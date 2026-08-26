@@ -80,6 +80,15 @@ and only replaces an existing `memory` entry with `--force`). Flags let you driv
 it non-interactively: `--host --port --namespace --auth-token --embedding-mode
 --embedding-dim --yes`. Restart Claude Code afterward.
 
+**It proves the wiring before writing it.** Everything the scaffolder writes —
+the memory server and both hooks — runs through the same launcher, and a
+launcher that cannot exec a console-script shim fails *silently*: no output, no
+log, tools that never appear and hooks that never fire. So `aegisdb-init` asks
+the memory server command to complete one MCP handshake first, and if the
+console scripts cannot, it wires the project through `python -m` instead — the
+same package, one less shim — and says so. Force either form with
+`--launcher script|module`.
+
 **No server yet?** Add `--start-local` and it brings one up in Docker before
 writing anything, then reads the embedding dimension back from it:
 
@@ -260,10 +269,16 @@ uvx --from aegisdb-mcp aegisdb-doctor
 It walks every link between the project and its memory — which config file is in
 force and the namespace it resolves to, whether the server answers, whether your
 embedding dimension agrees with the server's, whether the provider is actually
-usable, whether `.mcp.json` and both hooks are wired, whether the recall hook
-**actually runs** (wired and working are different things: a hook whose command
-cannot start fails inside Claude Code with no message anywhere), whether the read
-path can run — and finishes with a real `save → search → delete` round trip. Each failure
+usable, whether `.mcp.json` and both hooks are wired, whether the registered
+memory server **completes an MCP handshake**, whether the recall hook **starts**,
+whether the read path can run — and then proves the whole chain: it writes a
+memory carrying a unique probe token and requires your *actual recall hook* to
+hand that token back, before deleting it.
+
+That last step is the one that matters. Wired, started and working are three
+different things: a hook is contracted to exit 0 whatever happens, so a launcher
+that starts but resolves nothing leaves every file on disk correct, every check
+green, and no memory ever injected. The probe token is what tells them apart. Each failure
 names the fix; it exits non-zero, so a pre-commit hook or CI step can run it, and
 `--json` emits the same findings for a script. `--no-write` skips the round trip.
 

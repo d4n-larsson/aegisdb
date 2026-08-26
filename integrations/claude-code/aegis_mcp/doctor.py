@@ -198,6 +198,55 @@ def check_registration(rep: Report, root):
     rep.add("mcp entry", OK, "`memory` registered in .mcp.json")
 
 
+def check_mcp_runs(rep: Report, root, timeout_s: float = 60.0):
+    """Start the registered `memory` server and complete one handshake.
+
+    The entry in `.mcp.json` being present says nothing about the command in it
+    being runnable, and Claude Code reports a server that fails to start as
+    simply absent — the tools do not appear, and no reason is given anywhere.
+    An `initialize` exchange is the smallest thing that proves the launcher
+    execs, the package resolves, the SDK imports and the process speaks the
+    protocol Claude Code will speak to it.
+    """
+    doc = _load_json(os.path.join(root, ".mcp.json"))
+    entry = ((doc or {}).get("mcpServers") or {}).get("memory") if doc else None
+    if not isinstance(entry, dict) or not entry.get("command"):
+        rep.add("mcp runs", SKIP, "no `memory` server to start")
+        return
+    import subprocess
+    argv = [entry["command"], *(entry.get("args") or [])]
+    hello = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                   "clientInfo": {"name": "aegisdb-doctor", "version": "0"}}})
+    try:
+        r = subprocess.run(argv, input=hello + "\n", text=True,
+                           capture_output=True, timeout=timeout_s, cwd=root,
+                           env=dict(os.environ, **(entry.get("env") or {})))
+    except subprocess.TimeoutExpired:
+        rep.add("mcp runs", WARN,
+                f"the memory server did not answer in {timeout_s:.0f}s",
+                "a first `uvx` fetch can be slow — re-run")
+        return
+    except (OSError, FileNotFoundError) as exc:
+        rep.add("mcp runs", FAIL, f"cannot start `{argv[0]}`: {exc}")
+        return
+    out = r.stdout or ""
+    if '"result"' in out and '"serverInfo"' in out:
+        rep.add("mcp runs", OK, "the memory server completes a handshake")
+        return
+    # Exit status is not the signal here: the server is a stdio process and the
+    # pipe closing takes it down, so it can exit non-zero having worked fine.
+    said = (r.stderr or "").strip().splitlines()
+    rep.add("mcp runs", FAIL,
+            "the memory server did not complete a handshake — Claude Code "
+            "would show no memory tools at all",
+            said[-1] if said else
+            "it printed nothing: the command in .mcp.json cannot start. Try "
+            "`aegisdb-init` again — it now proves the launcher before writing "
+            "it, and falls back to `python -m` when the console script fails.")
+
+
 def check_hooks(rep: Report, root):
     """Recall and capture. A missing hook is the quietest failure here: nothing
     is injected, nothing is stored, and nothing anywhere says so.
@@ -211,18 +260,15 @@ def check_hooks(rep: Report, root):
         return None
     hooks = (doc or {}).get("hooks") or {}
     missing, found_cmd = [], {}
-    # Both supported wirings, because both are documented and this used to
-    # recognise only the first: the packaged console script (`uvx --from
-    # aegisdb-mcp aegisdb-recall-hook`) and the path-run script a checkout uses
-    # (`python3 "$CLAUDE_PROJECT_DIR/…/hooks/recall_hook.py"`). Missing the
-    # second reported a correctly wired project as unwired — and sent it to
-    # `aegisdb-init`, which would then add the console-script hook *beside* the
-    # working one, so every turn recalled twice and every session captured twice.
+    # Every wiring the scaffolder can write, plus the path-run one a checkout
+    # uses — taken from `init.HOOK_FORMS` rather than restated, because a second
+    # list drifts and the drift is invisible in the worst way: a correctly wired
+    # project reported as unwired, with advice that adds the duplicate. This
+    # module has already shipped that bug once.
+    from .init import HOOK_FORMS
     for event, needles, label in (
-            ("UserPromptSubmit", ("aegisdb-recall-hook", "recall_hook.py"),
-             "recall"),
-            ("SessionEnd", ("aegisdb-capture-hook", "capture_hook.py"),
-             "capture")):
+            ("UserPromptSubmit", HOOK_FORMS["recall"], "recall"),
+            ("SessionEnd", HOOK_FORMS["capture"], "capture")):
         cmd = next((h.get("command") for group in hooks.get(event, [])
                     for h in group.get("hooks", [])
                     if any(n in (h.get("command") or "") for n in needles)),
@@ -345,36 +391,90 @@ def check_read_path(rep: Report, cfg, tools, online: bool):
             f"on via {cfg.extract_mode}, {len(vocab or [])} predicate(s)")
 
 
-def check_round_trip(rep: Report, tools, enabled: bool):
-    """Save, find it, remove it. The only check that proves the whole chain.
+def check_round_trip(rep: Report, tools, enabled: bool, recall_cmd=None,
+                     root=None):
+    """Save a memory, then make the *hook* recall it, then remove it.
 
-    Everything above can pass on a server this project cannot actually write to
-    — a namespaced token pointing elsewhere, a read-only token, a full quota.
+    The only check that proves the chain end to end, and the reason it goes
+    through the hook rather than the library: a hook is contracted to exit 0
+    whatever happens, so `hook runs` can only show that the command started.
+    Started and worked are different things — a launcher that execs but resolves
+    a broken environment, a config the hook reads differently from this process,
+    a namespace mismatch between write and read: each of those leaves the hook
+    exiting 0 and injecting nothing, every turn, in silence.
+
+    A probe token makes the assertion exact. It is one unusual word planted in
+    the memory and repeated in the prompt, so the match does not depend on
+    stemming, on embeddings, or on what else is in the store — the hook either
+    hands back the token or it does not.
     """
     if not enabled:
         rep.add("round trip", SKIP, "--no-write")
         return
-    marker = "aegisdb-doctor round trip; safe to delete"
-    saved = tools.save(marker, tags=["aegisdb-doctor"], importance=0.0)
+    import uuid
+    token = "aegisdbprobe" + uuid.uuid4().hex[:10]
+    saved = tools.save(f"{token} — aegisdb-doctor probe, safe to delete",
+                       tags=["aegisdb-doctor"], importance=0.0)
     if not saved.get("ok"):
         rep.add("round trip", FAIL, f"save refused: {saved.get('message') or saved}",
                 "check the auth token and the server's quotas")
         return
     mem_id = saved["id"]
-    found = tools.search(tags=["aegisdb-doctor"], top_k=5)
-    hit = any(m.get("id") == mem_id for m in found.get("memories", []))
-    removed = tools.delete(mem_id).get("ok")
-    if not hit:
-        rep.add("round trip", FAIL,
-                f"saved record {mem_id} but a tag search did not find it",
-                "the write and the read are not seeing the same namespace")
-        return
-    if not removed:
-        rep.add("round trip", WARN,
-                f"round trip worked, but test record {mem_id} could not be "
-                f"deleted", f"remove it by hand: it is tagged `aegisdb-doctor`")
-        return
-    rep.add("round trip", OK, f"saved, found and removed record {mem_id}")
+    try:
+        found = tools.search(tags=["aegisdb-doctor"], top_k=5)
+        if not any(m.get("id") == mem_id for m in found.get("memories", [])):
+            rep.add("round trip", FAIL,
+                    f"saved record {mem_id} but a tag search did not find it",
+                    "the write and the read are not seeing the same namespace")
+            return
+        if not recall_cmd:
+            rep.add("round trip", WARN,
+                    f"saved and found record {mem_id}, but there is no recall "
+                    f"hook to try it through",
+                    "the library reaches the store; nothing proves a session "
+                    "would")
+            return
+        if not getattr(tools.config, "recall_enabled", True):
+            rep.add("round trip", WARN,
+                    f"saved and found record {mem_id}; recall_enabled is off, "
+                    f"so the hook was not asked")
+            return
+        got, why = _recall_through_hook(recall_cmd, root, token)
+        if got is None:
+            rep.add("round trip", FAIL,
+                    f"the recall hook could not be run: {why}")
+            return
+        if token not in got:
+            rep.add("round trip", FAIL,
+                    "the hook did not recall a memory written seconds ago — "
+                    "it exits cleanly and injects nothing, which is what a "
+                    "session sees",
+                    "run the hook command by hand with "
+                    '{"prompt": "<the token>"} on stdin; if that works, the '
+                    "difference is the environment Claude Code runs it in")
+            return
+    finally:
+        if not tools.delete(mem_id).get("ok"):
+            rep.add("cleanup", WARN,
+                    f"probe record {mem_id} could not be deleted",
+                    "remove it by hand: it is tagged `aegisdb-doctor`")
+    rep.add("round trip", OK,
+            f"saved record {mem_id}, recalled it through the hook, removed it")
+
+
+def _recall_through_hook(recall_cmd, root, token, timeout_s: float = 60.0):
+    """`(stdout, None)` from the recall hook for a prompt naming `token`."""
+    import subprocess
+    event = json.dumps({"prompt": f"what is {token}?", "cwd": root})
+    try:
+        r = subprocess.run(recall_cmd, shell=True, input=event, text=True,
+                           capture_output=True, timeout=timeout_s, cwd=root,
+                           env=dict(os.environ, CLAUDE_PROJECT_DIR=root or "."))
+    except subprocess.TimeoutExpired:
+        return None, f"it did not finish in {timeout_s:.0f}s"
+    except OSError as exc:
+        return None, str(exc)
+    return (r.stdout or ""), None
 
 
 def run(env=None, cwd=None, write=True) -> Report:
@@ -392,6 +492,7 @@ def run(env=None, cwd=None, write=True) -> Report:
     check_dimension(rep, cfg, ping)
     check_embeddings(rep, cfg)
     check_registration(rep, root)
+    check_mcp_runs(rep, root)
     recall_cmd = check_hooks(rep, root)
     check_hook_runs(rep, root, recall_cmd)
     check_read_path(rep, cfg, tools, ping is not None)
@@ -400,7 +501,7 @@ def run(env=None, cwd=None, write=True) -> Report:
         # once. Repeating it as a second failure would double-count one fault.
         rep.add("round trip", SKIP, "the server is unreachable")
     else:
-        check_round_trip(rep, tools, write)
+        check_round_trip(rep, tools, write, recall_cmd, root)
     return rep
 
 

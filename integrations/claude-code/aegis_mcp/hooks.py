@@ -73,3 +73,26 @@ def capture() -> int:
     except Exception as exc:
         print(f"[aegis-mcp capture] {exc}", file=sys.stderr)
     return 0
+
+def main(argv: list[str] | None = None) -> int:
+    """`python -m aegis_mcp.hooks recall|capture`.
+
+    A second way to reach the same two functions, and the reason it exists is
+    launcher independence: the console scripts (`aegisdb-recall-hook`) go
+    through whatever `uvx`/`pip` installed as an executable, and a launcher that
+    cannot exec that shim takes both hooks down while `python -m` on the same
+    package keeps working. A hook wired this way survives that, and
+    `aegisdb-init` falls back to it when it finds the shim does not run.
+    """
+    argv = sys.argv[1:] if argv is None else argv
+    which = (argv[0] if argv else "").strip().lower()
+    if which == "recall":
+        return recall()
+    if which == "capture":
+        return capture()
+    print("usage: python -m aegis_mcp.hooks recall|capture", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

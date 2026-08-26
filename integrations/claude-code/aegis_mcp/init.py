@@ -31,24 +31,48 @@ from .config import derive_namespace, env_for_explicit_root, project_root
 _PLACEHOLDER_NAMESPACES = frozenset(
     {"default", "derived", "derive", "auto", "none", "blank"})
 
-RECALL_CMD = "uvx --from aegisdb-mcp aegisdb-recall-hook"
-CAPTURE_CMD = "uvx --from aegisdb-mcp aegisdb-capture-hook"
+#: How a scaffolded project reaches this package. Two forms, because one of
+#: them can fail on a machine where the other works: `script` runs the console
+#: shims `uvx`/`pip` installed, `module` runs the same code through `python -m`.
+#: A launcher that cannot exec a shim takes the whole integration down —
+#: silently, since a hook that never starts prints nothing and Claude Code says
+#: nothing — while the module form on the same package keeps working. `auto`
+#: proves one before writing it.
+LAUNCHERS = {
+    "script": {
+        "recall": "uvx --from aegisdb-mcp aegisdb-recall-hook",
+        "capture": "uvx --from aegisdb-mcp aegisdb-capture-hook",
+        "mcp": ("uvx", ["aegisdb-mcp"]),
+    },
+    "module": {
+        "recall": "uvx --from aegisdb-mcp python -m aegis_mcp.hooks recall",
+        "capture": "uvx --from aegisdb-mcp python -m aegis_mcp.hooks capture",
+        "mcp": ("uvx", ["--from", "aegisdb-mcp", "python", "-m",
+                        "aegis_mcp.server"]),
+    },
+}
+
+RECALL_CMD = LAUNCHERS["script"]["recall"]
+CAPTURE_CMD = LAUNCHERS["script"]["capture"]
 
 
-def _capture_command(capture_env: dict | None) -> str:
+def _capture_command(capture_env: dict | None,
+                     launcher: str = "script") -> str:
     """The SessionEnd capture command, with any config env vars prefixed onto it.
     The hooks don't inherit the MCP server's env, and Claude Code hook entries
     have no separate env field, so config that must reach the capture hook (e.g.
     AEGIS_EXTRACT_MODE) is set inline on the command — which the shell applies."""
+    base = LAUNCHERS[launcher]["capture"]
     if not capture_env:
-        return CAPTURE_CMD
+        return base
     prefix = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in capture_env.items())
-    return f"{prefix} {CAPTURE_CMD}"
+    return f"{prefix} {base}"
 
 
 def build_mcp_config(*, host: str, port: int, namespace: str = "",
                      auth_token: str = "", embedding_mode: str = "none",
-                     embedding_dim: int = 1024) -> dict:
+                     embedding_dim: int = 1024,
+                     launcher: str = "script") -> dict:
     """Build the `memory` MCP server entry. Namespace is omitted when blank (an
     auth token's namespace is authoritative); the auth token / embedding env are
     only included when set, so nothing empty is written."""
@@ -60,7 +84,8 @@ def build_mcp_config(*, host: str, port: int, namespace: str = "",
     if embedding_mode and embedding_mode != "none":
         env["AEGIS_EMBEDDING_MODE"] = embedding_mode
         env["AEGIS_EMBEDDING_DIMENSIONS"] = str(embedding_dim)
-    return {"command": "uvx", "args": ["aegisdb-mcp"], "env": env}
+    command, args = LAUNCHERS[launcher]["mcp"]
+    return {"command": command, "args": list(args), "env": env}
 
 
 def build_project_config(*, namespace: str, host: str, port: int,
@@ -191,32 +216,63 @@ def merge_mcp(existing: dict, entry: dict, *, force: bool) -> tuple[dict, str]:
     return out, "updated" if current is not None else "added"
 
 
-def merge_hooks(settings: dict, capture_env: dict | None = None) -> tuple[dict, int]:
+#: Every wiring of a hook this project recognises. The first two are the forms
+#: `aegisdb-init` writes (console script and `python -m`); the third is the
+#: path-run script a checkout uses. Matching all three is what keeps a second
+#: hook from being added beside a working one — two would recall twice into a
+#: single turn and capture the same session twice.
+#:
+#: Public because `aegisdb-doctor` matches against the same set. Two lists
+#: drift, and the drift is invisible in the worst way: the doctor reports a
+#: correctly wired project as unwired, and its advice adds the duplicate.
+HOOK_FORMS = {
+    "recall": ("aegisdb-recall-hook", "aegis_mcp.hooks recall", "recall_hook.py"),
+    "capture": ("aegisdb-capture-hook", "aegis_mcp.hooks capture",
+                "capture_hook.py"),
+}
+#: The subset above that this scaffolder generates, and may therefore rewrite.
+_OURS = {"recall": HOOK_FORMS["recall"][:2],
+         "capture": HOOK_FORMS["capture"][:2]}
+
+
+def _find_hook(groups, needles):
+    for g in groups:
+        for h in g.get("hooks", []):
+            cmd = h.get("command") or ""
+            if any(n in cmd for n in needles):
+                return h
+    return None
+
+
+def merge_hooks(settings: dict, capture_env: dict | None = None,
+                launcher: str = "script") -> tuple[dict, int]:
     """Merge the recall/capture hooks into a settings.json dict without touching
-    unrelated hooks. Returns (new_dict, changed_count). The capture hook may carry
-    inline config env (see `capture_env`); an existing AegisDB hook is matched by
-    its base command and updated in place if the env changed — so re-running with,
-    say, extraction toggled updates it rather than adding a duplicate."""
+    unrelated hooks. Returns (new_dict, changed_count).
+
+    Three outcomes per hook, and the third is the one that matters:
+
+    - nothing there yet: add it;
+    - one of *our* forms is there: update it in place, so re-running with the
+      env or the launcher changed rewrites rather than duplicates;
+    - a hook we recognise but did not write — the path-run script a checkout
+      uses — is **left exactly as it is**. It works, it was chosen, and adding
+      ours beside it would recall twice into every turn.
+    """
     out = json.loads(json.dumps(settings)) if settings else {}
     hooks = out.setdefault("hooks", {})
     changed = 0
-    plan = [("UserPromptSubmit", RECALL_CMD, RECALL_CMD),
-            ("SessionEnd", CAPTURE_CMD, _capture_command(capture_env))]
-    for event, base, command in plan:
+    plan = [("UserPromptSubmit", "recall", LAUNCHERS[launcher]["recall"]),
+            ("SessionEnd", "capture", _capture_command(capture_env, launcher))]
+    for event, kind, command in plan:
         groups = hooks.setdefault(event, [])
-        target = None
-        for g in groups:
-            for h in g.get("hooks", []):
-                if base in (h.get("command") or ""):
-                    target = h
-                    break
-            if target:
-                break
+        target = _find_hook(groups, _OURS[kind])
         if target is None:
+            if _find_hook(groups, HOOK_FORMS[kind]) is not None:
+                continue  # somebody else's working wiring: leave it alone
             groups.append({"hooks": [{"type": "command", "command": command}]})
             changed += 1
         elif target.get("command") != command:
-            target["command"] = command  # env prefix changed (e.g. extraction on/off)
+            target["command"] = command  # env prefix or launcher changed
             changed += 1
     return out, changed
 
@@ -356,6 +412,56 @@ def _pings(host: str, port: int) -> bool:
         return False
 
 
+def launcher_works(launcher: str, timeout_s: float = 45.0) -> bool:
+    """Does a scaffolded project reach this package through `launcher`?
+
+    Asks the MCP server command to complete one `initialize` handshake, because
+    that is the strictest thing available without a server or a config: it
+    proves the launcher execs, the package resolves, the SDK imports, and the
+    process speaks the protocol Claude Code will speak to it.
+
+    Worth doing at all because the failure it guards against is invisible. A
+    console-script shim that a launcher cannot exec produces no output and no
+    log; the hooks then do nothing in every session, the MCP tools never
+    appear, and every file on disk looks right. Better to find that here, where
+    a fallback is one line away, than to leave someone with a wired project and
+    no memory.
+    """
+    import subprocess
+    command, args = LAUNCHERS[launcher]["mcp"]
+    hello = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                   "clientInfo": {"name": "aegisdb-init", "version": "0"}}}) + "\n"
+    try:
+        r = subprocess.run([command, *args], input=hello, text=True,
+                           capture_output=True, timeout=timeout_s)
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+    # A handshake, not just an exit code: the server stays up for stdio, so it
+    # is killed by the pipe closing and its status says little either way.
+    return '"result"' in (r.stdout or "") and '"serverInfo"' in (r.stdout or "")
+
+
+def resolve_launcher(choice: str) -> tuple[str, str]:
+    """(launcher, note). `auto` prefers the console scripts and proves them."""
+    if choice in LAUNCHERS:
+        return choice, ""
+    if launcher_works("script"):
+        return "script", ""
+    if launcher_works("module"):
+        return "module", (
+            "the `uvx aegisdb-mcp` console script did not complete an MCP "
+            "handshake here, so this project is wired through `python -m` "
+            "instead — same package, same behaviour, one less shim. Force "
+            "either form with --launcher script|module.")
+    return "script", (
+        "neither `uvx aegisdb-mcp` nor `uvx --from aegisdb-mcp python -m "
+        "aegis_mcp.server` completed a handshake — writing the standard "
+        "wiring anyway, but expect the memory tools and both hooks to do "
+        "nothing until `uvx` works. Check with: uvx aegisdb-mcp < /dev/null")
+
+
 def _server_dimension(host: str, port: int):
     """The server's `--embedding-dim`, or None if it cannot say.
 
@@ -426,6 +532,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="print what would be written; change nothing")
     ap.add_argument("--no-verify", action="store_true",
                     help="skip the post-write connectivity check")
+    ap.add_argument("--launcher", choices=["auto", "script", "module"],
+                    default="auto",
+                    help="how the scaffolded project runs this package: the "
+                         "console scripts (`script`), `python -m` (`module`), "
+                         "or `auto` — try the first and fall back if it cannot "
+                         "complete an MCP handshake")
     ap.add_argument("--start-local", action="store_true",
                     help="if nothing answers on the local port, start AegisDB "
                          "in Docker (named container `aegisdb`, volume "
@@ -539,11 +651,20 @@ def main(argv: list[str] | None = None) -> int:
     # beside one would be a value nothing reads.
     pinned = namespace or ("" if auth_token else derive_namespace(env=env, cwd=proj))
 
+    # Which launcher before what to write with it: `auto` proves the console
+    # scripts can actually complete a handshake, and silently writing a wiring
+    # that cannot run is the failure this whole step exists to prevent. Skipped
+    # for --print, which must not spawn anything.
+    launcher, launcher_note = (
+        (args.launcher if args.launcher in LAUNCHERS else "script", "")
+        if args.dry else resolve_launcher(args.launcher))
+
     entry = build_mcp_config(host=host, port=port, namespace=pinned,
                              auth_token=auth_token, embedding_mode=embedding_mode,
-                             embedding_dim=embedding_dim)
+                             embedding_dim=embedding_dim, launcher=launcher)
     mcp_doc, mcp_status = merge_mcp(_load_json(mcp_path), entry, force=args.force)
-    settings_doc, hooks_added = merge_hooks(_load_json(settings_path), capture_env)
+    settings_doc, hooks_added = merge_hooks(_load_json(settings_path), capture_env,
+                                            launcher)
     cfg_doc, cfg_changed = merge_project_config(
         _load_json(cfg_path),
         build_project_config(namespace=pinned, host=host, port=port,
@@ -595,6 +716,10 @@ def main(argv: list[str] | None = None) -> int:
           f"<path>/{config_mod.PROJECT_DIR}/predicates.json (it reads the file, "
           f"not this config), then drop corpora in "
           f"{config_mod.PROJECT_DIR}/facts/ and run `aegisdb-seed`.")
+    if launcher_note:
+        print(f"! {launcher_note}", file=sys.stderr)
+    elif launcher != "script":
+        print(f"• launcher: {launcher} (forced with --launcher)")
     if not args.no_verify:
         print(f"• server ping: {_verify(host, port)}")
     print("\nDone. Restart Claude Code in this project to pick up the memory "
