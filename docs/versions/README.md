@@ -12,10 +12,16 @@ image tags, the immutable digest, and GitHub's auto-generated commit changelog.
 So the file is the release announcement — write it for someone deciding whether
 to upgrade, not as a commit log.
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
 - **The tag must point at a commit that already contains its own notes.** Add the
   file, merge it, *then* tag. Tagging first publishes a release without them.
+- **Bump `integrations/claude-code/.claude-plugin/plugin.json` in the same PR.**
+  Nothing about tagging or publishing touches it, and the Claude Code plugin
+  marketplace serves it straight off the default branch — so a stale version is
+  what every new `/plugin install` reports. `tests/unit/test_plugin_manifest.py`
+  ties it to the newest notes file, so adding these notes is what makes the
+  check fail until the bump lands beside them.
 - **A missing file warns, it does not fail.** The tag and the image are already
   published by the time the body is composed, so the release still happens with
   image details only. The body can be edited on GitHub afterwards — but the
