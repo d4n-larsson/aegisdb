@@ -5,6 +5,7 @@ event on stdin and asserting the stdout/exit-code contract in contracts/hooks.md
 """
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -36,9 +37,39 @@ def _server_env(srv, namespace="hook-ns", mode="fake", **extra):
         # assertions below are about what got STORED, which needs the work
         # finished before the hook returns.
         "AEGIS_CAPTURE_DETACH": "0",
+        # Pinned because a capture worker resolves config through
+        # `CLAUDE_PROJECT_DIR` when it is set, which in a Claude Code session is
+        # this repo -- whose own .aegisdb/config.json runs `extract_mode:
+        # claude-code`. Unpinned, the suite shells out to a real model: minutes
+        # of latency, a bill, and a test whose result depends on a checked-in
+        # config it never mentions.
+        "AEGIS_EXTRACT_MODE": "none", "AEGIS_SUMMARY_MODE": "none",
     }
     env.update({k: str(v) for k, v in extra.items()})
     return env
+
+
+def _await_worker(stderr, timeout=10.0):
+    """Block until the worker the hook announced has exited.
+
+    The worker reads the transcript *after* the hook returns, so a test that
+    deletes it on return is racing a process it just asserted exists (the same
+    constraint `TestCaptureHookDetachedE2E` documents). It is not our child --
+    it has its own session and was reparented -- so existence is probed with
+    signal 0 rather than waited on. No announcement means no fork, and nothing
+    to wait for.
+    """
+    m = re.search(rb"detached \(pid (\d+)\)", stderr or b"")
+    if not m:
+        return
+    pid = int(m.group(1))
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.05)
 
 
 def _write_transcript(lines):
@@ -70,6 +101,29 @@ class TestRecallHookContract(unittest.TestCase):
             out = json.loads(proc.stdout.decode())
             self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
             self.assertIn("make ship", out["hookSpecificOutput"]["additionalContext"])
+
+    def test_injects_nothing_inside_a_capture(self):
+        """A capture that shells out to a model starts a session, and that
+        session's prompt does not want memories injected into it.
+
+        Written as an A/B against `test_injects_additional_context` above --
+        same server, same seeded memory, same prompt, only the mark differs --
+        because the negative alone proves nothing: a recall hook that is simply
+        broken prints nothing too, and so does one aimed at an empty namespace.
+        The control has to inject before the refusal means anything.
+        """
+        with AegisServer() as srv:
+            self._seed(srv, "hook-ns")
+            event = {"hook_event_name": "UserPromptSubmit",
+                     "prompt": "how do I deploy the project?", "cwd": os.getcwd()}
+            env = _server_env(srv)
+            control = _run_hook(RECALL_HOOK, event, env)
+            self.assertIn("make ship", control.stdout.decode())
+
+            marked = _run_hook(RECALL_HOOK, event,
+                               {**env, "AEGIS_CAPTURE_ACTIVE": "1"})
+            self.assertEqual(marked.returncode, 0)
+            self.assertEqual(marked.stdout.decode().strip(), "")
 
     def test_no_match_empty_output_exit0(self):
         with AegisServer() as srv:
@@ -244,20 +298,42 @@ class TestCaptureHookDetachedE2E(unittest.TestCase):
 # whose end fires this hook again. Detached (above), each generation outlives the
 # process group Claude Code kills, so the tree grows unreaped until the machine
 # is out of processes -- observed as an IDE dying. Both hooks therefore refuse to
-# run inside a capture. No server needed: the refusal comes before any of that.
+# run inside a capture; the recall half of that is asserted against a live server
+# in TestRecallHookContract, where a control can prove the refusal is not just a
+# hook that never injects anything. No server is needed for the capture half: the
+# refusal comes before the config load and before the fork.
 class TestHooksRefuseToRunInsideACapture(unittest.TestCase):
     def _capture(self, env):
         transcript = _write_transcript([
             ("assistant", "We decided to use tabs for indentation going forward."),
         ])
-        self.addCleanup(lambda: os.path.exists(transcript) and os.remove(transcript))
         event = {"hook_event_name": "SessionEnd", "cwd": os.getcwd(),
                  "transcript_path": transcript}
-        # An address nothing answers on: the control forks a real worker, which
-        # should give up rather than linger past the test.
+        # Every one of these is pinned rather than inherited, because the
+        # ambient environment decides the very thing being measured:
+        #
+        #   CAPTURE_DETACH  the control asserts a fork happened. `0` is what the
+        #                   README tells operators to export and what
+        #                   `_server_env` sets, and under it nothing forks --
+        #                   the control fails and the guard test passes vacuously.
+        #   EXTRACT/SUMMARY a worker prefers CLAUDE_PROJECT_DIR over `cwd`, which
+        #                   in a Claude Code session is this repo, whose
+        #                   .aegisdb/config.json sets `extract_mode:
+        #                   claude-code`. A test asserting captures do not spawn
+        #                   `claude` must not itself spawn `claude`.
+        #   HOST/PORT       an address nothing answers on, so the control's
+        #                   worker gives up instead of reaching a real store.
         base = {"AEGIS_HOST": "127.0.0.1", "AEGIS_PORT": "1",
-                "AEGIS_EMBEDDING_MODE": "fake", "AEGIS_NAMESPACE": "recursion-ns"}
-        return _run_hook(CAPTURE_HOOK, event, {**base, **env})
+                "AEGIS_EMBEDDING_MODE": "fake", "AEGIS_NAMESPACE": "recursion-ns",
+                "AEGIS_CAPTURE_DETACH": "1",
+                "AEGIS_EXTRACT_MODE": "none", "AEGIS_SUMMARY_MODE": "none"}
+        try:
+            proc = _run_hook(CAPTURE_HOOK, event, {**base, **env})
+            _await_worker(proc.stderr)  # it reads the transcript after we return
+            return proc
+        finally:
+            if os.path.exists(transcript):
+                os.remove(transcript)
 
     def test_a_marked_capture_starts_no_worker(self):
         proc = self._capture({"AEGIS_CAPTURE_ACTIVE": "1"})
@@ -272,13 +348,6 @@ class TestHooksRefuseToRunInsideACapture(unittest.TestCase):
 
     def test_off_is_a_value_the_mark_can_hold(self):
         self.assertIn(b"detached", self._capture({"AEGIS_CAPTURE_ACTIVE": "0"}).stderr)
-
-    def test_recall_injects_nothing_inside_a_capture(self):
-        event = {"hook_event_name": "UserPromptSubmit", "cwd": os.getcwd(),
-                 "prompt": "how do I deploy the project?"}
-        proc = _run_hook(RECALL_HOOK, event, {"AEGIS_CAPTURE_ACTIVE": "1"})
-        self.assertEqual(proc.returncode, 0)
-        self.assertEqual(proc.stdout.decode().strip(), "")
 
 
 if __name__ == "__main__":

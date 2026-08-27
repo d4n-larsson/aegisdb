@@ -40,13 +40,21 @@ def supports_safe_mode() -> bool:
     invocation: passing it blind would fail every completion and silently drop
     capture to its heuristic path. Unknown reads as unsupported — the environment
     mark still stops the recursion on its own.
+
+    Both streams are searched and a clean exit is required, so that a wrapper
+    printing help on stderr is still read correctly and a `--help` that errors is
+    not mined for a flag it never listed. The timeout is short because it is not
+    counted against the caller's own budget: the first completion of a worker
+    spends this before extraction's 120s (or distillation's 90s) even starts, and
+    the cache is per-process, so every detached capture pays it once.
     """
     global _safe_mode_supported
     if _safe_mode_supported is None:
         try:
             r = subprocess.run(["claude", "--help"], capture_output=True,
-                               text=True, timeout=30)
-            _safe_mode_supported = SAFE_MODE in (r.stdout or "")
+                               text=True, timeout=10)
+            help_text = (r.stdout or "") + (r.stderr or "")
+            _safe_mode_supported = r.returncode == 0 and SAFE_MODE in help_text
         except (subprocess.TimeoutExpired, OSError):
             _safe_mode_supported = False
     return _safe_mode_supported

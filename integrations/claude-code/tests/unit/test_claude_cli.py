@@ -6,6 +6,7 @@ fires SessionEnd, captures, and shells out again — with the worker detached fr
 the hook's process group, so the tree grows unreaped until the machine gives up.
 """
 import os
+import subprocess
 import sys
 import unittest
 from unittest import mock
@@ -41,15 +42,38 @@ class TestHeadlessCommand(_ProbeReset):
         claude_cli._safe_mode_supported = False
         self.assertEqual(headless_cmd("why?"), ["claude", "-p", "why?"])
 
+    def _probe(self, **help_result):
+        with mock.patch("aegis_mcp.claude_cli.subprocess.run") as run:
+            run.return_value = mock.Mock(**help_result)
+            return claude_cli.supports_safe_mode(), run
+
     def test_support_is_probed_once_then_cached(self):
         with mock.patch("aegis_mcp.claude_cli.subprocess.run") as run:
-            run.return_value = mock.Mock(stdout="  --safe-mode  Start with ...")
+            run.return_value = mock.Mock(returncode=0, stderr="",
+                                         stdout="  --safe-mode  Start with ...")
             self.assertTrue(claude_cli.supports_safe_mode())
             self.assertTrue(claude_cli.supports_safe_mode())
         self.assertEqual(run.call_count, 1)
 
+    def test_help_on_stderr_is_still_help(self):
+        """A wrapper that prints usage to stderr must not cost us the flag."""
+        found, _ = self._probe(returncode=0, stdout="",
+                               stderr="  --safe-mode  Start with ...")
+        self.assertTrue(found)
+
+    def test_a_failing_help_is_not_mined_for_flags(self):
+        """Non-zero means we do not know what this CLI accepts, so assume less."""
+        found, _ = self._probe(returncode=1, stderr="",
+                               stdout="  --safe-mode  Start with ...")
+        self.assertFalse(found)
+
     def test_an_unprobeable_cli_reads_as_unsupported(self):
         with mock.patch("aegis_mcp.claude_cli.subprocess.run", side_effect=OSError):
+            self.assertFalse(claude_cli.supports_safe_mode())
+
+    def test_a_hanging_help_does_not_hang_the_capture(self):
+        with mock.patch("aegis_mcp.claude_cli.subprocess.run",
+                        side_effect=subprocess.TimeoutExpired("claude", 10)):
             self.assertFalse(claude_cli.supports_safe_mode())
 
 

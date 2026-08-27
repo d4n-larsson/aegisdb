@@ -271,10 +271,13 @@ A capture never triggers a capture. With `extract_mode` (or `summary_mode`) set
 to `claude-code` it asks a model by running `claude -p`, and that is a session
 whose end fires this hook again — so the capture marks its environment
 (`AEGIS_CAPTURE_ACTIVE=1`, inherited by everything it spawns) and both hooks
-return immediately when they see the mark, while the `claude` it starts runs with
-`--safe-mode` and loads no hooks at all. Without those stops every generation
-starts several more, detached from any process group still being reaped, until
-the machine is out of processes. Do not export `AEGIS_CAPTURE_ACTIVE` yourself:
+return immediately when they see the mark. The `claude` it starts is also given
+`--safe-mode`, which loads no hooks at all — but only where the CLI on PATH
+offers that flag, since a version predating it would reject the whole invocation,
+so it is probed rather than assumed. Where it is missing the environment mark is
+the only stop, and it is enough on its own. Without them every generation starts
+several more, detached from any process group still being reaped, until the
+machine is out of processes. Do not export `AEGIS_CAPTURE_ACTIVE` yourself:
 a `1` in your shell turns off capture and recall for everything started from it.
 
 ### 6. Confirm it works
