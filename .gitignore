@@ -22,6 +22,11 @@ metadata.db
 # Local docker-compose config (per-deployment; instantiate from .env.example).
 # The example is committed; a real .env may hold tokens, so keep it local.
 .env
+# The overlay .env's AEGIS_EXTRA_ARGS pairs with: bind mounts and host paths that
+# are true of one machine. Compose loads it automatically whenever it is present,
+# so a committed one would silently rewrite every other deployment's volumes.
+docker-compose.override.yml
+docker-compose.override.yaml
 
 # Spec-kit workflow artifacts — kept local, never published
 /specs/
