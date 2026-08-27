@@ -240,5 +240,46 @@ class TestCaptureHookDetachedE2E(unittest.TestCase):
             self.assertTrue(found, "detached worker stored nothing")
 
 
+# `extract_mode: claude-code` extracts by running `claude -p`, which is a session,
+# whose end fires this hook again. Detached (above), each generation outlives the
+# process group Claude Code kills, so the tree grows unreaped until the machine
+# is out of processes -- observed as an IDE dying. Both hooks therefore refuse to
+# run inside a capture. No server needed: the refusal comes before any of that.
+class TestHooksRefuseToRunInsideACapture(unittest.TestCase):
+    def _capture(self, env):
+        transcript = _write_transcript([
+            ("assistant", "We decided to use tabs for indentation going forward."),
+        ])
+        self.addCleanup(lambda: os.path.exists(transcript) and os.remove(transcript))
+        event = {"hook_event_name": "SessionEnd", "cwd": os.getcwd(),
+                 "transcript_path": transcript}
+        # An address nothing answers on: the control forks a real worker, which
+        # should give up rather than linger past the test.
+        base = {"AEGIS_HOST": "127.0.0.1", "AEGIS_PORT": "1",
+                "AEGIS_EMBEDDING_MODE": "fake", "AEGIS_NAMESPACE": "recursion-ns"}
+        return _run_hook(CAPTURE_HOOK, event, {**base, **env})
+
+    def test_a_marked_capture_starts_no_worker(self):
+        proc = self._capture({"AEGIS_CAPTURE_ACTIVE": "1"})
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn(b"detached", proc.stderr)  # nothing forked, nothing ran
+
+    def test_the_control_still_captures(self):
+        """Unmarked, the same session forks a worker -- the guard is not a mute."""
+        proc = self._capture({})
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn(b"detached", proc.stderr)
+
+    def test_off_is_a_value_the_mark_can_hold(self):
+        self.assertIn(b"detached", self._capture({"AEGIS_CAPTURE_ACTIVE": "0"}).stderr)
+
+    def test_recall_injects_nothing_inside_a_capture(self):
+        event = {"hook_event_name": "UserPromptSubmit", "cwd": os.getcwd(),
+                 "prompt": "how do I deploy the project?"}
+        proc = _run_hook(RECALL_HOOK, event, {"AEGIS_CAPTURE_ACTIVE": "1"})
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout.decode().strip(), "")
+
+
 if __name__ == "__main__":
     unittest.main()
