@@ -21,6 +21,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 
+from .claude_cli import child_env, headless_cmd  # never spawn `claude` bare
 from .summary import _looks_like_key  # shared offline key gate
 
 _ANTHROPIC_DEFAULT_MODEL = "claude-haiku-4-5-20251001"
@@ -946,7 +947,13 @@ class _LLMExtractionProvider(ExtractionProvider):
 
 class ClaudeCodeExtractionProvider(_LLMExtractionProvider):
     """Extract via the Claude Code CLI in headless mode — reuses the operator's
-    existing auth, no API key managed here. Requires `claude` on PATH."""
+    existing auth, no API key managed here. Requires `claude` on PATH.
+
+    Extraction runs inside a capture, so the session it starts must not start a
+    capture of its own — ``claude_cli`` is what keeps that from happening, and
+    why the command and environment come from there rather than being spelled
+    out here.
+    """
 
     def __init__(self, model: str = "", timeout_s: float = 120.0):
         self._model = model or ""
@@ -956,12 +963,10 @@ class ClaudeCodeExtractionProvider(_LLMExtractionProvider):
         return shutil.which("claude") is not None
 
     def _complete(self, prompt: str) -> str | None:
-        cmd = ["claude", "-p", prompt]
-        if self._model:
-            cmd += ["--model", self._model]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               timeout=self._timeout)
+            r = subprocess.run(headless_cmd(prompt, self._model),
+                               capture_output=True, text=True,
+                               timeout=self._timeout, env=child_env())
         except (subprocess.TimeoutExpired, OSError):
             return None
         return r.stdout if r.returncode == 0 else None

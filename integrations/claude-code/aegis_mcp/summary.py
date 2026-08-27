@@ -21,6 +21,8 @@ import os
 import shutil
 import subprocess
 
+from .claude_cli import child_env, headless_cmd  # never spawn `claude` bare
+
 
 def _looks_like_key(value) -> bool:
     """Cheap offline gate so a missing/placeholder key degrades the provider to
@@ -87,7 +89,12 @@ class ClaudeCodeSummaryProvider(SummaryProvider):
     """Summarize via the Claude Code CLI in headless print mode (`claude -p`).
 
     Reuses the operator's existing Claude Code install + auth, so no API key is
-    configured or stored in AegisDB. Requires the `claude` binary on PATH."""
+    configured or stored in AegisDB. Requires the `claude` binary on PATH.
+
+    Distillation runs inside a capture, so the session it starts must not start a
+    capture of its own — ``claude_cli`` is what keeps that from happening, and
+    why the command and environment come from there rather than being spelled out
+    here."""
 
     def __init__(self, model: str = "", timeout_s: float = 90.0):
         self._model = model or ""
@@ -100,12 +107,10 @@ class ClaudeCodeSummaryProvider(SummaryProvider):
         if not texts:
             return None
         prompt = _build_prompt(texts)
-        cmd = ["claude", "-p", prompt]
-        if self._model:
-            cmd += ["--model", self._model]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               timeout=self._timeout)
+            r = subprocess.run(headless_cmd(prompt, self._model),
+                               capture_output=True, text=True,
+                               timeout=self._timeout, env=child_env())
         except (subprocess.TimeoutExpired, OSError):
             return None
         out = (r.stdout or "").strip()

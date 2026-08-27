@@ -10,12 +10,35 @@ Recall answers inline — its whole output is the context it injects. Capture do
 not: it detaches into its own session and lets the hook return at once, because
 SessionEnd runs during shutdown and cancels a hook that is still working (see
 ``_detach``).
+
+A capture that shells out to Claude Code for extraction starts a session, and a
+session that ends fires this hook again: both entry points therefore refuse to
+run inside a capture (see ``CAPTURE_ACTIVE_ENV``).
 """
 from __future__ import annotations
 
 import json
 import os
 import sys
+
+#: Set in whichever process runs the capture, and inherited by everything it
+#: spawns. `extract_mode: claude-code` runs `claude -p` to extract, which is a
+#: session, whose end fires this hook, whose capture shells out again — and with
+#: the worker detached (see ``_detach``) nothing reaps the tree, so each round
+#: multiplies instead of ending. One generation is all a capture ever needs: the
+#: work happens here, not in the session it starts to ask a model a question.
+CAPTURE_ACTIVE_ENV = "AEGIS_CAPTURE_ACTIVE"
+
+
+def _capture_is_active() -> bool:
+    """True when this process was spawned by a capture already under way."""
+    return os.environ.get(CAPTURE_ACTIVE_ENV, "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+def _mark_capture_active() -> None:
+    """Claim the capture for this process tree, before any subprocess starts."""
+    os.environ[CAPTURE_ACTIVE_ENV] = "1"
 
 
 def _detach_enabled() -> bool:
@@ -97,6 +120,11 @@ def recall() -> int:
     except ValueError:
         return 0  # malformed event: proceed with no injected memory
 
+    # A session a capture started to ask a model a question is not a session
+    # whose prompt wants memories injected into it.
+    if _capture_is_active():
+        return 0
+
     try:
         from .config import load_config
         from .embeddings import make_provider
@@ -136,6 +164,12 @@ def capture() -> int:
     except ValueError:
         return 0
 
+    # The end of a session a capture started is not a session to capture. Before
+    # the config load, before the fork: this is the base case that stops one
+    # capture from becoming two, and four, and a machine out of processes.
+    if _capture_is_active():
+        return 0
+
     try:
         from .config import load_config
 
@@ -153,6 +187,10 @@ def capture() -> int:
         # not fork, and should not announce a worker it does not need.
         if _detach():
             return 0
+
+        # In the worker (or in this process when detaching is off): from here on
+        # a `claude` we spawn inherits the claim and captures nothing itself.
+        _mark_capture_active()
 
         from .embeddings import make_provider
         from .capture import run_capture

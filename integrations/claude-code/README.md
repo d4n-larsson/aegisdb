@@ -267,6 +267,19 @@ backend calls out to one. So its exit code means the capture *started*; point
 `AEGIS_CAPTURE_LOG` at a file to see how it went, or set
 `AEGIS_CAPTURE_DETACH=0` to run it inline.
 
+A capture never triggers a capture. With `extract_mode` (or `summary_mode`) set
+to `claude-code` it asks a model by running `claude -p`, and that is a session
+whose end fires this hook again — so the capture marks its environment
+(`AEGIS_CAPTURE_ACTIVE=1`, inherited by everything it spawns) and both hooks
+return immediately when they see the mark. The `claude` it starts is also given
+`--safe-mode`, which loads no hooks at all — but only where the CLI on PATH
+offers that flag, since a version predating it would reject the whole invocation,
+so it is probed rather than assumed. Where it is missing the environment mark is
+the only stop, and it is enough on its own. Without them every generation starts
+several more, detached from any process group still being reaped, until the
+machine is out of processes. Do not export `AEGIS_CAPTURE_ACTIVE` yourself:
+a `1` in your shell turns off capture and recall for everything started from it.
+
 ### 6. Confirm it works
 
 **Check the wiring first, in one command:**
@@ -550,6 +563,7 @@ its `fact`.
 | `AEGIS_CAPTURE_SCOPE` | `session` | `session` (SessionEnd) \| `turn` (Stop) |
 | `AEGIS_CAPTURE_MIN_SALIENCE` | `0.5` | below this, nothing is captured (heuristic path) |
 | `AEGIS_CAPTURE_DETACH` | `true` | capture forks into its own session and the hook returns at once. SessionEnd runs during shutdown and Claude Code **cancels** a hook still working ~1.5s in, which capture cannot beat: `local` embeddings reload the model in a fresh process and an extraction backend shells out to a model. `false` runs it inline, so the exit code means the capture finished — what tests want |
+| `AEGIS_CAPTURE_ACTIVE` | — | **set by capture, not by you.** Marks the process tree a capture already owns; both hooks return at once when they see it, which is what stops a `claude-code` extraction — a session — from ending, firing SessionEnd, and capturing again without limit. Exporting it in your own shell disables capture and recall for everything you start from there |
 | `AEGIS_CAPTURE_LOG` | — | append the detached worker's diagnostics (`stored N mem(s)`, triple counts) to this file. Its stderr is a pipe Claude Code stops reading when the hook returns, so without this a detached capture leaves no output anywhere |
 | `AEGIS_EXTRACT_MODE` | `none` | LLM fact extraction for capture: `none` (off → heuristic markers) \| `fake` (tests) \| `claude-code` \| `anthropic` \| `openai`. When on, a session is distilled into durable facts stored as **semantic** memories (so they dedup/supersede and resist decay) instead of raw marker-matched sentences |
 | `AEGIS_EXTRACT_MODEL` | — | optional model override for the extraction backend |
